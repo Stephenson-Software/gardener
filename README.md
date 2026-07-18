@@ -294,7 +294,9 @@ starting a duplicate; see "Orphaned work recovery" above.
 
 ### Other flags
 
-- `--model <name>` — override the model `claude` uses (`align` and `tend`).
+- `--model <name>` — override the model `claude` uses (`align`, `tend`, and
+  `overnight`, which threads it through to every `tend` dispatch in the
+  batch).
 - `--timeout <seconds>` — how long to wait for the dispatched run.
   `align`'s default is 1800s / 30 min (reading and analyzing a real repo
   against ~10 convention docs is not fast). `tend`'s default is 2700s / 45
