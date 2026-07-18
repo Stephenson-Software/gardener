@@ -10,11 +10,14 @@ from unittest.mock import patch
 from gardener.dispatch import (
     ALLOWED_PERMISSION_MODES,
     FORBIDDEN_PERMISSION_MODE,
+    MERGE_ALLOWED_TOOL,
     MODE_SPECS,
+    TEND_BASE_ALLOWED_TOOLS,
     DispatchError,
     Mode,
     _build_invocation,
     run_claude,
+    tend_mode_spec,
 )
 
 
@@ -93,8 +96,76 @@ class TestBuildInvocation(unittest.TestCase):
 
     def test_never_constructs_bypass_permissions_regardless_of_mode(self):
         for mode in Mode:
+            if mode not in MODE_SPECS:
+                # Mode.TEND has no fixed MODE_SPECS entry — its spec varies
+                # per invocation and must be built with tend_mode_spec()
+                # (see TestTendModeSpec below).
+                continue
             argv = _build_invocation(mode, "prompt", Path("/tmp"), [])
             self.assertNotIn("bypassPermissions", argv)
+
+
+class TestCreateDevLoopModeSpec(unittest.TestCase):
+    def test_has_write_but_no_bash_gh_pr_merge(self):
+        spec = MODE_SPECS[Mode.CREATE_DEV_LOOP]
+        self.assertIn("Write", spec.tools)
+        self.assertIn("Bash", spec.tools)
+        # gh pr list (read-only exploration, per create-dev-loop's own Step
+        # 2) is fine here — merge is the one gh pr subcommand this mode
+        # must never be able to reach.
+        for pattern in spec.allowed_tools:
+            self.assertFalse(pattern.startswith("Bash(gh pr merge"), pattern)
+        self.assertNotEqual(spec.permission_mode, FORBIDDEN_PERMISSION_MODE)
+        self.assertIn(spec.permission_mode, ALLOWED_PERMISSION_MODES)
+
+    def test_argv_builds_without_a_mode_spec_override(self):
+        argv = _build_invocation(Mode.CREATE_DEV_LOOP, "prompt", Path("/tmp"), [])
+        self.assertIn("Write", argv[argv.index("--tools") + 1].split(","))
+
+
+class TestTendModeSpec(unittest.TestCase):
+    def test_merge_tool_absent_when_not_eligible(self):
+        spec = tend_mode_spec(allow_merge_eligible=False)
+        self.assertNotIn(MERGE_ALLOWED_TOOL, spec.allowed_tools)
+
+    def test_merge_tool_present_only_when_eligible(self):
+        spec = tend_mode_spec(allow_merge_eligible=True)
+        self.assertIn(MERGE_ALLOWED_TOOL, spec.allowed_tools)
+
+    def test_base_allowed_tools_never_include_bare_gh_pr_wildcard(self):
+        # A bare "Bash(gh pr *)" would structurally re-permit merge via
+        # pattern matching regardless of eligibility (confirmed live — see
+        # dispatch.py's module docstring point 4) — tend must never use it.
+        self.assertNotIn("Bash(gh pr *)", TEND_BASE_ALLOWED_TOOLS)
+
+    def test_merge_pattern_never_leaks_into_base_list(self):
+        self.assertNotIn(MERGE_ALLOWED_TOOL, TEND_BASE_ALLOWED_TOOLS)
+
+    def test_no_askuserquestion_agent_or_schedulewakeup_in_tools(self):
+        for eligible in (True, False):
+            spec = tend_mode_spec(eligible)
+            for excluded in ("AskUserQuestion", "Agent", "ScheduleWakeup"):
+                self.assertNotIn(excluded, spec.tools)
+
+    def test_never_uses_bypass_permissions(self):
+        for eligible in (True, False):
+            spec = tend_mode_spec(eligible)
+            self.assertNotEqual(spec.permission_mode, FORBIDDEN_PERMISSION_MODE)
+            self.assertIn(spec.permission_mode, ALLOWED_PERMISSION_MODES)
+
+    def test_argv_reflects_eligibility_via_mode_spec_override(self):
+        argv_ineligible = _build_invocation(
+            Mode.TEND, "prompt", Path("/tmp"), [], mode_spec=tend_mode_spec(False)
+        )
+        argv_eligible = _build_invocation(
+            Mode.TEND, "prompt", Path("/tmp"), [], mode_spec=tend_mode_spec(True)
+        )
+        self.assertNotIn(MERGE_ALLOWED_TOOL, argv_ineligible[argv_ineligible.index("--allowedTools") + 1])
+        self.assertIn(MERGE_ALLOWED_TOOL, argv_eligible[argv_eligible.index("--allowedTools") + 1])
+
+    def test_tend_mode_requires_explicit_mode_spec(self):
+        with self.assertRaises(DispatchError):
+            run_claude(Mode.TEND, "prompt", Path("/tmp"))
 
 
 def _fake_completed(stdout_obj, returncode=0):

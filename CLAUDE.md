@@ -10,6 +10,19 @@ safety-gating layer around a dispatched `claude -p` run that does the
 actual reading/analysis/implementation. See `README.md` for the full CLI
 shape and safety model.
 
+gardener also has a second, distinct command, `tend`, that makes real,
+broader progress on a target repo by dispatching *that repo's own*
+`<slug>-dev-loop` Claude Code skill headlessly (rather than dms-conventions'
+alignment prompt) — for an eventual "tend to my garden overnight" use case,
+several repos dispatched in sequence, unattended. Its safety mechanics
+(`dev_loop.py`, `merge_allowlist.py`, `dispatch.py`'s `tend_mode_spec()`)
+follow the exact same "structural exclusion + explicit instruction" pattern
+`align` established, extended to a new problem `align` never had to solve:
+a dispatched dev-loop skill is written to stop and ask a human before
+merging, and headless dispatch has no human to ask. See README's Safety
+model section for what was actually tested and observed before this was
+trusted.
+
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.
@@ -76,20 +89,36 @@ record what you actually observed before changing the docstring's claims.
   `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir.
   `test_cli.py` covers argument parsing and prompt templating.
-- **Manual (required for anything touching `dispatch.py` or the prompt
-  template):** run a real `gardener align --repo <owner/repo>` in
-  report-only mode (no flags) against a low-stakes repo you have access
-  to, then confirm the target repo was not mutated:
-  `git -C <cached clone> status --porcelain` is empty, `git log` shows no
-  new commit, and `gh repo view <owner/repo> --json pushedAt` matches
-  what it was before the run. This is the actual verification gardener's
-  first working version was held to (see `README.md`'s
-  "Manual/end-to-end verification" section) — don't consider a
-  dispatch-layer change done without repeating it.
+  `test_dev_loop.py` covers slug derivation and prompt content, and
+  `test_merge_allowlist.py` covers the allow-list's JSON read/write — none
+  of these invoke `claude`, `git`, or `gh` either.
+- **Manual (required for anything touching `dispatch.py`, `dev_loop.py`, or
+  a prompt template/preamble):** run a real dispatch against a low-stakes
+  repo you have access to and confirm the target repo was not mutated
+  beyond what the mode is actually meant to do:
+  - `align` (no flags): `git -C <cached clone> status --porcelain` is
+    empty, `git log` shows no new commit, and
+    `gh repo view <owner/repo> --json pushedAt` matches what it was before
+    the run. This is the actual verification gardener's first working
+    version was held to (see `README.md`'s "Manual/end-to-end
+    verification" section) — don't consider a dispatch-layer change done
+    without repeating it.
+  - `tend` (no `--allow-merge`): confirm no merge occurred
+    (`gh pr list --state all` shows no new merged PR), confirm
+    `permission_denials` is empty or only contains attempts that were
+    correctly out of scope, and confirm the run did not hang — it should
+    return well inside `TEND_DEFAULT_TIMEOUT_SECONDS`.
+  - `tend --allow-merge`: only run this against a repo you've deliberately
+    added to the merge allow-list yourself as part of the test
+    (`gardener allowlist add`), and only if you're confident merging
+    whatever it produces is actually safe — this is the one dispatch mode
+    capable of a real, semi-autonomous merge; don't skip reviewing what it
+    actually did afterward.
 - `--implement` and `--file-issue` should be exercised for real (not just
   unit-tested) before being trusted against anything that matters, the
-  same way report mode was — this hasn't happened yet as of this repo's
-  first version (see `README.md`'s Project Status).
+  same way report mode was — this hadn't happened as of this repo's first
+  version (see `README.md`'s Project Status) and is unrelated to `tend`'s
+  own verification above.
 
 ## Commit and PR conventions
 
@@ -115,7 +144,8 @@ target-repo alignment rules, not just the ones it enforces on others.
 
 | File | What to verify |
 |---|---|
-| `README.md` | CLI usage, flags, and safety-model claims match what `cli.py`/`dispatch.py` actually do |
-| `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`) still holds against the currently-installed `claude` version |
+| `README.md` | CLI usage, flags, and safety-model claims match what `cli.py`/`dispatch.py`/`dev_loop.py` actually do |
+| `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`, and the `tend`-specific `AskUserQuestion`/`Agent`/`ScheduleWakeup` findings) still holds against the currently-installed `claude` version |
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
+| `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |

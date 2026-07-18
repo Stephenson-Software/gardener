@@ -69,6 +69,8 @@ below for how this is implemented.
 
 ```
 gardener align --repo <owner/repo> [--implement] [--file-issue]
+gardener tend --repo <owner/repo> [--allow-merge]
+gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener status [--repo <owner/repo>]
 ```
 
@@ -96,14 +98,72 @@ gardener status [--repo <owner/repo>]
   SQLite run history (`~/.local/state/gardener/gardener.sqlite3` by
   default) and prints it: target repo, timestamp, mode, outcome summary.
 
+### `gardener tend` — dispatching a target repo's own dev-loop
+
+Where `align` checks a repo against dms-conventions, **`gardener tend
+--repo owner/repo`** makes real, broader progress on the repo itself by
+dispatching *that repo's own* `<slug>-dev-loop` Claude Code skill (the kind
+normally invoked interactively as `/a-private-repo-dev-loop`, `/a-private-repo-5`,
+etc.) — headlessly, unattended, safety-gated the same way every other mode
+in this file is. This is for a "tend to my garden overnight" use case:
+several repos, dispatched one after another, nobody watching.
+
+1. Clones/refreshes `owner/repo` into gardener's cache, exactly like
+   `align` does.
+2. Derives the skill slug from the repo's actual name (`owner/repo` ->
+   `repo-dev-loop`, matching the naming already used by every
+   `<slug>-dev-loop` skill/repo in this ecosystem — see `dev_loop.py`),
+   and checks whether `~/.claude/commands/<slug>-dev-loop.md` already
+   resolves to a real file.
+3. **If no skill exists yet**, dispatches `create-dev-loop` first (a
+   distinct, more tightly scoped mode — see `dispatch.py`) to generate and
+   register one, then confirms the file actually landed before proceeding.
+   If that dispatch fails or the file still isn't there afterward, `tend`
+   stops and reports an error rather than guessing.
+4. Dispatches the `<slug>-dev-loop` skill itself via `claude -p
+   "/<slug>-dev-loop ..."`, with `cwd` set to gardener's own controlled
+   clone (not wherever the skill's own hardcoded "Working directory" line
+   says — the prompt explicitly overrides that; see `dev_loop.py`).
+
+**`--allow-merge`** permits `gh pr merge` during this dispatch — but ONLY
+when the target repo is also present in gardener's local merge allow-list
+(`gardener allowlist add --repo owner/repo`). Either one alone is not
+enough; see "Merge allow-list" below.
+
+Every `*-dev-loop` skill is written to stop and ask a human (via
+`AskUserQuestion`) before merging or taking a destructive action. Dispatched
+headlessly there's nobody to answer, so this had to be verified for real,
+not assumed — see [Safety model](#safety-model)'s "Headless dispatch and
+the `AskUserQuestion` problem" section for exactly what was tested and
+observed.
+
+### Merge allow-list
+
+`gardener allowlist add --repo owner/repo` / `remove --repo owner/repo` /
+`list` manage a small local JSON file (`~/.local/state/gardener/
+merge_allowlist.json` by default — same directory `status`'s run history
+lives in, overridable via `GARDENER_STATE_DIR`) of repos `gardener tend
+--allow-merge` is permitted to actually merge PRs in. A repo not listed
+here can never be merged into by a `tend` dispatch, no matter what flags
+are passed — see `merge_allowlist.py` and `dispatch.py`'s `tend_mode_spec()`.
+
 ### Other flags
 
-- `--model <name>` — override the model `claude` uses.
-- `--timeout <seconds>` — how long to wait for the dispatched run (default
-  1800s / 30 min — reading and analyzing a real repo against ~10
-  convention docs is not fast).
-- `--no-refresh-conventions` / `--no-refresh-target` — reuse whatever is
-  already cached instead of fetching latest first.
+- `--model <name>` — override the model `claude` uses (`align` and `tend`).
+- `--timeout <seconds>` — how long to wait for the dispatched run.
+  `align`'s default is 1800s / 30 min (reading and analyzing a real repo
+  against ~10 convention docs is not fast). `tend`'s default is 2700s / 45
+  min — it runs a full triage/implement/test/PR/self-audit cycle in one
+  session with no subagent fan-out or wait-for-review loop (see
+  [Safety model](#safety-model)), so it needs more room than `align`, but
+  must still fail fast enough that one stuck repo can't consume an entire
+  overnight multi-repo batch; see `dispatch.py`'s
+  `TEND_DEFAULT_TIMEOUT_SECONDS` for the full reasoning. The internal
+  `create-dev-loop` dispatch `tend` runs when a repo has no skill yet has
+  its own fixed 900s/15min ceiling, not exposed as a flag.
+- `--no-refresh-conventions` (`align` only) / `--no-refresh-target`
+  (`align` and `tend`) — reuse whatever is already cached instead of
+  fetching latest first.
 
 ## Support
 
@@ -210,6 +270,57 @@ layers (see the full writeup in `dispatch.py`'s module docstring):
 so a dispatched run never inherits whatever MCP servers (Gmail, Drive,
 Calendar, ...) happen to be configured for the invoking user.
 
+### `tend` mode, and the headless "ask the user" problem
+
+Every `<slug>-dev-loop` skill `tend` might dispatch is written to *stop and
+ask a human* (via the `AskUserQuestion` tool) before merging or taking a
+destructive action — real, observed behavior in every dev-loop skill on
+this machine. Dispatched headlessly by `gardener tend`, nobody is there to
+answer. This was confirmed by hand (2026-07-18, Claude Code CLI 2.1.214)
+before being relied on, the same standard the rest of this safety model is
+held to — full transcript-level detail lives in `dispatch.py`'s module
+docstring; the short version:
+
+- **`AskUserQuestion` is not present at all in a headless `-p` session, by
+  default** — a session given `--tools default` (every built-in tool) was
+  asked to list every tool available to it, direct or deferred; it wasn't
+  in either list. `tend` never needs to add it to a `--tools` allow-list to
+  exclude it — it's already absent before gardener does anything.
+- **Without it, a session doesn't hang or fabricate an answer** — told
+  (mirroring a real dev-loop's merge-confirmation language) to get human
+  sign-off via `AskUserQuestion` before merging, a session with no such
+  tool returned cleanly in 22s explaining it had no way to ask and would
+  not proceed or invent a substitute. `tend`'s dispatched prompt still
+  states this explicitly (`dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE`)
+  rather than relying on that being the default every time: leave whatever
+  was safely completed in place, and end with one line starting
+  `DECISION NEEDED:` naming what's needed and by whom.
+- **`Agent` and `ScheduleWakeup`** (used by a normal dev-loop cycle to fan
+  out a review subagent and poll for its result) **are present by default
+  and are excluded from `tend` mode's `--tools` the same structural way**
+  — confirmed live: a session scoped to `tend`'s actual tool list reported
+  back exactly that list, no Agent/ScheduleWakeup/AskUserQuestion/
+  ToolSearch/ReportFindings among them. The dispatched prompt tells the
+  run to perform any review step inline instead.
+- **`gh pr merge` is never reachable via a broad `Bash(gh pr *)` pattern**
+  in `tend` mode — confirmed live that such a pattern *does* let `gh pr
+  merge` execute (this is a real, pre-existing gap in `align --implement`'s
+  own `Bash(gh pr *)` allow-list, noted but out of scope to change here).
+  `tend` enumerates specific non-merge `gh pr` subcommands instead and adds
+  `Bash(gh pr merge *)` only per the merge allow-list below.
+
+### Merge allow-list mechanics
+
+`gardener tend --allow-merge` only ever results in `Bash(gh pr merge *)`
+being added to the dispatched session's `--allowedTools` when BOTH
+`--allow-merge` was passed AND the target repo is present in
+`merge_allowlist.py`'s local JSON list (`gardener allowlist add`). Either
+alone leaves the pattern out of the argv gardener builds entirely — under
+`--permission-mode default` with nobody to approve an unlisted tool call,
+an attempted `gh pr merge` in that case is auto-denied the same way any
+other out-of-scope Bash call is (confirmed general mechanism, see point 2
+in the layer list above) — not merely discouraged in the prompt.
+
 ### Why synchronous dispatch, not `--bg`
 
 a-private-repo-2's dashboard uses `claude --bg` because it's answering an HTTP
@@ -287,6 +398,27 @@ target repo confirmed untouched afterward — see
 argv-construction level but have not yet been run for real against a live
 repo — only report-only mode has been exercised end to end so far.
 
+`tend` (no `--allow-merge`) has also been run for real, end to end,
+against `dmccoystephenson/a-private-repo-3` (2026-07-18): no
+existing `/a-private-repo-3-dev-loop` skill, so `create-dev-loop`
+dispatched first (194s, $0.71, produced a usable skill), then `tend`
+dispatched it (250s, $1.00, `ok=True`, 7 permission denials — out-of-scope
+attempts correctly blocked, not itemized in gardener's own output beyond
+the count). Result: the dispatched run found no open issues/PRs, added
+missing CLI test coverage for two untested code paths, opened
+[PR #5](https://github.com/dmccoystephenson/a-private-repo-3/pull/5)
+(green on all 4 CI matrix legs), did not attempt to merge it, and ended
+its final answer with a `DECISION NEEDED:` line naming the PR and that a
+human must review/merge — exactly the fallback documented in
+[the `tend` mode section above](#tend-mode-and-the-headless-ask-the-user-problem).
+Confirmed afterward: `origin/main` on the target repo is unchanged
+(`947474e`, the same commit as before the run) and PR #5 remains open,
+not merged — `tend` without `--allow-merge` made real progress without
+ever mutating the target repo's main branch. The run also completed in
+250s, far inside `TEND_DEFAULT_TIMEOUT_SECONDS` (2700s), so the
+"next cycle" loop-back risk noted in `dispatch.py`'s docstring did not
+manifest here either.
+
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
@@ -300,8 +432,16 @@ dependency, not a pip one, and is the same shape a-private-repo-2's tools use.
 ```
 gardener/
   gardener/
-    cli.py          — argparse CLI (align, status), prompt building, orchestration
+    cli.py          — argparse CLI (align, tend, allowlist, status), prompt
+                       building, orchestration
     dispatch.py      — the safety-gated subprocess wrapper around `claude -p`
+                       (Mode/ModeSpec definitions and tend_mode_spec() for
+                       every mode, including tend's per-invocation merge gate)
+    dev_loop.py      — resolves/derives a target repo's <slug>-dev-loop skill,
+                       builds the create-dev-loop and tend prompts (including
+                       the headless-safety preamble)
+    merge_allowlist.py — local JSON allow-list of repos `tend --allow-merge`
+                       is permitted to actually merge PRs in
     conventions.py   — clones/refreshes the local dms-conventions cache
     state.py         — SQLite-backed run history
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)

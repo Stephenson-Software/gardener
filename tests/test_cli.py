@@ -8,15 +8,16 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from gardener import state
+from gardener import merge_allowlist, state
 from gardener.cli import (
     REPO_RE,
     _notify_run,
     build_parser,
     build_prompt,
     extract_gap_summary,
+    merge_eligible,
 )
-from gardener.dispatch import Mode
+from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, Mode
 from gardener.notify import Level
 
 
@@ -67,6 +68,79 @@ class TestArgParsing(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.parser.parse_args([])
+
+
+class TestTendArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_tend_requires_repo(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["tend"])
+
+    def test_tend_defaults(self):
+        args = self.parser.parse_args(["tend", "--repo", "owner/name"])
+        self.assertFalse(args.allow_merge)
+        self.assertEqual(args.timeout, TEND_DEFAULT_TIMEOUT_SECONDS)
+        self.assertFalse(args.no_refresh_target)
+
+    def test_tend_allow_merge_flag(self):
+        args = self.parser.parse_args(["tend", "--repo", "owner/name", "--allow-merge"])
+        self.assertTrue(args.allow_merge)
+
+    def test_tend_timeout_override(self):
+        args = self.parser.parse_args(["tend", "--repo", "owner/name", "--timeout", "120"])
+        self.assertEqual(args.timeout, 120)
+
+
+class TestAllowlistArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_allowlist_requires_an_action(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["allowlist"])
+
+    def test_allowlist_list(self):
+        args = self.parser.parse_args(["allowlist", "list"])
+        self.assertEqual(args.allowlist_action, "list")
+
+    def test_allowlist_add_requires_repo(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["allowlist", "add"])
+
+    def test_allowlist_add(self):
+        args = self.parser.parse_args(["allowlist", "add", "--repo", "owner/name"])
+        self.assertEqual(args.allowlist_action, "add")
+        self.assertEqual(args.repo, "owner/name")
+
+    def test_allowlist_remove(self):
+        args = self.parser.parse_args(["allowlist", "remove", "--repo", "owner/name"])
+        self.assertEqual(args.allowlist_action, "remove")
+        self.assertEqual(args.repo, "owner/name")
+
+
+class TestMergeEligible(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmpdir.name) / "merge_allowlist.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_false_when_flag_not_passed_even_if_allowlisted(self):
+        merge_allowlist.add("owner/name", path=self.path)
+        self.assertFalse(merge_eligible("owner/name", False, allowlist_path=self.path))
+
+    def test_false_when_flag_passed_but_not_allowlisted(self):
+        self.assertFalse(merge_eligible("owner/name", True, allowlist_path=self.path))
+
+    def test_true_only_when_both_hold(self):
+        merge_allowlist.add("owner/name", path=self.path)
+        self.assertTrue(merge_eligible("owner/name", True, allowlist_path=self.path))
 
 
 class TestRepoRegex(unittest.TestCase):

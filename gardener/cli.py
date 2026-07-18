@@ -1,10 +1,14 @@
-"""argparse-based CLI: `gardener align` and `gardener status`.
+"""argparse-based CLI: `gardener align`, `gardener tend`,
+`gardener allowlist`, and `gardener status`.
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
 `dispatch.run_claude`, and records the outcome. All judgment about what's
-actually wrong with a repo happens inside the dispatched Claude run, not
-here.
+actually wrong with a repo (or what to actually change) happens inside the
+dispatched Claude run, not here. `tend`'s own safety mechanics (which tools
+exist, which get pre-approved, the headless-dispatch prompt preamble) live
+in `dispatch.py` and `dev_loop.py`, not here either — see those modules'
+docstrings.
 """
 from __future__ import annotations
 
@@ -17,8 +21,16 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, notify, state
-from gardener.dispatch import DEFAULT_TIMEOUT_SECONDS, DispatchError, Mode, run_claude
+from gardener import conventions, dev_loop, merge_allowlist, notify, state
+from gardener.dispatch import (
+    CREATE_DEV_LOOP_TIMEOUT_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
+    TEND_DEFAULT_TIMEOUT_SECONDS,
+    DispatchError,
+    Mode,
+    run_claude,
+    tend_mode_spec,
+)
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -251,6 +263,158 @@ def cmd_align(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def merge_eligible(repo: str, allow_merge_flag: bool, allowlist_path: Optional[Path] = None) -> bool:
+    """The single place `--allow-merge` and the allow-list are combined.
+    Both must hold — see dispatch.py's tend_mode_spec() and its module
+    docstring's "Merge allow-list" section for how this feeds the actual
+    structural gate (whether Bash(gh pr merge *) is ever added to the
+    dispatched session's --allowedTools)."""
+    return allow_merge_flag and merge_allowlist.is_allowed(repo, path=allowlist_path)
+
+
+def cmd_tend(args: argparse.Namespace) -> int:
+    print(f"gardener: tending {args.repo} (allow_merge={args.allow_merge})", file=sys.stderr)
+
+    try:
+        target_dir = clone_or_refresh_target_repo(
+            args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
+        )
+        print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
+        branch = current_branch(target_dir)
+
+        slug = dev_loop.skill_slug(args.repo)
+        if not dev_loop.has_dev_loop_skill(slug):
+            print(
+                f"gardener: no existing /{slug} skill — dispatching create-dev-loop first",
+                file=sys.stderr,
+            )
+            create_prompt = dev_loop.build_create_dev_loop_prompt(args.repo, slug, target_dir)
+            create_result = run_claude(
+                mode=Mode.CREATE_DEV_LOOP,
+                prompt=create_prompt,
+                cwd=target_dir,
+                model=args.model,
+                timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
+            )
+            state.record_run(
+                state.Run(
+                    repo=args.repo,
+                    mode=Mode.CREATE_DEV_LOOP.value,
+                    outcome="error" if not create_result.ok else "created",
+                    timestamp=state.now_iso(),
+                    gap_summary=extract_gap_summary(create_result.result_text)
+                    if create_result.result_text
+                    else (create_result.stderr or "no output"),
+                    exit_code=create_result.exit_code,
+                    duration_ms=create_result.duration_ms,
+                    cost_usd=create_result.cost_usd,
+                    claude_session_id=create_result.session_id,
+                ),
+                db_path=args.state_db,
+            )
+            if not create_result.ok or not dev_loop.has_dev_loop_skill(slug):
+                print(
+                    f"gardener: error: create-dev-loop dispatch did not produce a usable "
+                    f"/{slug} skill (ok={create_result.ok}, "
+                    f"exists={dev_loop.has_dev_loop_skill(slug)}) — not proceeding to tend",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"gardener: /{slug} skill created", file=sys.stderr)
+        else:
+            print(f"gardener: found existing /{slug} skill", file=sys.stderr)
+
+        eligible = merge_eligible(args.repo, args.allow_merge)
+        if args.allow_merge and not eligible:
+            print(
+                f"gardener: NOTE — --allow-merge was passed but {args.repo} is not in the "
+                "merge allow-list (see `gardener allowlist add`) — merge stays disabled this run",
+                file=sys.stderr,
+            )
+        print(f"gardener: dispatching /{slug} (merge_eligible={eligible})...", file=sys.stderr)
+
+        tend_prompt = dev_loop.build_tend_prompt(args.repo, slug, target_dir, branch, eligible)
+        result = run_claude(
+            mode=Mode.TEND,
+            prompt=tend_prompt,
+            cwd=target_dir,
+            model=args.model,
+            timeout=args.timeout,
+            mode_spec=tend_mode_spec(eligible),
+        )
+    except (DispatchError, RuntimeError, ValueError) as e:
+        print(f"gardener: error: {e}", file=sys.stderr)
+        state.record_run(
+            state.Run(
+                repo=args.repo,
+                mode=Mode.TEND.value,
+                outcome="error",
+                timestamp=state.now_iso(),
+                gap_summary=str(e),
+            ),
+            db_path=args.state_db,
+        )
+        return 1
+
+    outcome = "error" if not result.ok else Mode.TEND.value
+    gap_summary = extract_gap_summary(result.result_text) if result.result_text else (result.stderr or "no output")
+
+    state.record_run(
+        state.Run(
+            repo=args.repo,
+            mode=Mode.TEND.value,
+            outcome=outcome,
+            timestamp=state.now_iso(),
+            gap_summary=gap_summary,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+            cost_usd=result.cost_usd,
+            claude_session_id=result.session_id,
+        ),
+        db_path=args.state_db,
+    )
+
+    print(result.result_text or "(no output)")
+    print("", file=sys.stderr)
+    print(
+        f"gardener: done in {result.duration_ms}ms, "
+        f"cost=${result.cost_usd if result.cost_usd is not None else '?'}, "
+        f"denials={len(result.permission_denials)}, ok={result.ok}",
+        file=sys.stderr,
+    )
+    if result.permission_denials:
+        print(
+            "gardener: NOTE — the dispatched run attempted action(s) outside this mode's "
+            "pre-approved scope and they were blocked (see denials above)",
+            file=sys.stderr,
+        )
+    if result.timed_out:
+        print(f"gardener: timed out after {args.timeout}s", file=sys.stderr)
+        return 1
+    return 0 if result.ok else 1
+
+
+def cmd_allowlist(args: argparse.Namespace) -> int:
+    path = args.allowlist_path
+    if args.allowlist_action == "list":
+        repos = merge_allowlist.list_allowed(path=path)
+        if not repos:
+            print("merge allow-list is empty")
+            return 0
+        for r in repos:
+            print(r)
+        return 0
+    if args.allowlist_action == "add":
+        added = merge_allowlist.add(args.repo, path=path)
+        print(f"{'added' if added else 'already present'}: {args.repo}")
+        return 0
+    if args.allowlist_action == "remove":
+        removed = merge_allowlist.remove(args.repo, path=path)
+        print(f"{'removed' if removed else 'was not present'}: {args.repo}")
+        return 0
+    raise AssertionError(f"unreachable allowlist_action: {args.allowlist_action}")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
     if not runs:
@@ -300,6 +464,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     align.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     align.set_defaults(func=cmd_align)
+
+    tend = sub.add_parser(
+        "tend",
+        help="Dispatch a target repo's own *-dev-loop skill (generating one first if needed)",
+    )
+    tend.add_argument("--repo", required=True, help="owner/name of the target GitHub repo")
+    tend.add_argument(
+        "--allow-merge", action="store_true",
+        help="Permit `gh pr merge` this run — still requires --repo be in the merge allow-list "
+             "(see `gardener allowlist add`); either condition alone is not enough",
+    )
+    tend.add_argument("--model", default=None, help="Model override passed through to `claude`")
+    tend.add_argument(
+        "--timeout", type=int, default=TEND_DEFAULT_TIMEOUT_SECONDS,
+        help=f"Seconds to wait for the dispatched tend run (default {TEND_DEFAULT_TIMEOUT_SECONDS})",
+    )
+    tend.add_argument(
+        "--no-refresh-target", action="store_true",
+        help="Reuse a cached target-repo checkout as-is instead of fetching latest",
+    )
+    tend.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    tend.set_defaults(func=cmd_tend)
+
+    allowlist = sub.add_parser("allowlist", help="Manage the tend --allow-merge repo allow-list")
+    allowlist_sub = allowlist.add_subparsers(dest="allowlist_action", required=True)
+
+    allowlist_list = allowlist_sub.add_parser("list", help="Print every allow-listed repo")
+    allowlist_list.add_argument("--allowlist-path", dest="allowlist_path", type=Path, default=None, help=argparse.SUPPRESS)
+    allowlist_list.set_defaults(func=cmd_allowlist)
+
+    allowlist_add = allowlist_sub.add_parser("add", help="Add a repo to the allow-list")
+    allowlist_add.add_argument("--repo", required=True, help="owner/name of the repo to allow")
+    allowlist_add.add_argument("--allowlist-path", dest="allowlist_path", type=Path, default=None, help=argparse.SUPPRESS)
+    allowlist_add.set_defaults(func=cmd_allowlist)
+
+    allowlist_remove = allowlist_sub.add_parser("remove", help="Remove a repo from the allow-list")
+    allowlist_remove.add_argument("--repo", required=True, help="owner/name of the repo to remove")
+    allowlist_remove.add_argument("--allowlist-path", dest="allowlist_path", type=Path, default=None, help=argparse.SUPPRESS)
+    allowlist_remove.set_defaults(func=cmd_allowlist)
 
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
