@@ -17,7 +17,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, state
+from gardener import conventions, notify, state
 from gardener.dispatch import DEFAULT_TIMEOUT_SECONDS, DispatchError, Mode, run_claude
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -134,6 +134,41 @@ def extract_gap_summary(result_text: str) -> str:
     return (stripped[:200] + "…") if len(stripped) > 200 else stripped
 
 
+def _notify_run(run: state.Run) -> None:
+    """Fire an outcome notification for a recorded run. Thin by design —
+    this only turns an already-recorded `state.Run` into a (title,
+    message, level) tuple and hands it to a `Notifier`; the actual
+    alerting mechanics live in notify.py.
+
+    Deliberately generic across whatever `mode` value is present, not just
+    the ones defined in this file: outcome "error" is always ERROR, mode
+    "report" (Mode.REPORT.value) is always the routine/informational case,
+    and anything else is treated as an authorized mutation worth flagging
+    distinctly — this covers any future mode (e.g. a `tend` subcommand)
+    that also calls `state.record_run(...)` and then this same helper,
+    without this function needing to know that mode's specifics.
+    """
+    if run.outcome == "error":
+        level = notify.Level.ERROR
+        title = f"gardener {run.mode}: FAILED — {run.repo}"
+    elif run.mode == Mode.REPORT.value:
+        level = notify.Level.INFO
+        title = f"gardener {run.mode}: {run.repo}"
+    else:
+        # Any non-report, non-error outcome means this mode was authorized
+        # to actually mutate something (branch/commit/PR, issue, ...) —
+        # stand this out from a routine report-only run rather than
+        # blending it in.
+        level = notify.Level.WARNING
+        title = f"gardener {run.mode}: MUTATION — {run.repo}"
+
+    message = run.gap_summary or "(no summary)"
+    try:
+        notify.default_notifier().notify(title, message, level)
+    except Exception as e:  # noqa: BLE001 - alerting must never break the run it reports on
+        print(f"gardener: notification failed (non-fatal): {e}", file=sys.stderr)
+
+
 def cmd_align(args: argparse.Namespace) -> int:
     if args.implement and args.file_issue:
         print("error: --implement and --file-issue are mutually exclusive", file=sys.stderr)
@@ -168,35 +203,33 @@ def cmd_align(args: argparse.Namespace) -> int:
         )
     except (DispatchError, RuntimeError, ValueError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
-        state.record_run(
-            state.Run(
-                repo=args.repo,
-                mode=mode.value,
-                outcome="error",
-                timestamp=state.now_iso(),
-                gap_summary=str(e),
-            ),
-            db_path=args.state_db,
+        failed_run = state.Run(
+            repo=args.repo,
+            mode=mode.value,
+            outcome="error",
+            timestamp=state.now_iso(),
+            gap_summary=str(e),
         )
+        state.record_run(failed_run, db_path=args.state_db)
+        _notify_run(failed_run)
         return 1
 
     outcome = "error" if not result.ok else mode.value
     gap_summary = extract_gap_summary(result.result_text) if result.result_text else (result.stderr or "no output")
 
-    state.record_run(
-        state.Run(
-            repo=args.repo,
-            mode=mode.value,
-            outcome=outcome,
-            timestamp=state.now_iso(),
-            gap_summary=gap_summary,
-            exit_code=result.exit_code,
-            duration_ms=result.duration_ms,
-            cost_usd=result.cost_usd,
-            claude_session_id=result.session_id,
-        ),
-        db_path=args.state_db,
+    completed_run = state.Run(
+        repo=args.repo,
+        mode=mode.value,
+        outcome=outcome,
+        timestamp=state.now_iso(),
+        gap_summary=gap_summary,
+        exit_code=result.exit_code,
+        duration_ms=result.duration_ms,
+        cost_usd=result.cost_usd,
+        claude_session_id=result.session_id,
     )
+    state.record_run(completed_run, db_path=args.state_db)
+    _notify_run(completed_run)
 
     print(result.result_text or "(no output)")
     print("", file=sys.stderr)

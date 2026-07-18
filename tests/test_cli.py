@@ -6,14 +6,18 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
+from gardener import state
 from gardener.cli import (
     REPO_RE,
+    _notify_run,
     build_parser,
     build_prompt,
     extract_gap_summary,
 )
 from gardener.dispatch import Mode
+from gardener.notify import Level
 
 
 class TestArgParsing(unittest.TestCase):
@@ -126,6 +130,80 @@ class TestExtractGapSummary(unittest.TestCase):
 
     def test_short_text_without_marker_is_returned_whole(self):
         self.assertEqual(extract_gap_summary("short answer"), "short answer")
+
+
+class TestNotifyRun(unittest.TestCase):
+    """_notify_run's job is purely translating a recorded state.Run into a
+    (title, message, level) tuple and handing it to a Notifier — this is
+    the "business logic" the notify.py module docstring says belongs in
+    cli.py, not there. These tests never touch the network: the notifier
+    itself is mocked out entirely."""
+
+    def _run(self, **overrides):
+        defaults = dict(
+            repo="owner/name",
+            mode="report",
+            outcome="report",
+            timestamp=state.now_iso(),
+            gap_summary="3 gaps found",
+        )
+        defaults.update(overrides)
+        return state.Run(**defaults)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_error_outcome_is_always_error_level_regardless_of_mode(self, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+        for mode in ("report", "implement", "file-issue", "tend"):
+            with self.subTest(mode=mode):
+                mock_notifier.reset_mock()
+                run = self._run(mode=mode, outcome="error", gap_summary="boom")
+                _notify_run(run)
+                mock_notifier.notify.assert_called_once()
+                _title, _message, level = mock_notifier.notify.call_args[0]
+                self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_report_mode_success_is_info_level(self, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+        run = self._run(mode="report", outcome="report")
+        _notify_run(run)
+        _title, message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.INFO)
+        self.assertEqual(message, "3 gaps found")
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_implement_success_is_flagged_distinctly_from_report(self, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+        run = self._run(mode="implement", outcome="implement")
+        _notify_run(run)
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_file_issue_success_is_flagged_distinctly_from_report(self, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+        run = self._run(mode="file-issue", outcome="file-issue")
+        _notify_run(run)
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_unknown_future_mode_success_is_treated_as_a_mutation(self, mock_default_notifier):
+        # Simulates a future subcommand (e.g. `tend`) whose mode value
+        # _notify_run has never seen — it must still be flagged as a
+        # mutation rather than silently defaulting to INFO.
+        mock_notifier = mock_default_notifier.return_value
+        run = self._run(mode="tend", outcome="tend")
+        _notify_run(run)
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_notifier_raising_does_not_propagate(self, mock_default_notifier):
+        mock_default_notifier.return_value.notify.side_effect = RuntimeError("network is down")
+        run = self._run()
+        with redirect_stderr(io.StringIO()):
+            _notify_run(run)  # must not raise
 
 
 if __name__ == "__main__":
