@@ -1,26 +1,45 @@
 # gardener
 
-`gardener` is a Python CLI that aligns one target software repo at a time
-against [`dmccoystephenson/dms-conventions`](https://github.com/dmccoystephenson/dms-conventions)
-— a private repo of engineering conventions and alignment checklists.
-gardener is **phase 2** of a two-phase initiative: dms-conventions (phase 1)
-is the source of truth for what "aligned" means; gardener is the tool that
-consumes it.
+`gardener` is a safety-gated Python CLI that dispatches Claude Code against
+a fleet of software repos, in two distinct ways:
+
+- **`align`** checks one target repo at a time against
+  [`dmccoystephenson/dms-conventions`](https://github.com/dmccoystephenson/dms-conventions)
+  — a private repo of engineering conventions and alignment checklists —
+  and, if authorized, fixes what's missing.
+- **`tend`**/**`garden`**/**`overnight`** make real, broader progress on a
+  repo (or a whole opt-in list of them, unattended overnight) by
+  dispatching *that repo's own* `<slug>-dev-loop` Claude Code skill —
+  triage, implement, test, PR — never merging without an explicit,
+  separate per-repo opt-in.
 
 gardener's own job is orchestration and safety-gating, in plain Python. The
-actual reading/analysis/implementation judgment — what's missing, what a
-fix should look like — is delegated to a dispatched, safety-gated `claude`
-CLI invocation. gardener never itself decides what "aligned" means; it only
-decides *how much a dispatched Claude run is allowed to do about it*.
+actual reading/analysis/implementation judgment is delegated to a
+dispatched, safety-gated `claude` CLI invocation in every mode — gardener
+never itself decides what "aligned" means or what a fix should look like;
+it only decides *how much a dispatched Claude run is allowed to do about
+it*. See [Usage](#usage) below for the full command set.
 
 ## Description
 
-Run against a repo, gardener clones it read-only, clones (or refreshes) a
-local cache of dms-conventions, builds a prompt combining
-dms-conventions' `ALIGNMENT_PROMPT.md` with the target repo's identity and
-the requested mode's constraints, and dispatches one headless `claude -p`
-run to produce a gap checklist — or, if explicitly authorized, to act on
-it.
+- **`gardener align --repo <owner/repo>`**: clones the target repo
+  read-only, clones (or refreshes) a local cache of
+  [`dmccoystephenson/dms-conventions`](https://github.com/dmccoystephenson/dms-conventions)
+  (phase 1 of this two-phase initiative — dms-conventions is the source of
+  truth for what "aligned" means, gardener is the tool that consumes it),
+  builds a prompt combining dms-conventions' `ALIGNMENT_PROMPT.md` with the
+  target repo's identity and the requested mode's constraints, and
+  dispatches one headless `claude -p` run to produce a gap checklist — or,
+  if explicitly authorized, to act on it.
+- **`gardener tend --repo <owner/repo>`**: dispatches the target repo's
+  *own* `<slug>-dev-loop` skill instead — real triage/implement/test/PR
+  work, not a conventions gap-check. See
+  [`gardener tend`](#gardener-tend--dispatching-a-target-repos-own-dev-loop)
+  below.
+- **`gardener garden`** + **`gardener overnight`**: an opt-in list of repos
+  and the unattended batch dispatcher that tends them one after another
+  overnight. See [Overnight / unattended operation](#overnight--unattended-operation)
+  below.
 
 ## Installation
 
