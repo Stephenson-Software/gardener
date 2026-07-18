@@ -236,6 +236,34 @@ class TestRunClaude(unittest.TestCase):
         with self.assertRaises(DispatchError):
             run_claude(Mode.REPORT, "prompt", Path("/tmp"))
 
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch.start_transcript_watcher")
+    def test_starts_transcript_watcher_with_the_dispatch_cwd_before_subprocess_run(
+        self, mock_watcher, mock_run, _which
+    ):
+        # The watcher must be started before subprocess.run blocks, with the
+        # same cwd the dispatch itself uses — see transcript.py and
+        # dispatch.py's "Live transcript visibility" docstring section. This
+        # never touches a real filesystem or thread: start_transcript_watcher
+        # itself is mocked out entirely, this only checks the wiring.
+        mock_run.return_value = _fake_completed({"result": "ok", "is_error": False})
+        cwd = Path("/some/repo/checkout")
+        run_claude(Mode.REPORT, "prompt", cwd)
+        mock_watcher.assert_called_once()
+        args, kwargs = mock_watcher.call_args
+        self.assertEqual(args[0], cwd)
+        self.assertIn("after", kwargs)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
+    @patch("gardener.dispatch.start_transcript_watcher")
+    def test_transcript_watcher_still_started_even_on_timeout(self, mock_watcher, _mock_run, _which):
+        # The watcher is started unconditionally before the blocking call —
+        # it doesn't know or care how the dispatch turns out.
+        run_claude(Mode.REPORT, "prompt", Path("/tmp"), timeout=5)
+        mock_watcher.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

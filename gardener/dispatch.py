@@ -175,6 +175,21 @@ simply never added to the argv gardener builds — `claude` never sees it as
 a candidate to approve, the same structural-absence mechanism as every
 other excluded tool in this file, not an instruction asking the model to
 refrain.
+
+## Live transcript visibility
+
+`run_claude` below still dispatches via one blocking `subprocess.run` call,
+exactly as described above — that mechanism (timeout, kill-on-timeout,
+`--output-format json` capture/parsing) is untouched. The one addition is a
+background daemon thread, started right before that blocking call, which
+polls briefly for the session's own live JSONL transcript file (which
+Claude Code writes for every `-p` session regardless) and prints its path
+to stderr as soon as it shows up — often several minutes before the
+dispatch itself completes. See `transcript.py`'s module docstring for the
+empirically-confirmed transcript-path encoding rule and the full design;
+this is a visibility nicety layered on top of the dispatch, not a change to
+the dispatch mechanism itself, and a failure or timeout inside it can never
+affect (or even be noticed by) the real dispatch.
 """
 from __future__ import annotations
 
@@ -186,6 +201,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+from gardener.transcript import start_transcript_watcher
 
 CLAUDE_BIN = "claude"
 
@@ -456,6 +473,14 @@ def run_claude(
         raise DispatchError(f"unknown mode: {mode} (no mode_spec given and no fixed entry)")
 
     argv = _build_invocation(mode, prompt, cwd, add_dirs or [], model=model, mode_spec=mode_spec)
+
+    # Started right before the blocking call below so the poll runs
+    # concurrently with the real dispatch, not before or after it — see
+    # this module's "Live transcript visibility" docstring section and
+    # transcript.py. `after` is wall-clock time taken here, before the
+    # subprocess exists, so a transcript file created in the brief window
+    # between this line and `claude` actually starting is still counted.
+    start_transcript_watcher(cwd, after=time.time())
 
     start = time.monotonic()
     try:
