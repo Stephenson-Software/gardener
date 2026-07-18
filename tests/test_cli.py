@@ -9,7 +9,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from gardener import garden, merge_allowlist, overnight, state
+from gardener import dev_loop, garden, merge_allowlist, overnight, state
 from gardener.cli import (
     REPO_RE,
     _notify_run,
@@ -469,6 +469,46 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(level, Level.ERROR)
         # the tend dispatch itself must never have been attempted
         mock_run_claude.assert_called_once()
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_create_dev_loop_dispatch_gets_local_skills_and_commands_add_dirs(
+        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        """Regression test for the bug where create-dev-loop's dispatch had no
+        add_dirs at all — unlike align's add_dirs=[conv.path] a bit earlier in
+        cli.py — leaving Read/Bash(mkdir *)/Bash(ln *)/etc. sandboxed out of
+        ~/local-skills/ and ~/.claude/commands/ even though this mode's entire
+        job is reading/writing exactly those two directories. A stale partial
+        artifact from an earlier failed attempt then had no recovery path on
+        retry: the dispatched session couldn't even Read what was in its way.
+        See dev_loop.py's LOCAL_SKILLS_DIR/COMMANDS_DIR and dispatch.py's
+        module docstring finding #3 for the full mechanism."""
+        mock_clone.return_value = Path(self._tmpdir.name)
+        # has_dev_loop_skill is False both before and after the dispatch in
+        # this test (the mock never flips to True), so cmd_tend reports the
+        # bootstrap as failed and returns before ever reaching the real tend
+        # dispatch — irrelevant to what's under test here, which is only the
+        # add_dirs actually passed to the create-dev-loop run_claude() call.
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: created dev-loop skill",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+
+        with redirect_stderr(io.StringIO()):
+            cmd_tend(self._args())
+
+        mock_run_claude.assert_called_once()
+        _args, kwargs = mock_run_claude.call_args
+        self.assertEqual(kwargs["mode"], Mode.CREATE_DEV_LOOP)
+        self.assertEqual(
+            kwargs["add_dirs"],
+            [dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
+        )
 
 
 class TestCmdOvernight(unittest.TestCase):
