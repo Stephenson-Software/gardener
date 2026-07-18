@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -151,6 +152,50 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
 def current_branch(repo_dir: Path) -> str:
     res = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, timeout=15)
     return res.stdout.strip() or "main"
+
+
+def find_orphaned_pr(repo: str, timeout: int = 30) -> Optional[dev_loop.OrphanedPR]:
+    """Look for an open PR on `repo` that carries `dev_loop.ORPHAN_MARKER`
+    in its body — i.e. one opened by a previous `tend` dispatch that never
+    got to record a completed `state.Run` (this device killing the whole
+    `gardener overnight` process mid-dispatch is the expected cause, see
+    overnight.py's resume-cursor caveat). Best-effort: any `gh` failure
+    (not authenticated, network hiccup, malformed JSON) is treated the same
+    as "no orphan found" rather than raised, since this check must never be
+    the reason a normal `tend` dispatch fails outright — it's an
+    enhancement over a fresh dispatch, not a precondition for one.
+
+    If more than one open PR carries the marker (e.g. two interrupted runs
+    in a row before either could be continued), the most recently created
+    one wins — sorted explicitly here rather than trusting `gh pr list`'s
+    own default ordering, so this stays deterministic and testable.
+    """
+    if shutil.which("gh") is None:
+        return None
+    try:
+        res = _run(
+            ["gh", "pr", "list", "--repo", repo, "--state", "open",
+             "--json", "number,headRefName,body,createdAt", "--limit", "50"],
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"gardener: NOTE — could not check for orphaned PRs on {repo} (non-fatal): "
+              f"{e}", file=sys.stderr)
+        return None
+    if res.returncode != 0:
+        print(f"gardener: NOTE — could not check for orphaned PRs on {repo} (non-fatal): "
+              f"{res.stderr.strip()}", file=sys.stderr)
+        return None
+    try:
+        prs = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    candidates = [pr for pr in prs if dev_loop.ORPHAN_MARKER in (pr.get("body") or "")]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)
+    newest = candidates[0]
+    return dev_loop.OrphanedPR(number=newest["number"], head_branch=newest["headRefName"])
 
 
 def build_prompt(mode: Mode, repo: str, target_cwd: Path, conventions_dir: Path, default_branch: str) -> str:
@@ -313,6 +358,15 @@ def cmd_tend(args: argparse.Namespace) -> int:
         print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
         branch = current_branch(target_dir)
 
+        orphaned_pr = find_orphaned_pr(args.repo)
+        if orphaned_pr is not None:
+            print(
+                f"gardener: found orphaned PR #{orphaned_pr.number} (branch "
+                f"{orphaned_pr.head_branch!r}) on {args.repo} — this run will continue "
+                "it instead of starting fresh",
+                file=sys.stderr,
+            )
+
         slug = dev_loop.skill_slug(args.repo)
         if not dev_loop.has_dev_loop_skill(slug):
             print(
@@ -381,7 +435,9 @@ def cmd_tend(args: argparse.Namespace) -> int:
             )
         print(f"gardener: dispatching /{slug} (merge_eligible={eligible})...", file=sys.stderr)
 
-        tend_prompt = dev_loop.build_tend_prompt(args.repo, slug, target_dir, branch, eligible)
+        tend_prompt = dev_loop.build_tend_prompt(
+            args.repo, slug, target_dir, branch, eligible, orphaned_pr=orphaned_pr
+        )
         result = run_claude(
             mode=Mode.TEND,
             prompt=tend_prompt,

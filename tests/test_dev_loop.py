@@ -92,6 +92,29 @@ class TestPromptBuilding(unittest.TestCase):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
         self.assertIn("exactly ONE pass", prompt)
 
+    def test_tend_prompt_always_instructs_marking_new_prs(self):
+        prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
+        self.assertIn(dev_loop.ORPHAN_MARKER, prompt)
+        self.assertIn("NEW pull request", prompt)
+
+    def test_tend_prompt_without_orphan_has_no_continuation_instructions(self):
+        prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
+        self.assertNotIn("gardener found an existing OPEN pull request", prompt)
+
+    def test_tend_prompt_with_orphan_instructs_continuation_not_a_fresh_start(self):
+        orphan = dev_loop.OrphanedPR(number=238, head_branch="feature/plugin-icons-and-versions")
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False, orphaned_pr=orphan
+        )
+        self.assertIn("gardener found an existing OPEN pull request", prompt)
+        self.assertIn("#238", prompt)
+        self.assertIn(
+            "git fetch origin feature/plugin-icons-and-versions && "
+            "git checkout feature/plugin-icons-and-versions",
+            prompt,
+        )
+        self.assertIn("do not start a second, duplicate branch/PR", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
