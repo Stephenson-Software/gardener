@@ -701,9 +701,13 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             )
             break
 
+        progress = (
+            f"{attempted + 1}/{len(order)}" if len(repo_batch) == 1
+            else f"{attempted + 1}-{attempted + len(repo_batch)}/{len(order)}"
+        )
         print(
             f"gardener: overnight dispatching tend for {', '.join(repo_batch)} "
-            f"({attempted + 1}-{attempted + len(repo_batch)}/{len(order)} candidates this run"
+            f"({progress} candidates this run"
             + (f", concurrency={len(repo_batch)}" if len(repo_batch) > 1 else "")
             + ")...",
             file=sys.stderr,
