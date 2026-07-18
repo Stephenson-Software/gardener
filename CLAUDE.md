@@ -2,13 +2,17 @@
 
 ## What this repo is
 
-gardener is a Python CLI that aligns one target software repo at a time
-against [`dmccoystephenson/dms-conventions`](https://github.com/dmccoystephenson/dms-conventions).
-It's phase 2 of a two-phase initiative — dms-conventions is the source of
-truth for what "aligned" means; this repo is the orchestration and
+gardener is a safety-gated Python CLI that dispatches Claude Code against a
+fleet of software repos: `align` checks one target repo at a time against
+[`dmccoystephenson/dms-conventions`](https://github.com/dmccoystephenson/dms-conventions)
+(phase 1 of this two-phase initiative — dms-conventions is the source of
+truth for what "aligned" means; gardener is the tool that consumes it),
+while `tend`/`garden`/`overnight` make real, broader progress on a repo (or
+a whole opt-in list of them, unattended overnight) by dispatching that
+repo's *own* dev-loop skill instead. This repo is the orchestration and
 safety-gating layer around a dispatched `claude -p` run that does the
-actual reading/analysis/implementation. See `README.md` for the full CLI
-shape and safety model.
+actual reading/analysis/implementation in every mode. See `README.md` for
+the full CLI shape and safety model.
 
 gardener also has a second, distinct command, `tend`, that makes real,
 broader progress on a target repo by dispatching *that repo's own*
