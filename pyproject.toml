@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gardener"
+version = "0.1.0"
+description = "Aligns a target repo against dms-conventions via a dispatched, safety-gated Claude Code CLI run."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+authors = [{ name = "dmccoystephenson" }]
+dependencies = []
+
+[project.scripts]
+gardener = "gardener.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gardener*"]
+
+[tool.setuptools.package-data]
+gardener = ["prompts/*.tmpl"]
