@@ -46,7 +46,13 @@ def _save(path: Path, repos: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Sorted + deduped on every write so the file stays diff-friendly and
     # hand-editable without gardener re-adding an accidental duplicate.
-    path.write_text(json.dumps(sorted(set(repos)), indent=2) + "\n")
+    #
+    # Written atomically (temp file + os.replace), not a direct
+    # write_text, so a process killed mid-write can never leave a torn,
+    # invalid-JSON file behind — same reasoning as garden.py's _save.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(sorted(set(repos)), indent=2) + "\n")
+    os.replace(tmp_path, path)
 
 
 def list_allowed(path: Path | None = None) -> list[str]:

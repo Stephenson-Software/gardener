@@ -60,6 +60,14 @@ class TestMergeAllowlist(unittest.TestCase):
         with self.assertRaises(ValueError):
             merge_allowlist.list_allowed(path=self.path)
 
+    def test_save_leaves_no_leftover_tmp_file(self):
+        # _save writes via a sibling .tmp file + os.replace for atomicity
+        # (a kill mid-write must never leave a torn allow-list file) —
+        # confirm the temp file doesn't linger after a normal save.
+        merge_allowlist.add("owner/repo", path=self.path)
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        self.assertFalse(tmp_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

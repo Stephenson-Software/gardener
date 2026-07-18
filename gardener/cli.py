@@ -244,7 +244,7 @@ def cmd_align(args: argparse.Namespace) -> int:
             model=args.model,
             timeout=args.timeout,
         )
-    except (DispatchError, RuntimeError, ValueError) as e:
+    except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
         failed_run = state.Run(
             repo=args.repo,
@@ -390,7 +390,7 @@ def cmd_tend(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             mode_spec=tend_mode_spec(eligible),
         )
-    except (DispatchError, RuntimeError, ValueError) as e:
+    except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
         failed_run = state.Run(
             repo=args.repo,
@@ -503,7 +503,24 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     dispatched session (see garden.py's module docstring) — being in the
     garden alone never authorizes a merge.
     """
-    garden_list = garden.list_garden(path=args.garden_file)
+    try:
+        garden_list = garden.list_garden(path=args.garden_file)
+    except ValueError as e:
+        # A corrupted garden.json (e.g. a torn write from this device
+        # killing a prior process mid-write — see garden.py's _save) must
+        # not crash the whole unattended batch with a raw traceback; every
+        # other cmd_overnight failure path is caught and alerted (see the
+        # batch summary notification below), this is the setup-failure
+        # equivalent for the one thing that happens before any per-repo
+        # dispatch begins.
+        print(f"gardener: overnight: error: {e}", file=sys.stderr)
+        try:
+            notify.default_notifier().notify(
+                "gardener overnight: FAILED — could not read garden", str(e), notify.Level.ERROR
+            )
+        except Exception as notify_err:  # noqa: BLE001 - the alert must never mask the original error
+            print(f"gardener: overnight: notification failed (non-fatal): {notify_err}", file=sys.stderr)
+        return 1
     if not garden_list:
         print(
             "gardener: garden is empty — nothing to tend overnight "
