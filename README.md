@@ -71,6 +71,8 @@ below for how this is implemented.
 gardener align --repo <owner/repo> [--implement] [--file-issue]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
+gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
+gardener overnight [--hours N]
 gardener status [--repo <owner/repo>]
 ```
 
@@ -147,6 +149,100 @@ lives in, overridable via `GARDENER_STATE_DIR`) of repos `gardener tend
 here can never be merged into by a `tend` dispatch, no matter what flags
 are passed — see `merge_allowlist.py` and `dispatch.py`'s `tend_mode_spec()`.
 
+### Overnight / unattended operation
+
+**`gardener garden`** manages a second, independent opt-in list — separate
+from the merge allow-list above — of repos `gardener overnight` is allowed
+to tend while nobody is watching. Same file-location convention and same
+safe default as the merge allow-list: `gardener garden add --repo
+owner/repo` / `remove --repo owner/repo` / `list` manage a small local JSON
+file (`~/.local/state/gardener/garden.json` by default, overridable via
+`GARDENER_STATE_DIR`), and a missing file means an empty garden — a repo is
+never touched overnight just because it exists on this machine, only
+because it was explicitly added. See `gardener/garden.py`.
+
+**`gardener overnight [--hours N]`** is the actual "tend to my garden while
+I sleep" entry point:
+
+1. Reads the garden. An empty garden prints a clear message and exits `0`
+   — nothing to do is not an error.
+2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**
+   (calls `cmd_tend` directly, no `gardener` subprocess-of-itself) for each
+   garden repo in turn, starting from wherever the *previous* `overnight`
+   run left off (see "Resuming across nights" below), until either the
+   garden is exhausted for this run or the time budget runs out.
+3. `--allow-merge` is passed unconditionally to every dispatch. This is
+   safe *without* `overnight` needing any merge-decision logic of its own:
+   `tend`'s own `merge_eligible()` check still requires the target repo to
+   *also* be present on the separate merge allow-list before `gh pr merge`
+   is ever reachable in the dispatched session (see "Merge allow-list"
+   above) — being in the garden alone never authorizes a merge. The garden
+   and the merge allow-list are two independent, both-opt-in gates.
+4. **Time budget (`--hours`, default `8.0` — a full night's sleep).** The
+   very first repo of a run is always attempted (as long as `--hours` is
+   positive) so a run never silently dispatches nothing; every repo after
+   the first requires enough headroom left in the budget for one more
+   worst-case `tend` call (`TEND_DEFAULT_TIMEOUT_SECONDS`, 45 min) before
+   it's started — computed from real elapsed time so far, not a
+   precomputed worst-case-per-repo plan, so a night of faster-than-worst-case
+   dispatches (79-250s observed in practice — see Project Status) can fit
+   more repos than the naive arithmetic would suggest. A repo already in
+   progress is never hard-killed mid-run to respect the budget; the budget
+   only gates whether a *new* repo is started.
+5. **Resuming across nights.** If the garden is longer than one night's
+   budget can cover, a small resume cursor
+   (`~/.local/state/gardener/overnight_cursor.json`) tracks which repo to
+   start from next, round-robin — so a garden of 20 repos and a budget that
+   only fits 6 per night eventually reaches every repo across several
+   nights instead of only ever tending the first 6. See `gardener/overnight.py`.
+6. **Notifications.** Each repo's own outcome is logged and alerted via the
+   *existing* `state.record_run`/`_notify_run` machinery `cmd_tend` already
+   uses (unchanged; see [Alerting design](#alerting-design)) — you get one
+   Discord message per repo for free. `overnight` additionally fires **one
+   summary notification at the end of the whole batch** — total repos
+   attempted, how many opened a PR, how many merged, how many hit a
+   `DECISION NEEDED:` line, how many errored, and elapsed time — so you wake
+   up to one clear digest instead of piecing together N separate messages.
+   With no Discord webhook configured, the summary is still printed to
+   stderr; the notification call itself is a clean no-op (`NullNotifier`,
+   see [Alerting (optional)](#alerting-optional)), not a failure.
+7. One repo failing or timing out does not abort the batch — it's logged,
+   notified, and `overnight` moves on to the next repo.
+
+#### Wiring it to "tend to my garden while I sleep"
+
+This device (a UserLand/Android sandbox) has no systemd, no cron, and no
+true always-on daemon guarantee — Android can and will kill background
+processes on a task swipe-away, aggressive battery/OOM management, or
+extended idle, the same way it kills every other background process on
+this machine. There is no way around that here. What `~/a-private-repo-2/bin/
+devsrv` gives you instead: the command is *registered* so it's visible,
+restartable without retyping it, and comes back on its own the next time an
+interactive shell starts (wired into `.bashrc`) if it gets killed —
+**not** an uninterrupted guarantee that it runs the whole night no matter
+what.
+
+The actual invocation:
+
+```bash
+devsrv start gardener-overnight --autostart -- gardener overnight --hours 8
+devsrv status gardener-overnight   # confirm it's running
+devsrv logs gardener-overnight -f  # watch progress live
+```
+
+`--autostart` means: if Android kills every background process (confirmed
+directly to happen on a task swipe-away), this specific run will NOT
+silently resume mid-budget on its own — the `claude` subprocess it was
+waiting on is gone too. What `--autostart` actually buys you is that the
+*next* interactive shell you open on this device re-runs `devsrv
+autostart-all`, which restarts `gardener overnight --hours 8` fresh (a new
+8-hour budget from that point, not a continuation of the old one) if it
+isn't already running. Combined with the resume cursor above, a run that
+gets interrupted partway through the garden doesn't lose progress on the
+repos it already finished — the next invocation (autostart-triggered or
+manually re-run) picks up from the next untended repo, not the top of the
+list again.
+
 ### Other flags
 
 - `--model <name>` — override the model `claude` uses (`align` and `tend`).
@@ -193,13 +289,19 @@ Windows (PowerShell):
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude`; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
-parsing, prompt templating, and `_notify_run`'s severity mapping (mocking
-the notifier, not `state.Run` construction); `tests/test_notify.py` mocks
-`urllib.request.urlopen` so `DiscordNotifier` is fully covered — success,
-a failed POST, and "no webhook configured" — without ever making a real
-HTTP call. None of the automated tests hit the network or a real repo —
-see [Manual/end-to-end verification](#manualend-to-end-verification) for
-that.
+parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
+notifier, not `state.Run` construction), `cmd_tend` with clone/dispatch
+mocked, and `cmd_overnight` with `cmd_tend` itself mocked (and, where the
+budget/headroom logic specifically is under test, `time.monotonic` mocked
+too, so timing assertions never depend on wall-clock jitter);
+`tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
+is fully covered — success, a failed POST, and "no webhook configured" —
+without ever making a real HTTP call; `tests/test_garden.py` and
+`tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
+pure rotation/budget/resume-cursor/outcome-classification logic with real
+files in a tmp dir. None of the automated tests hit the network or a real
+repo — see [Manual/end-to-end verification](#manualend-to-end-verification)
+for that.
 
 ### Manual/end-to-end verification
 
@@ -219,6 +321,18 @@ have access to and confirm three things:
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.
+
+**`gardener overnight`**: since it dispatches `tend` in-process per repo,
+its own verification is the same as `tend`'s above, repeated per repo in
+the garden, plus three things specific to the batch layer itself: (1) run
+with a small `--hours` (e.g. `0.1`-`0.2`) against a garden of 1-2 low-stakes
+repos and confirm it dispatches at least the first repo and stops well
+short of running indefinitely; (2) run it twice in a row against a garden
+too big for one budget window and confirm the second run tends a
+*different* repo than the first (the resume cursor advanced, not reset);
+(3) confirm exactly one additional summary notification fires per
+invocation, on top of each repo's own per-repo notification. See Project
+Status below for the actual run this verified against.
 
 **Alerting**: `DiscordNotifier` is covered by mocked unit tests (see
 above) rather than a real Discord send in the automated suite — same
@@ -439,6 +553,60 @@ into a low-stakes personal repo, not an accidental one; it was not
 attempted, and would not have been permitted, without both conditions
 explicitly set up first.
 
+`gardener overnight` has also been run for real, end to end (2026-07-18),
+against a 2-repo garden (`dmccoystephenson/create-dev-loop`,
+`dmccoystephenson/a-private-repo-3`) with an isolated
+`GARDENER_STATE_DIR` and an empty merge allow-list (deliberately — neither
+repo was eligible to merge for this test, same "err toward not merging"
+posture as the `tend --allow-merge` verification above), invoked twice in a
+row with `--hours 0.15` (a small budget, on purpose, so the run cycle could
+be observed without waiting out a full 8h window):
+
+- **Run 1**: started at the resume cursor's default (index 0,
+  `create-dev-loop`, alphabetically first). No `/create-dev-loop-dev-loop`
+  skill existed yet under that exact derived slug (the repo's actual local
+  skill was hand-named `cdl-dev-loop`, a different slug than gardener
+  derives from the repo name — see `dev_loop.py`'s slug derivation), so
+  `tend` bootstrapped one via `create-dev-loop` first, then dispatched it
+  (403.6s dispatch, $1.87, `ok=True`, 3 permission denials — correctly
+  blocked out-of-scope attempts). It opened PR #55, ended with a
+  `DECISION NEEDED:` line (merge wasn't authorized — the repo isn't on the
+  merge allow-list), and correctly did **not** attempt a second repo:
+  `overnight stopping — insufficient budget remaining for another repo
+  (-238s left, need 2700s headroom)`. The batch summary
+  (`1 repo(s) attempted in 13.0m — 1 PR(s) opened, 0 merged, 1 awaiting a
+  decision, 0 errored, 1 not reached this run`) printed to stderr exactly
+  as designed (no Discord webhook was configured for this test, so the
+  notify call itself was a clean `NullNotifier` no-op — see
+  [Alerting (optional)](#alerting-optional)). The resume cursor advanced to
+  index 1.
+- **Run 2**: re-invoked identically. Correctly resumed at index 1
+  (`a-private-repo-3`), NOT index 0 again — confirming the
+  round-robin resume mechanism works across separate invocations, not just
+  within a loop in one process. That repo already had its
+  `/a-private-repo-3-dev-loop` skill (no bootstrap needed this time,
+  hence a faster overall run: 340.2s dispatch, $1.22, `ok=True`, 4
+  permission denials), opened PR #6, again ended in `DECISION NEEDED:`, and
+  again stopped before attempting a second repo (`193s left, need 2700s
+  headroom`). The cursor wrapped back to index 0 — both repos in the
+  garden had now been attempted exactly once across the two runs.
+
+Confirmed afterward via `gh pr list`: PR #55 (`create-dev-loop`) and PR #6
+(`a-private-repo-3`) are both open, not merged — `overnight` made
+real progress on two separate repos across two separate invocations without
+ever mutating either target's default branch, exactly as designed. The
+`devsrv` wiring documented above was also verified for real: `devsrv start
+<name> --autostart -- gardener overnight --hours 8` (tested against both
+the exact real command — confirmed its stderr output lands correctly in
+`devsrv logs`, though a run against an empty garden exits before devsrv's
+brief startup poll window closes, which devsrv reports as "failed to
+start" even though it ran correctly and exited 0 — an artifact of testing
+with a near-instant no-op, not a real failure mode for an actual
+multi-repo overnight run — and, separately, a long-running placeholder
+process to confirm the full `start`/`status`/`stop`/`restart`/`remove`
+lifecycle and `--autostart` persistence all work exactly as
+`~/a-private-repo-2/bin/devsrv`'s own docs describe).
+
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
@@ -462,11 +630,19 @@ gardener/
                        the headless-safety preamble)
     merge_allowlist.py — local JSON allow-list of repos `tend --allow-merge`
                        is permitted to actually merge PRs in
+    garden.py        — local JSON opt-in list of repos `gardener overnight`
+                       is permitted to tend unattended (independent of the
+                       merge allow-list above — see garden.py's docstring)
+    overnight.py     — pure budget/rotation/resume-cursor/outcome-classification
+                       logic for `gardener overnight`; cli.py's cmd_overnight
+                       composes it with real time and a real (in-process)
+                       tend dispatch
     conventions.py   — clones/refreshes the local dms-conventions cache
     state.py         — SQLite-backed run history
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
-  tests/             — unit tests (state, cli parsing/templating/notify-severity, mocked dispatch, notify)
+  tests/             — unit tests (state, cli parsing/templating/notify-severity,
+                       mocked dispatch, notify, garden, overnight)
 ```
 
 ## Relationship to dms-conventions
