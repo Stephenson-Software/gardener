@@ -23,6 +23,19 @@ merging, and headless dispatch has no human to ask. See README's Safety
 model section for what was actually tested and observed before this was
 trusted.
 
+The "tend to my garden overnight" use case above is now real:
+`gardener garden` (`garden.py`) is a small opt-in list of repos, and
+`gardener overnight` (`overnight.py` for the pure budget/rotation/resume
+logic, `cli.py`'s `cmd_overnight` for the real orchestration) dispatches
+`tend --allow-merge` in-process across that list within a time budget,
+resuming across invocations via a small cursor file when the garden is
+bigger than one budget window. It adds no new merge-decision logic of its
+own — `tend`'s existing `merge_eligible()` gate (repo must *also* be on the
+separate merge allow-list) is what actually decides whether a merge can
+happen, unchanged. See README's "Overnight / unattended operation" section
+for the full design and the honest reliability caveat about this device
+having no true always-on daemon guarantee.
+
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.
@@ -88,10 +101,14 @@ record what you actually observed before changing the docstring's claims.
 - **Automated:** `PYTHONPATH=. python3 -m unittest discover -s tests -v`.
   `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir.
-  `test_cli.py` covers argument parsing and prompt templating.
-  `test_dev_loop.py` covers slug derivation and prompt content, and
-  `test_merge_allowlist.py` covers the allow-list's JSON read/write — none
-  of these invoke `claude`, `git`, or `gh` either.
+  `test_cli.py` covers argument parsing, prompt templating, `cmd_tend` with
+  clone/dispatch mocked, and `cmd_overnight` with `cmd_tend` mocked (and
+  `time.monotonic` mocked for the budget-specific assertions).
+  `test_dev_loop.py` covers slug derivation and prompt content,
+  `test_merge_allowlist.py` covers the allow-list's JSON read/write, and
+  `test_garden.py`/`test_overnight.py` cover the garden JSON list and
+  `overnight.py`'s pure rotation/budget/resume-cursor/outcome-classification
+  logic the same way — none of these invoke `claude`, `git`, or `gh` either.
 - **Manual (required for anything touching `dispatch.py`, `dev_loop.py`, or
   a prompt template/preamble):** run a real dispatch against a low-stakes
   repo you have access to and confirm the target repo was not mutated
@@ -114,6 +131,19 @@ record what you actually observed before changing the docstring's claims.
     whatever it produces is actually safe — this is the one dispatch mode
     capable of a real, semi-autonomous merge; don't skip reviewing what it
     actually did afterward.
+  - `overnight`: real-verify with a small `--hours` (e.g. `0.1`-`0.2`)
+    against a garden of 1-2 low-stakes repos (`gardener garden add`) —
+    confirm it dispatches, stops within budget, and produces the batch
+    summary notification. Separately, run it twice against a garden bigger
+    than one budget window and confirm the second run's resume cursor
+    (`~/.local/state/gardener/overnight_cursor.json` by default) advanced
+    past what the first run already attempted rather than restarting from
+    the top of the garden. Keep the merge allow-list empty (or scoped to
+    only repos you're already confident about, per the `tend --allow-merge`
+    note above) for this test — `overnight` passes `--allow-merge`
+    unconditionally, so whether anything can actually merge depends
+    entirely on the separate merge allow-list, same as a direct `tend
+    --allow-merge` call.
 - `--implement` and `--file-issue` should be exercised for real (not just
   unit-tested) before being trusted against anything that matters, the
   same way report mode was — this hadn't happened as of this repo's first
@@ -148,4 +178,5 @@ target-repo alignment rules, not just the ones it enforces on others.
 | `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`, and the `tend`-specific `AskUserQuestion`/`Agent`/`ScheduleWakeup` findings) still holds against the currently-installed `claude` version |
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
 | `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
+| README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path, the exact `devsrv` invocation) and still states the "no true always-on daemon guarantee on this device" caveat plainly, not oversold |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |
