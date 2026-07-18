@@ -504,32 +504,14 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
     state.record_run(completed_run, db_path=args.state_db)
     _notify_run(completed_run)
 
-    exit_code = 1 if (not result.ok or result.timed_out) else 0
-    return TendResult(
-        exit_code=exit_code,
-        ok=result.ok,
-        result_text=result.result_text or "",
-        run=completed_run,
-        duration_ms=result.duration_ms,
-        cost_usd=result.cost_usd,
-        permission_denials=result.permission_denials,
-        timed_out=result.timed_out,
-    )
-
-
-def cmd_tend(args: argparse.Namespace) -> int:
-    """`gardener tend`'s CLI entry point — dispatches via `_dispatch_tend`
-    and prints the same human-readable progress/result text this command
-    has always printed, then returns the underlying exit code. Prints
-    nothing beyond `_dispatch_tend`'s own stderr progress lines when the
-    dispatch never actually ran (`dispatched=False` — a setup error or a
-    failed create-dev-loop bootstrap), matching this function's original
-    behavior before the `TendResult` split."""
-    result = _dispatch_tend(args)
-    if not result.dispatched:
-        return result.exit_code
-
-    print(result.result_text or "(no output)")
+    # Printed here (stderr), not left to cmd_tend's wrapper, so this summary
+    # line still shows up in `gardener overnight`'s log too — cmd_overnight
+    # calls _dispatch_tend directly, bypassing cmd_tend entirely (see
+    # TendResult's docstring), so a print living only in cmd_tend would
+    # silently never fire for the overnight path. Confirmed missing for
+    # real during --concurrency testing (2026-07-18): gateway/gardener/
+    # pocket-rig all completed and were correctly recorded/classified, but
+    # overnight's log never showed a "done in Xms" line for any of them.
     print("", file=sys.stderr)
     print(
         f"gardener: done in {result.duration_ms}ms, "
@@ -545,6 +527,33 @@ def cmd_tend(args: argparse.Namespace) -> int:
         )
     if result.timed_out:
         print(f"gardener: timed out after {args.timeout}s", file=sys.stderr)
+
+    exit_code = 1 if (not result.ok or result.timed_out) else 0
+    return TendResult(
+        exit_code=exit_code,
+        ok=result.ok,
+        result_text=result.result_text or "",
+        run=completed_run,
+        duration_ms=result.duration_ms,
+        cost_usd=result.cost_usd,
+        permission_denials=result.permission_denials,
+        timed_out=result.timed_out,
+    )
+
+
+def cmd_tend(args: argparse.Namespace) -> int:
+    """`gardener tend`'s CLI entry point — dispatches via `_dispatch_tend`
+    (which already prints the "done in Xms" stderr summary itself — see its
+    body — so both direct CLI use and `cmd_overnight` get it) and prints
+    the dispatched result text to stdout, then returns the exit code.
+    Prints nothing beyond `_dispatch_tend`'s own stderr progress lines when
+    the dispatch never actually ran (`dispatched=False` — a setup error or
+    a failed create-dev-loop bootstrap), matching this function's original
+    behavior before the `TendResult` split."""
+    result = _dispatch_tend(args)
+    if not result.dispatched:
+        return result.exit_code
+    print(result.result_text or "(no output)")
     return result.exit_code
 
 

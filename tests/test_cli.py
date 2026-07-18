@@ -418,6 +418,39 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_dispatch_tend_prints_the_done_summary_even_when_called_directly(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        """Regression test: `cmd_overnight` calls `_dispatch_tend` directly
+        (not `cmd_tend`) to avoid the redirect_stdout thread-safety hazard
+        (see TendResult's docstring / issue #15). The "done in Xms" summary
+        line used to live only in cmd_tend's wrapper, which meant it never
+        appeared in `gardener overnight`'s log for any repo — confirmed
+        missing for real during --concurrency 3 testing (2026-07-18), even
+        though the run had genuinely completed and been recorded correctly.
+        `_dispatch_tend` must print this itself so both callers get it."""
+        from gardener.cli import _dispatch_tend
+
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = _dispatch_tend(self._args())
+
+        self.assertTrue(result.dispatched)
+        self.assertIn("gardener: done in 100ms", stderr.getvalue())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     def test_orphaned_pr_is_threaded_into_the_tend_prompt(
