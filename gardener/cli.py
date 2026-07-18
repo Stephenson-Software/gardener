@@ -24,7 +24,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, dev_loop, garden, merge_allowlist, notify, overnight, state
+from gardener import conventions, dev_loop, garden, merge_allowlist, notify, overnight, state, transcript
 from gardener.dispatch import (
     CREATE_DEV_LOOP_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -582,6 +582,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail_transcript(args: argparse.Namespace) -> int:
+    """Pretty-print a Claude Code session transcript (`.jsonl`) — the same
+    file `align`/`tend`/`overnight` now print the path to via `gardener:
+    session transcript: ...` shortly after dispatch starts (see
+    `dispatch.py`'s "Live transcript visibility" section and
+    `transcript.py`). Standalone from the rest of gardener's dispatch flow
+    deliberately: it only ever reads a file, so it's safe to point at a
+    transcript from a still-in-progress dispatch (`-f`/`--follow`) or one
+    that already finished."""
+    return transcript.print_transcript(args.path, follow=args.follow)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gardener",
@@ -693,6 +705,21 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     status.set_defaults(func=cmd_status)
+
+    tail_transcript = sub.add_parser(
+        "tail-transcript",
+        help="Pretty-print a Claude Code session transcript (tool calls, text, tool results)",
+    )
+    tail_transcript.add_argument(
+        "path", type=Path,
+        help="Path to the transcript .jsonl file (see the 'gardener: session transcript: "
+             "...' line an align/tend/overnight dispatch prints to stderr)",
+    )
+    tail_transcript.add_argument(
+        "-f", "--follow", action="store_true",
+        help="Keep reading as the file grows, like `tail -f`, instead of exiting at EOF",
+    )
+    tail_transcript.set_defaults(func=cmd_tail_transcript)
 
     return parser
 
