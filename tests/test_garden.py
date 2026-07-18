@@ -61,6 +61,14 @@ class TestGarden(unittest.TestCase):
         with self.assertRaises(ValueError):
             garden.list_garden(path=self.path)
 
+    def test_save_leaves_no_leftover_tmp_file(self):
+        # _save writes via a sibling .tmp file + os.replace for atomicity
+        # (a kill mid-write must never leave a torn garden.json) — confirm
+        # the temp file doesn't linger after a normal, successful save.
+        garden.add("owner/repo", path=self.path)
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        self.assertFalse(tmp_path.exists())
+
     def test_garden_and_merge_allowlist_are_independent_files(self):
         # Adding to the garden must never touch the separate merge
         # allow-list file, and vice versa — see garden.py's module

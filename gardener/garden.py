@@ -53,7 +53,18 @@ def _save(path: Path, repos: list[str]) -> None:
     # round-robin rotation relies on this sorted order being stable across
     # reads for its resume cursor to mean the same thing from one
     # `gardener overnight` invocation to the next.
-    path.write_text(json.dumps(sorted(set(repos)), indent=2) + "\n")
+    #
+    # Written atomically (temp file + os.replace) rather than a direct
+    # write_text, which truncates-then-writes in place: a process killed
+    # mid-write (this device can and does kill background processes
+    # without warning — see README's "Wiring it to 'tend to my garden
+    # while I sleep'" section) would otherwise leave a torn, invalid-JSON
+    # file for the next `gardener overnight` to trip over. os.replace is
+    # atomic on the same filesystem, which the temp file always is since
+    # it's a sibling of `path`.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(sorted(set(repos)), indent=2) + "\n")
+    os.replace(tmp_path, path)
 
 
 def list_garden(path: Path | None = None) -> list[str]:
