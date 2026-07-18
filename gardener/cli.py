@@ -82,12 +82,36 @@ def _run(argv: list[str], cwd: Optional[Path] = None, timeout: int = 120) -> sub
     )
 
 
+def _default_branch_name(repo: str) -> str:
+    res = _run(
+        ["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
+        timeout=30,
+    )
+    branch = (res.stdout or "").strip()
+    if res.returncode != 0 or not branch:
+        raise RuntimeError(f"could not determine default branch for {repo}: {res.stderr.strip()}")
+    return branch
+
+
 def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = True) -> Path:
     """Read-only checkout of the target repo, via `gh repo clone` (so it
     picks up the same auth `gh` already has, private repos included). A
     refresh hard-resets to origin's default branch first — defense in
     depth so a leftover local mutation from a hypothetical earlier
-    implement-mode run never leaks into a later report-mode gap read."""
+    implement/tend-mode run never leaks into a later report-mode gap read.
+
+    Always lands on the repo's real default branch (via `gh repo view
+    --json defaultBranchRef`), not whatever branch happened to be checked
+    out — a real bug found while testing `gardener tend` for real
+    (2026-07-18): a previous `tend` run had left the cache clone checked
+    out on a feature branch it pushed (`test-cli-output-file-coverage`);
+    the next run's refresh tried `git reset --hard
+    origin/test-cli-output-file-coverage`, which failed outright because
+    the preceding `git fetch --depth 1 origin` (no refspec) doesn't
+    reliably bring down a non-default branch's ref for a shallow clone.
+    Fetching and checking out the actual default branch by name every time
+    sidesteps this rather than trusting whatever ref HEAD happened to be
+    on from a previous run."""
     if not REPO_RE.match(repo):
         raise ValueError(f"--repo must look like owner/name, got: {repo!r}")
     if shutil.which("gh") is None:
@@ -105,10 +129,14 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
             raise RuntimeError(
                 f"cache dir {dest} exists but its origin doesn't match {repo} — refusing to reuse it"
             )
-        branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=dest, timeout=15).stdout.strip()
+        default_branch = _default_branch_name(repo)
         for cmd in (
-            ["git", "fetch", "--depth", "1", "origin"],
-            ["git", "reset", "--hard", f"origin/{branch}"],
+            ["git", "fetch", "--depth", "1", "origin", default_branch],
+            # -B (create-or-reset) rather than plain checkout: correctly
+            # lands on a clean copy of the default branch regardless of
+            # what was checked out before (a different branch, a detached
+            # HEAD, or the default branch itself but stale/dirty).
+            ["git", "checkout", "-B", default_branch, f"origin/{default_branch}"],
             ["git", "clean", "-fdx"],
         ):
             res = _run(cmd, cwd=dest, timeout=60)
