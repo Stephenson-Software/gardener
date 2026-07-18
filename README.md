@@ -74,6 +74,7 @@ gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N]
 gardener status [--repo <owner/repo>]
+gardener tail-transcript <path> [-f]
 ```
 
 - **`gardener align --repo owner/repo`** (no flags) — **report-only,
@@ -261,6 +262,45 @@ list again.
   (`align` and `tend`) — reuse whatever is already cached instead of
   fetching latest first.
 
+### Live session visibility
+
+`align`, `tend`, and `overnight` still dispatch synchronously (see [Why
+synchronous dispatch, not `--bg`](#why-synchronous-dispatch-not---bg)
+below) and only capture output when the whole run finishes — for `tend`,
+that's up to `TEND_DEFAULT_TIMEOUT_SECONDS` (45 min) per repo with
+otherwise zero visibility into what's happening while it runs, a real gap
+for anyone watching `devsrv logs gardener-overnight -f` or the dashboard's
+log viewer overnight.
+
+Claude Code already solves the actual data half of this on its own, for
+every `-p` session, no special flag required: it writes a JSONL transcript
+— growing in real time — to `~/.claude/projects/<encoded-cwd>/<session-
+id>.jsonl`. Every dispatch now surfaces that file's path within seconds of
+starting, printed to stderr the same way every other `gardener:` progress
+line is:
+
+```
+gardener: session transcript: /home/userland/.claude/projects/-home-userland...-repo/<session-id>.jsonl (tail -f it for live detail, or `gardener tail-transcript -f <path>`)
+```
+
+This is a background daemon thread started right before the existing,
+unmodified blocking dispatch call — it briefly polls for the new transcript
+file to show up and prints its path once found, or gives up silently within
+a few seconds if nothing does; either way it can never delay or fail the
+real dispatch. See `dispatch.py`'s "Live transcript visibility" docstring
+section and `transcript.py`'s own module docstring (which documents,
+against two real confirmed examples, exactly how a working directory gets
+encoded into that directory name) for the full design.
+
+**`gardener tail-transcript <path> [-f]`** pretty-prints that file — one
+line per meaningful event (a tool call and its truncated input, an
+assistant text block, or a tool result flagged `ok`/`ERROR`) instead of raw
+JSONL. Same shape as the ad hoc Python snippet originally hand-typed to
+tail a live `tend` dispatch's transcript, now a permanent, tested part of
+gardener. Without `-f` it dumps whatever's in the file right now and exits
+(safe to run against a still-in-progress dispatch); with `-f` it keeps
+reading as the file grows, like `tail -f`, until interrupted.
+
 ## Support
 
 ### Experiencing a bug?
@@ -299,9 +339,16 @@ is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/budget/resume-cursor/outcome-classification logic with real
-files in a tmp dir. None of the automated tests hit the network or a real
-repo — see [Manual/end-to-end verification](#manualend-to-end-verification)
-for that.
+files in a tmp dir; `tests/test_transcript.py` covers the encoding rule
+(against the two real, empirically-confirmed examples in `transcript.py`'s
+module docstring, not invented ones), the transcript-file-discovery polling
+loop (real files in a tmp dir, but `time_fn`/`sleep_fn` always injected so
+nothing ever sleeps for a real second), and the pretty-printer's
+line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
+`tool_result`, malformed JSON, and blank lines). None of the automated
+tests hit the network or a real repo, or invoke a real `claude` process —
+see [Manual/end-to-end verification](#manualend-to-end-verification) for
+that.
 
 ### Manual/end-to-end verification
 
@@ -607,6 +654,37 @@ process to confirm the full `start`/`status`/`stop`/`restart`/`remove`
 lifecycle and `--autostart` persistence all work exactly as
 `~/pocket-rig/bin/devsrv`'s own docs describe).
 
+**Live transcript visibility** (see [Live session
+visibility](#live-session-visibility)) has also been run for real
+(2026-07-18), end to end, with a real `gardener align --repo
+dmccoystephenson/Simple-Calculator-GUI-Using-SDL` (report-only, an
+unrelated low-stakes repo — deliberately not `Stephenson-Software/gateway`,
+`dmccoystephenson/pocket-rig`, or `dmccoystephenson/gardener`, all still
+possibly in use by a concurrent `gardener overnight` run at the time),
+isolated to a scratch `GARDENER_CACHE_DIR`/`GARDENER_STATE_DIR` and with
+stderr captured to a file for timestamped evidence:
+
+- The dispatched `claude` subprocess's own transcript file records its
+  first JSONL line at `15:00:58.278Z`. gardener's `gardener: session
+  transcript: ...` line was already present in the captured stderr log the
+  very next time it was checked, at essentially the same wall-clock second
+  — comfortably inside the 5-second poll bound `transcript.py` uses.
+- The dispatch itself did not finish until `gardener: done in 154001ms`
+  (~154s later, landing at approximately `15:03:32Z`) — so the transcript
+  path was visible roughly **2.5 minutes before the dispatch completed**,
+  the actual gap this feature exists to close.
+- While the dispatch was still in progress, `gardener tail-transcript
+  <path>` (no `-f`) was run against the live, growing file and printed a
+  real, readable, partial event stream — `Glob`/`Read` tool calls with
+  their inputs and truncated results, and assistant reasoning text — well
+  before the run finished.
+- Afterward: `git -C <the cached clone> status --porcelain` was empty,
+  `git log -1` showed no new commit, and `gh repo view ... --json
+  pushedAt`/`gh pr list`/`gh issue list` were all unchanged from before the
+  run — report mode's existing safety guarantee (see [Manual/end-to-end
+  verification](#manualend-to-end-verification)) held with this addition
+  in place, exactly as with every dispatch mode before it.
+
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
@@ -640,9 +718,12 @@ gardener/
     conventions.py   — clones/refreshes the local dms-conventions cache
     state.py         — SQLite-backed run history
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
+    transcript.py    — live transcript-file discovery (encoding rule + bounded
+                       poll, run from a background thread `dispatch.run_claude`
+                       starts) and the `gardener tail-transcript` pretty-printer
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests (state, cli parsing/templating/notify-severity,
-                       mocked dispatch, notify, garden, overnight)
+                       mocked dispatch, notify, garden, overnight, transcript)
 ```
 
 ## Relationship to dms-conventions
