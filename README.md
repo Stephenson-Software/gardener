@@ -419,6 +419,26 @@ ever mutating the target repo's main branch. The run also completed in
 "next cycle" loop-back risk noted in `dispatch.py`'s docstring did not
 manifest here either.
 
+`tend --allow-merge` has also been run for real, end to end, against the
+same repo (2026-07-18), after deliberately adding it to the merge
+allow-list first (`gardener allowlist add --repo
+dmccoystephenson/a-private-repo-3`) — chosen because PR #5 was
+already known-safe (test-only diff, +38/-0, zero application-code
+changes, green on all 4 CI matrix legs, already reviewed once during the
+no-flags run above). The dispatched run (79s, $0.32, `ok=True`, one
+permission denial — an out-of-scope `find /` blocked, unrelated to
+merging) re-confirmed CI was green, then squash-merged PR #5. Confirmed
+afterward via the GitHub API: PR #5's `merged` flag is `true`, `main`'s
+HEAD commit is exactly `Add test coverage for CLI output-file writing and
+no-valid-data exit (#5)`, and the post-merge CI run on `main` completed
+`success`. This is the one dispatch mode capable of a real merge, and it
+worked exactly as designed: the merge pattern was reachable only because
+both `--allow-merge` and the allow-list entry were present (see
+`dispatch.py`'s `tend_mode_spec()`) — this is a deliberate, real merge
+into a low-stakes personal repo, not an accidental one; it was not
+attempted, and would not have been permitted, without both conditions
+explicitly set up first.
+
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
