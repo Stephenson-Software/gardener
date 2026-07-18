@@ -14,6 +14,7 @@ from unittest.mock import patch
 from gardener import dev_loop, garden, merge_allowlist, overnight, state
 from gardener.cli import (
     REPO_RE,
+    TendResult,
     _notify_run,
     build_parser,
     build_prompt,
@@ -656,9 +657,13 @@ class TestFindOrphanedPR(unittest.TestCase):
 
 
 class TestCmdOvernight(unittest.TestCase):
-    """cmd_overnight's real-time, real-dispatch orchestration — cmd_tend is
-    mocked (never invokes `claude`/`git`/`gh`), and `time.monotonic` is
-    mocked where the budget/headroom behavior itself is under test."""
+    """cmd_overnight's real-time, real-dispatch orchestration —
+    `_dispatch_tend` is mocked (never invokes `claude`/`git`/`gh`), and
+    `time.monotonic` is mocked where the budget/headroom behavior itself is
+    under test. Patches `gardener.cli._dispatch_tend` rather than `cmd_tend`
+    directly since `cmd_overnight` calls the former (via
+    `_dispatch_one_for_overnight`) — see `TendResult`'s docstring for why
+    `cmd_tend`'s printed stdout is no longer how this data flows."""
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -671,13 +676,14 @@ class TestCmdOvernight(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def _args(self, hours=8.0, model=None):
+    def _args(self, hours=8.0, model=None, concurrency=1):
         return argparse.Namespace(
             hours=hours, model=model, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=concurrency,
         )
 
-    def _fake_cmd_tend(self, outcomes: dict):
+    def _fake_dispatch_tend(self, outcomes: dict):
         def fake(args):
             self.calls.append(args.repo)
             spec = outcomes.get(args.repo, {})
@@ -688,8 +694,11 @@ class TestCmdOvernight(unittest.TestCase):
                 gap_summary=spec.get("gap_summary", ""),
             )
             state.record_run(run, db_path=args.state_db)
-            print(spec.get("stdout", ""))
-            return 1 if spec.get("error") else 0
+            errored = bool(spec.get("error"))
+            return TendResult(
+                exit_code=1 if errored else 0, ok=not errored,
+                result_text=spec.get("stdout", ""), run=run,
+            )
         return fake
 
     def test_empty_garden_is_a_clean_no_op(self):
@@ -717,23 +726,23 @@ class TestCmdOvernight(unittest.TestCase):
         self.assertEqual(level, Level.ERROR)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.cmd_tend")
-    def test_passes_allow_merge_unconditionally_to_every_dispatch(self, mock_cmd_tend, mock_default_notifier):
+    @patch("gardener.cli._dispatch_tend")
+    def test_passes_allow_merge_unconditionally_to_every_dispatch(self, mock_dispatch_tend, mock_default_notifier):
         garden.add("owner/a", path=self.garden_file)
-        mock_cmd_tend.side_effect = self._fake_cmd_tend({"owner/a": {}})
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a": {}})
         with redirect_stderr(io.StringIO()):
             cmd_overnight(self._args(hours=8.0))
-        self.assertEqual(len(mock_cmd_tend.call_args_list), 1)
-        dispatched_args = mock_cmd_tend.call_args_list[0].args[0]
+        self.assertEqual(len(mock_dispatch_tend.call_args_list), 1)
+        dispatched_args = mock_dispatch_tend.call_args_list[0].args[0]
         self.assertTrue(dispatched_args.allow_merge)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.cmd_tend")
-    def test_dispatches_every_repo_when_budget_allows(self, mock_cmd_tend, mock_default_notifier):
+    @patch("gardener.cli._dispatch_tend")
+    def test_dispatches_every_repo_when_budget_allows(self, mock_dispatch_tend, mock_default_notifier):
         garden.add("owner/a", path=self.garden_file)
         garden.add("owner/b", path=self.garden_file)
         garden.add("owner/c", path=self.garden_file)
-        mock_cmd_tend.side_effect = self._fake_cmd_tend({
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({
             "owner/a": {"stdout": "GARDENER_SUMMARY: no PR opened"},
             "owner/b": {"stdout": "GARDENER_SUMMARY: PR #1 opened"},
             "owner/c": {"stdout": "GARDENER_SUMMARY: PR #2 merged"},
@@ -748,12 +757,12 @@ class TestCmdOvernight(unittest.TestCase):
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.time.monotonic")
-    @patch("gardener.cli.cmd_tend")
-    def test_stops_dispatching_once_budget_is_exhausted(self, mock_cmd_tend, mock_monotonic, mock_default_notifier):
+    @patch("gardener.cli._dispatch_tend")
+    def test_stops_dispatching_once_budget_is_exhausted(self, mock_dispatch_tend, mock_monotonic, mock_default_notifier):
         garden.add("owner/a", path=self.garden_file)
         garden.add("owner/b", path=self.garden_file)
         garden.add("owner/c", path=self.garden_file)
-        mock_cmd_tend.side_effect = self._fake_cmd_tend({r: {} for r in ("owner/a", "owner/b", "owner/c")})
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({r: {} for r in ("owner/a", "owner/b", "owner/c")})
         # start_time=0; iteration 1 elapsed=0 (first repo always attempted);
         # iteration 2 elapsed=50s against a 72s budget with a 2700s
         # per-repo reservation -> nowhere close to enough headroom, stop.
@@ -770,14 +779,14 @@ class TestCmdOvernight(unittest.TestCase):
         garden.add("owner/b", path=self.garden_file)
         outcomes = {"owner/a": {}, "owner/b": {}}
 
-        with patch("gardener.cli.cmd_tend", side_effect=self._fake_cmd_tend(outcomes)), \
+        with patch("gardener.cli._dispatch_tend", side_effect=self._fake_dispatch_tend(outcomes)), \
                 patch("gardener.cli.time.monotonic", side_effect=[0.0, 0.0, 50.0, 50.0]):
             with redirect_stderr(io.StringIO()):
                 cmd_overnight(self._args(hours=0.02))
         self.assertEqual(self.calls, ["owner/a"])
 
         self.calls.clear()
-        with patch("gardener.cli.cmd_tend", side_effect=self._fake_cmd_tend(outcomes)), \
+        with patch("gardener.cli._dispatch_tend", side_effect=self._fake_dispatch_tend(outcomes)), \
                 patch("gardener.cli.time.monotonic", side_effect=[0.0, 0.0, 50.0, 50.0]):
             with redirect_stderr(io.StringIO()):
                 cmd_overnight(self._args(hours=0.02))
@@ -785,8 +794,8 @@ class TestCmdOvernight(unittest.TestCase):
         self.assertEqual(self.calls, ["owner/b"])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.cmd_tend")
-    def test_one_repo_raising_does_not_abort_the_batch(self, mock_cmd_tend, mock_default_notifier):
+    @patch("gardener.cli._dispatch_tend")
+    def test_one_repo_raising_does_not_abort_the_batch(self, mock_dispatch_tend, mock_default_notifier):
         garden.add("owner/a", path=self.garden_file)
         garden.add("owner/b", path=self.garden_file)
 
@@ -794,13 +803,11 @@ class TestCmdOvernight(unittest.TestCase):
             self.calls.append(args.repo)
             if args.repo == "owner/a":
                 raise RuntimeError("simulated crash")
-            state.record_run(
-                state.Run(repo=args.repo, mode="tend", outcome="tend", timestamp=state.now_iso()),
-                db_path=args.state_db,
-            )
-            return 0
+            run = state.Run(repo=args.repo, mode="tend", outcome="tend", timestamp=state.now_iso())
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, run=run)
 
-        mock_cmd_tend.side_effect = flaky
+        mock_dispatch_tend.side_effect = flaky
         with redirect_stderr(io.StringIO()):
             exit_code = cmd_overnight(self._args(hours=8.0))
         self.assertEqual(exit_code, 0)
@@ -809,11 +816,11 @@ class TestCmdOvernight(unittest.TestCase):
         self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.cmd_tend")
-    def test_summary_notification_reflects_outcomes(self, mock_cmd_tend, mock_default_notifier):
+    @patch("gardener.cli._dispatch_tend")
+    def test_summary_notification_reflects_outcomes(self, mock_dispatch_tend, mock_default_notifier):
         garden.add("owner/a", path=self.garden_file)
         garden.add("owner/b", path=self.garden_file)
-        mock_cmd_tend.side_effect = self._fake_cmd_tend({
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({
             "owner/a": {"error": True},
             "owner/b": {"stdout": "GARDENER_SUMMARY: PR #4 opened"},
         })
@@ -826,6 +833,59 @@ class TestCmdOvernight(unittest.TestCase):
         self.assertIn("1 error(s)", title)
         self.assertEqual(level, Level.WARNING)
         self.assertIn("1 PR(s) opened", message)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_concurrency_dispatches_a_batch_at_once_and_preserves_order(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        """With --concurrency 2, a garden of 3 repos dispatches in batches of
+        [a, b] then [c] — this asserts both that every repo still gets
+        attempted (via a ThreadPoolExecutor for the first batch) and that
+        `outcomes`/the batch summary preserve `order`, not completion order,
+        even though `b` is made to "finish" before `a` inside the batch."""
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        garden.add("owner/c", path=self.garden_file)
+
+        import threading
+        release_a = threading.Event()
+
+        def fake(args):
+            self.calls.append(args.repo)
+            if args.repo == "owner/a":
+                # Let owner/b's fake dispatch (below) complete first, so
+                # completion order is deliberately b-then-a within the batch.
+                release_a.wait(timeout=5)
+            elif args.repo == "owner/b":
+                release_a.set()
+            run = state.Run(
+                repo=args.repo, mode="tend", outcome="tend", timestamp=state.now_iso(),
+                gap_summary=f"GARDENER_SUMMARY: PR opened for {args.repo}",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, result_text=f"GARDENER_SUMMARY: PR opened for {args.repo}", run=run)
+
+        mock_dispatch_tend.side_effect = fake
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args(hours=8.0, concurrency=2))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(sorted(self.calls), ["owner/a", "owner/b", "owner/c"])
+        # cursor still advances past every repo attempted, batching aside
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_concurrency_one_never_touches_a_thread_pool(self, mock_dispatch_tend, mock_default_notifier):
+        """Default concurrency=1 must take the exact pre-concurrency
+        sequential path (no ThreadPoolExecutor at all) — a regression here
+        would mean every existing cron invocation silently starts paying
+        thread-pool overhead it never asked for."""
+        garden.add("owner/a", path=self.garden_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a": {}})
+        with patch("gardener.cli.ThreadPoolExecutor") as mock_pool, redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0, concurrency=1))
+        mock_pool.assert_not_called()
 
 
 if __name__ == "__main__":

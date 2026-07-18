@@ -1,8 +1,8 @@
-"""overnight.py's pure logic — cursor persistence, rotation order, the
-budget/headroom check, and outcome classification/summary building. None of
-this invokes `claude`, `git`, or `gh`; `cmd_overnight`'s real-dispatch
-orchestration in cli.py is covered separately in test_cli.py with cmd_tend
-mocked."""
+"""overnight.py's pure logic — cursor persistence, rotation order, batching
+for concurrent dispatch, the budget/headroom check, and outcome
+classification/summary building. None of this invokes `claude`, `git`, or
+`gh`; `cmd_overnight`'s real-dispatch orchestration in cli.py is covered
+separately in test_cli.py with `_dispatch_tend` mocked."""
 import json
 import tempfile
 import unittest
@@ -78,6 +78,37 @@ class TestReposToAttempt(unittest.TestCase):
 
     def test_single_repo_garden(self):
         self.assertEqual(overnight.repos_to_attempt(["only"], 0), ["only"])
+
+
+class TestBatchRepos(unittest.TestCase):
+    def test_empty_order_returns_empty(self):
+        self.assertEqual(overnight.batch_repos([], 3), [])
+
+    def test_concurrency_one_yields_one_repo_per_batch(self):
+        # Today's exact sequential behavior — the default.
+        self.assertEqual(
+            overnight.batch_repos(["a", "b", "c"], 1),
+            [["a"], ["b"], ["c"]],
+        )
+
+    def test_zero_or_negative_concurrency_is_treated_as_one(self):
+        self.assertEqual(overnight.batch_repos(["a", "b"], 0), [["a"], ["b"]])
+        self.assertEqual(overnight.batch_repos(["a", "b"], -5), [["a"], ["b"]])
+
+    def test_splits_into_consecutive_batches_preserving_order(self):
+        self.assertEqual(
+            overnight.batch_repos(["a", "b", "c", "d", "e"], 2),
+            [["a", "b"], ["c", "d"], ["e"]],
+        )
+
+    def test_concurrency_covering_the_whole_list_yields_one_batch(self):
+        self.assertEqual(overnight.batch_repos(["a", "b", "c"], 10), [["a", "b", "c"]])
+
+    def test_every_repo_appears_exactly_once_across_all_batches(self):
+        garden = ["a", "b", "c", "d", "e", "f", "g"]
+        batches = overnight.batch_repos(garden, 3)
+        flattened = [repo for batch in batches for repo in batch]
+        self.assertEqual(flattened, garden)
 
 
 class TestHasTimeForAnotherRepo(unittest.TestCase):
