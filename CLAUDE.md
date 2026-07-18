@@ -36,6 +36,14 @@ happen, unchanged. See README's "Overnight / unattended operation" section
 for the full design and the honest reliability caveat about this device
 having no true always-on daemon guarantee.
 
+Every dispatch (`align`/`tend`/`overnight`) still runs synchronously — see
+`dispatch.py`'s "Why synchronous dispatch" note — but is no longer a total
+black box while it runs: `transcript.py` polls briefly, from a background
+thread, for the live JSONL transcript file Claude Code already writes for
+every `-p` session, and logs its path to stderr within seconds of dispatch
+start. `gardener tail-transcript <path> [-f]` pretty-prints that file. See
+README's "Live session visibility" section.
+
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.
@@ -109,6 +117,12 @@ record what you actually observed before changing the docstring's claims.
   `test_garden.py`/`test_overnight.py` cover the garden JSON list and
   `overnight.py`'s pure rotation/budget/resume-cursor/outcome-classification
   logic the same way — none of these invoke `claude`, `git`, or `gh` either.
+  `test_transcript.py` covers `encode_cwd` against the two real,
+  empirically-confirmed examples in `transcript.py`'s module docstring
+  (never invented ones — if `claude`'s actual encoding rule ever changes,
+  re-confirm against a real dispatch the same way before updating these),
+  the polling loop (`time_fn`/`sleep_fn` always injected, never a real
+  sleep), and the pretty-printer's line parsing (synthetic JSONL fixtures).
 - **Manual (required for anything touching `dispatch.py`, `dev_loop.py`, or
   a prompt template/preamble):** run a real dispatch against a low-stakes
   repo you have access to and confirm the target repo was not mutated
@@ -179,4 +193,5 @@ target-repo alignment rules, not just the ones it enforces on others.
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
 | `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
 | README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path, the exact `devsrv` invocation) and still states the "no true always-on daemon guarantee on this device" caveat plainly, not oversold |
+| `transcript.py` module docstring | The transcript-path encoding rule (`encode_cwd`) still matches a real `claude -p` session's actual `~/.claude/projects/<encoded-cwd>/` directory naming — re-verify against a real dispatch (not assumption) before trusting the old notes if this ever seems off |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |
