@@ -1,6 +1,7 @@
 """Argument parsing, mutual-exclusivity of --implement/--file-issue, and
 prompt templating — the deterministic parts of cli.py that don't require
 actually invoking `claude` or `gh`."""
+import argparse
 import io
 import tempfile
 import unittest
@@ -8,16 +9,19 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from gardener import merge_allowlist, state
+from gardener import garden, merge_allowlist, overnight, state
 from gardener.cli import (
     REPO_RE,
     _notify_run,
     build_parser,
     build_prompt,
+    cmd_garden,
+    cmd_overnight,
+    cmd_tend,
     extract_gap_summary,
     merge_eligible,
 )
-from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, Mode
+from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, DispatchResult, Mode
 from gardener.notify import Level
 
 
@@ -121,6 +125,55 @@ class TestAllowlistArgParsing(unittest.TestCase):
         args = self.parser.parse_args(["allowlist", "remove", "--repo", "owner/name"])
         self.assertEqual(args.allowlist_action, "remove")
         self.assertEqual(args.repo, "owner/name")
+
+
+class TestGardenArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_garden_requires_an_action(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["garden"])
+
+    def test_garden_list(self):
+        args = self.parser.parse_args(["garden", "list"])
+        self.assertEqual(args.garden_action, "list")
+
+    def test_garden_add_requires_repo(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["garden", "add"])
+
+    def test_garden_add(self):
+        args = self.parser.parse_args(["garden", "add", "--repo", "owner/name"])
+        self.assertEqual(args.garden_action, "add")
+        self.assertEqual(args.repo, "owner/name")
+
+    def test_garden_remove(self):
+        args = self.parser.parse_args(["garden", "remove", "--repo", "owner/name"])
+        self.assertEqual(args.garden_action, "remove")
+        self.assertEqual(args.repo, "owner/name")
+
+
+class TestOvernightArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_overnight_defaults(self):
+        args = self.parser.parse_args(["overnight"])
+        self.assertEqual(args.hours, overnight.DEFAULT_OVERNIGHT_HOURS)
+        self.assertIsNone(args.model)
+
+    def test_overnight_hours_override(self):
+        args = self.parser.parse_args(["overnight", "--hours", "0.5"])
+        self.assertEqual(args.hours, 0.5)
+
+    def test_overnight_requires_no_repo(self):
+        # unlike align/tend, overnight takes its target list from the
+        # garden, not a --repo flag
+        args = self.parser.parse_args(["overnight"])
+        self.assertFalse(hasattr(args, "repo"))
 
 
 class TestMergeEligible(unittest.TestCase):
@@ -278,6 +331,299 @@ class TestNotifyRun(unittest.TestCase):
         run = self._run()
         with redirect_stderr(io.StringIO()):
             _notify_run(run)  # must not raise
+
+
+class TestCmdGarden(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmpdir.name) / "garden.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_list_when_empty(self):
+        args = argparse.Namespace(garden_action="list", garden_file=self.path)
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()) as out:
+            cmd_garden(args)
+        self.assertIn("garden is empty", out.getvalue())
+
+    def test_add_then_list(self):
+        add_args = argparse.Namespace(garden_action="add", repo="owner/name", garden_file=self.path)
+        with patch("sys.stdout", new=io.StringIO()):
+            cmd_garden(add_args)
+        self.assertEqual(garden.list_garden(path=self.path), ["owner/name"])
+
+    def test_remove(self):
+        garden.add("owner/name", path=self.path)
+        remove_args = argparse.Namespace(garden_action="remove", repo="owner/name", garden_file=self.path)
+        with patch("sys.stdout", new=io.StringIO()):
+            cmd_garden(remove_args)
+        self.assertEqual(garden.list_garden(path=self.path), [])
+
+
+class TestCmdTendNotifications(unittest.TestCase):
+    """cmd_tend previously recorded outcomes via state.record_run but never
+    called _notify_run — a real gap versus cmd_align's existing pattern (and
+    versus notify.py's own module docstring, which already anticipated "a
+    future mode (e.g. a tend subcommand)" using this exact machinery).
+    Closed as part of adding `gardener overnight`, since overnight's
+    per-repo Discord alerts depend on tend firing them itself. These tests
+    cover that fix directly, with clone/dispatch fully mocked."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_db = Path(self._tmpdir.name) / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, repo="owner/name"):
+        return argparse.Namespace(
+            repo=repo, allow_merge=False, model=None,
+            timeout=TEND_DEFAULT_TIMEOUT_SECONDS, no_refresh_target=False,
+            state_db=self.state_db,
+        )
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_successful_tend_fires_a_notification(
+        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 0)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        # tend is a mutation-capable mode (like implement/file-issue), not report
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_failed_dispatch_fires_an_error_level_notification(
+        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=False, result_text="", raw_stdout="", stderr="boom", exit_code=1, duration_ms=50,
+            cost_usd=None, session_id=None, permission_denials=[], is_error=True,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo", side_effect=RuntimeError("clone failed"))
+    def test_setup_error_fires_an_error_level_notification(self, mock_clone, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_create_dev_loop_bootstrap_failure_fires_a_notification(
+        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=False, result_text="", raw_stdout="", stderr="skill generation failed", exit_code=1,
+            duration_ms=10, cost_usd=None, session_id=None, permission_denials=[], is_error=True,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+        # the tend dispatch itself must never have been attempted
+        mock_run_claude.assert_called_once()
+
+
+class TestCmdOvernight(unittest.TestCase):
+    """cmd_overnight's real-time, real-dispatch orchestration — cmd_tend is
+    mocked (never invokes `claude`/`git`/`gh`), and `time.monotonic` is
+    mocked where the budget/headroom behavior itself is under test."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, hours=8.0, model=None):
+        return argparse.Namespace(
+            hours=hours, model=model, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+        )
+
+    def _fake_cmd_tend(self, outcomes: dict):
+        def fake(args):
+            self.calls.append(args.repo)
+            spec = outcomes.get(args.repo, {})
+            run = state.Run(
+                repo=args.repo, mode="tend",
+                outcome="error" if spec.get("error") else "tend",
+                timestamp=state.now_iso(),
+                gap_summary=spec.get("gap_summary", ""),
+            )
+            state.record_run(run, db_path=args.state_db)
+            print(spec.get("stdout", ""))
+            return 1 if spec.get("error") else 0
+        return fake
+
+    def test_empty_garden_is_a_clean_no_op(self):
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.cmd_tend")
+    def test_passes_allow_merge_unconditionally_to_every_dispatch(self, mock_cmd_tend, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        mock_cmd_tend.side_effect = self._fake_cmd_tend({"owner/a": {}})
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0))
+        self.assertEqual(len(mock_cmd_tend.call_args_list), 1)
+        dispatched_args = mock_cmd_tend.call_args_list[0].args[0]
+        self.assertTrue(dispatched_args.allow_merge)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.cmd_tend")
+    def test_dispatches_every_repo_when_budget_allows(self, mock_cmd_tend, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        garden.add("owner/c", path=self.garden_file)
+        mock_cmd_tend.side_effect = self._fake_cmd_tend({
+            "owner/a": {"stdout": "GARDENER_SUMMARY: no PR opened"},
+            "owner/b": {"stdout": "GARDENER_SUMMARY: PR #1 opened"},
+            "owner/c": {"stdout": "GARDENER_SUMMARY: PR #2 merged"},
+        })
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args(hours=8.0))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/a", "owner/b", "owner/c"])
+        # a full cycle was consumed -> cursor wraps back to the start
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+        mock_default_notifier.return_value.notify.assert_called_once()
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.time.monotonic")
+    @patch("gardener.cli.cmd_tend")
+    def test_stops_dispatching_once_budget_is_exhausted(self, mock_cmd_tend, mock_monotonic, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        garden.add("owner/c", path=self.garden_file)
+        mock_cmd_tend.side_effect = self._fake_cmd_tend({r: {} for r in ("owner/a", "owner/b", "owner/c")})
+        # start_time=0; iteration 1 elapsed=0 (first repo always attempted);
+        # iteration 2 elapsed=50s against a 72s budget with a 2700s
+        # per-repo reservation -> nowhere close to enough headroom, stop.
+        mock_monotonic.side_effect = [0.0, 0.0, 50.0, 50.0]
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args(hours=0.02))  # 72s budget
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/a"])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_resumes_from_the_cursor_across_two_invocations(self, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        outcomes = {"owner/a": {}, "owner/b": {}}
+
+        with patch("gardener.cli.cmd_tend", side_effect=self._fake_cmd_tend(outcomes)), \
+                patch("gardener.cli.time.monotonic", side_effect=[0.0, 0.0, 50.0, 50.0]):
+            with redirect_stderr(io.StringIO()):
+                cmd_overnight(self._args(hours=0.02))
+        self.assertEqual(self.calls, ["owner/a"])
+
+        self.calls.clear()
+        with patch("gardener.cli.cmd_tend", side_effect=self._fake_cmd_tend(outcomes)), \
+                patch("gardener.cli.time.monotonic", side_effect=[0.0, 0.0, 50.0, 50.0]):
+            with redirect_stderr(io.StringIO()):
+                cmd_overnight(self._args(hours=0.02))
+        # second run must pick up "owner/b", not re-tend "owner/a"
+        self.assertEqual(self.calls, ["owner/b"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.cmd_tend")
+    def test_one_repo_raising_does_not_abort_the_batch(self, mock_cmd_tend, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+
+        def flaky(args):
+            self.calls.append(args.repo)
+            if args.repo == "owner/a":
+                raise RuntimeError("simulated crash")
+            state.record_run(
+                state.Run(repo=args.repo, mode="tend", outcome="tend", timestamp=state.now_iso()),
+                db_path=args.state_db,
+            )
+            return 0
+
+        mock_cmd_tend.side_effect = flaky
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args(hours=8.0))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/a", "owner/b"])
+        # both were attempted despite the crash -> full cycle -> cursor wraps
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.cmd_tend")
+    def test_summary_notification_reflects_outcomes(self, mock_cmd_tend, mock_default_notifier):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        mock_cmd_tend.side_effect = self._fake_cmd_tend({
+            "owner/a": {"error": True},
+            "owner/b": {"stdout": "GARDENER_SUMMARY: PR #4 opened"},
+        })
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0))
+        mock_notifier = mock_default_notifier.return_value
+        mock_notifier.notify.assert_called_once()
+        title, message, level = mock_notifier.notify.call_args[0]
+        self.assertIn("2 repo(s) tended", title)
+        self.assertIn("1 error(s)", title)
+        self.assertEqual(level, Level.WARNING)
+        self.assertIn("1 PR(s) opened", message)
 
 
 if __name__ == "__main__":
