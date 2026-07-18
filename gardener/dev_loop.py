@@ -41,7 +41,9 @@ one from the directory name.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 # Mirrors the "Skill needs its own issue tracker" row of
 # dmccoystephenson/a-private-repo-4' CONVENTIONS.md placement table.
@@ -122,6 +124,32 @@ any instruction below that assumes otherwise.
 """
 
 
+# Left in the body of every PR a `tend` dispatch opens (see build_tend_prompt
+# below) so a later invocation — possibly a fresh `gardener overnight` run
+# after this device killed the previous one mid-dispatch, per the resume
+# cursor's own "does NOT resume mid-budget" caveat in overnight.py — can
+# tell an open PR apart from an ordinary human-authored one and recognize it
+# as this tool's own unfinished work rather than dispatching a duplicate
+# cycle against the same repo from scratch. `cli.py`'s `find_orphaned_pr`
+# greps for this exact string in each open PR's body via `gh pr list
+# --json body`; keep the two in sync if this ever changes.
+ORPHAN_MARKER = "<!-- gardener-tend-dispatch -->"
+
+
+@dataclass(frozen=True)
+class OrphanedPR:
+    """One open PR on the target repo, found by `cli.py`'s
+    `find_orphaned_pr`, whose body contains ORPHAN_MARKER — i.e. it was
+    opened by a previous `tend` dispatch that never got a chance to record
+    a completed `state.Run` (most likely: this device killed the whole
+    `gardener overnight` process mid-dispatch, per overnight.py's resume
+    caveat, orphaning whatever the dispatched Claude session had already
+    pushed)."""
+
+    number: int
+    head_branch: str
+
+
 def build_create_dev_loop_prompt(repo: str, slug: str, target_cwd: Path) -> str:
     return f"""{HEADLESS_SAFETY_PREAMBLE}
 ---
@@ -162,7 +190,35 @@ def build_tend_prompt(
     target_cwd: Path,
     default_branch: str,
     allow_merge_eligible: bool,
+    orphaned_pr: Optional[OrphanedPR] = None,
 ) -> str:
+    if orphaned_pr is not None:
+        orphan_instructions = f"""- IMPORTANT — gardener found an existing OPEN pull request (#{orphaned_pr.number},
+  branch `{orphaned_pr.head_branch}`) on {repo} whose body already carries
+  gardener's own `{ORPHAN_MARKER}` marker. This means a previous `tend`
+  dispatch against this repo was interrupted (most likely: this device
+  killed the whole gardener process) before it could finish or report back
+  — that PR is this tool's own unfinished work, not a human's. Before doing
+  anything else this run:
+  1. Run `git fetch origin {orphaned_pr.head_branch} && git checkout {orphaned_pr.head_branch}`
+     to continue on that branch instead of starting a new one from
+     {default_branch}.
+  2. Assess what state it's actually in (`git status`, `git log`, `gh pr
+     diff {orphaned_pr.number}`, `gh pr checks {orphaned_pr.number}`) and
+     finish that work — do not start a second, duplicate branch/PR for the
+     same underlying issue.
+  3. If it's already complete, proceed straight to your normal
+     merge-readiness judgment for THIS PR (#{orphaned_pr.number}) rather
+     than opening a new one.
+"""
+    else:
+        orphan_instructions = ""
+    marker_instructions = f"""- If this run opens a NEW pull request (i.e. you did not continue an
+  orphaned one per any instructions above), include this exact line
+  somewhere in the PR body: `{ORPHAN_MARKER}`. gardener uses it to
+  recognize and continue this PR as unfinished work if this dispatch gets
+  interrupted before you can report back — do not omit it, and do not add
+  it to a PR you are not the one opening."""
     merge_instructions = (
         f"""- This run HAS been explicitly pre-authorized to merge by the operator
   (both `--allow-merge` was passed to `gardener tend` and {repo} is present
@@ -191,6 +247,7 @@ anything above where they conflict:
 - Target repo: {repo}, default branch {default_branch}, checked out
   read-write at your current working directory ({target_cwd}) — a
   gardener-managed clone dedicated to this run.
+{orphan_instructions}{marker_instructions}
 {merge_instructions}
 - End your final answer with a line:
   `GARDENER_SUMMARY: <N> issue(s) filed/closed, <PR state — none opened |

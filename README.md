@@ -159,6 +159,31 @@ not assumed — see [Safety model](#safety-model)'s "Headless dispatch and
 the `AskUserQuestion` problem" section for exactly what was tested and
 observed.
 
+### Orphaned work recovery
+
+If this device kills the whole `gardener overnight` process mid-dispatch
+(see "Wiring it to 'tend to my garden while I sleep'" below), the repo it
+was actively tending at that moment gets no chance to finish — but the
+dispatched dev-loop session may already have pushed a branch and opened a
+PR before the kill. Without anything accounting for this, the *next* run
+would dispatch a brand-new `tend` cycle against the same repo from
+scratch, unaware that PR already exists — at best duplicate work, at worst
+a second, competing PR for the same fix.
+
+`gardener tend` now checks for this before dispatching: every PR a `tend`
+dispatch opens carries a fixed marker
+(`<!-- gardener-tend-dispatch -->`) in its body (see `dev_loop.py`'s
+`ORPHAN_MARKER`). Before building this run's prompt, `cli.py`'s
+`find_orphaned_pr` looks for any still-open PR on the target repo whose
+body carries that marker (`gh pr list --json body`, filtered client-side —
+best-effort: any `gh` failure here is treated as "no orphan found," never
+as a reason to fail an otherwise-normal dispatch). If one is found, the
+dispatched session is explicitly instructed to `git fetch`/`git checkout`
+that PR's branch and finish or assess that work instead of starting a new
+branch from the default branch — see `dev_loop.py`'s `build_tend_prompt`
+for the exact instructions. Once a human merges or closes that PR, it
+naturally stops matching on the next run — no separate cleanup needed.
+
 ### Merge allow-list
 
 `gardener allowlist add --repo owner/repo` / `remove --repo owner/repo` /
@@ -261,7 +286,11 @@ isn't already running. Combined with the resume cursor above, a run that
 gets interrupted partway through the garden doesn't lose progress on the
 repos it already finished — the next invocation (autostart-triggered or
 manually re-run) picks up from the next untended repo, not the top of the
-list again.
+list again. The repo that was *actively* being tended at the moment of the
+kill is still re-dispatched fresh on the next run (the resume cursor only
+advances past *completed* repos) — but that re-dispatch now recognizes and
+continues any PR the interrupted session already opened rather than
+starting a duplicate; see "Orphaned work recovery" above.
 
 ### Other flags
 

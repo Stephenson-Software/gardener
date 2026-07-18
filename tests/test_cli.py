@@ -3,6 +3,7 @@ prompt templating — the deterministic parts of cli.py that don't require
 actually invoking `claude` or `gh`."""
 import argparse
 import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from gardener.cli import (
     cmd_overnight,
     cmd_tend,
     extract_gap_summary,
+    find_orphaned_pr,
     merge_eligible,
 )
 from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, DispatchResult, Mode
@@ -389,9 +391,10 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
     @patch("gardener.cli.clone_or_refresh_target_repo")
     def test_successful_tend_fires_a_notification(
-        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
     ):
         mock_clone.return_value = Path(self._tmpdir.name)
         mock_run_claude.return_value = DispatchResult(
@@ -414,9 +417,41 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_orphaned_pr_is_threaded_into_the_tend_prompt(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        """When find_orphaned_pr locates a previous interrupted tend's PR,
+        cmd_tend must pass it through to build_tend_prompt so the dispatched
+        session is told to continue that PR instead of starting fresh — not
+        just log it and drop it on the floor."""
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_orphan.return_value = dev_loop.OrphanedPR(number=238, head_branch="feature/x")
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, PR #238 opened, continued prior work",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 0)
+        mock_run_claude.assert_called_once()
+        _args, kwargs = mock_run_claude.call_args
+        self.assertIn("#238", kwargs["prompt"])
+        self.assertIn("feature/x", kwargs["prompt"])
+        self.assertIn("gardener found an existing OPEN pull request", kwargs["prompt"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
     @patch("gardener.cli.clone_or_refresh_target_repo")
     def test_failed_dispatch_fires_an_error_level_notification(
-        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
     ):
         mock_clone.return_value = Path(self._tmpdir.name)
         mock_run_claude.return_value = DispatchResult(
@@ -480,9 +515,10 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
     @patch("gardener.cli.clone_or_refresh_target_repo")
     def test_create_dev_loop_bootstrap_failure_fires_a_notification(
-        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
     ):
         mock_clone.return_value = Path(self._tmpdir.name)
         mock_run_claude.return_value = DispatchResult(
@@ -505,9 +541,10 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
     @patch("gardener.cli.clone_or_refresh_target_repo")
     def test_create_dev_loop_dispatch_gets_local_skills_and_commands_add_dirs(
-        self, mock_clone, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
     ):
         """Regression test for the bug where create-dev-loop's dispatch had no
         add_dirs at all — unlike align's add_dirs=[conv.path] a bit earlier in
@@ -540,6 +577,82 @@ class TestCmdTendNotifications(unittest.TestCase):
             kwargs["add_dirs"],
             [dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
         )
+
+
+class TestFindOrphanedPR(unittest.TestCase):
+    """find_orphaned_pr's job is: find an open PR whose body carries
+    dev_loop.ORPHAN_MARKER (see that module's docstring on why), never raise
+    (a `gh` hiccup here must not sink an otherwise-normal `tend` dispatch),
+    and pick deterministically among more than one match. `gardener.cli._run`
+    is mocked throughout — this must never invoke a real `gh` process, same
+    testing convention as clone_or_refresh_target_repo's own tests."""
+
+    def _completed(self, stdout="", returncode=0, stderr=""):
+        return subprocess.CompletedProcess(
+            args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_no_open_prs_returns_none(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout="[]")
+        self.assertIsNone(find_orphaned_pr("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_open_prs_without_the_marker_are_ignored(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout=json.dumps([
+            {"number": 1, "headRefName": "feature/human-work", "body": "just a normal PR",
+             "createdAt": "2026-07-18T10:00:00Z"},
+        ]))
+        self.assertIsNone(find_orphaned_pr("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_marked_pr_is_found(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout=json.dumps([
+            {"number": 238, "headRefName": "feature/plugin-icons-and-versions",
+             "body": f"some body\n\n{dev_loop.ORPHAN_MARKER}\n", "createdAt": "2026-07-18T10:00:00Z"},
+        ]))
+        orphan = find_orphaned_pr("owner/name")
+        self.assertEqual(orphan, dev_loop.OrphanedPR(number=238, head_branch="feature/plugin-icons-and-versions"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_most_recently_created_marked_pr_wins_when_more_than_one(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout=json.dumps([
+            {"number": 100, "headRefName": "feature/older", "body": dev_loop.ORPHAN_MARKER,
+             "createdAt": "2026-07-17T10:00:00Z"},
+            {"number": 200, "headRefName": "feature/newer", "body": dev_loop.ORPHAN_MARKER,
+             "createdAt": "2026-07-18T10:00:00Z"},
+        ]))
+        orphan = find_orphaned_pr("owner/name")
+        self.assertEqual(orphan.number, 200)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_gh_failure_is_treated_as_no_orphan_not_raised(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(returncode=1, stderr="not authenticated")
+        with redirect_stderr(io.StringIO()):
+            self.assertIsNone(find_orphaned_pr("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30))
+    def test_gh_timeout_is_treated_as_no_orphan_not_raised(self, mock_run, mock_which):
+        with redirect_stderr(io.StringIO()):
+            self.assertIsNone(find_orphaned_pr("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_malformed_json_is_treated_as_no_orphan_not_raised(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout="not json")
+        self.assertIsNone(find_orphaned_pr("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value=None)
+    def test_missing_gh_binary_returns_none_without_calling_run(self, mock_which):
+        with patch("gardener.cli._run") as mock_run:
+            self.assertIsNone(find_orphaned_pr("owner/name"))
+            mock_run.assert_not_called()
 
 
 class TestCmdOvernight(unittest.TestCase):
