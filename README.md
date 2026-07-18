@@ -40,6 +40,31 @@ pip install -e .
 This installs the `gardener` console script (via `pyproject.toml`'s
 `[project.scripts]` entry point) and leaves the source editable.
 
+### Alerting (optional)
+
+By default gardener alerts nowhere except its own local run history — you
+have to run `gardener status` or watch terminal output to see how a run
+went. To get a Discord notification on every run's outcome instead,
+configure a webhook one of two ways (checked in this order):
+
+```bash
+# 1. Environment variable (simplest — set it wherever gardener runs)
+export GARDENER_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/XXX/YYY"
+
+# 2. A gitignored config file, for a persistent/cron context where
+#    exporting an env var per-invocation isn't practical (same shape as
+#    Stephenson-Software/gateway's `.monitor.env`):
+mkdir -p ~/.local/state/gardener   # or $GARDENER_STATE_DIR if overridden
+umask 077
+echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXX/YYY' \
+  > ~/.local/state/gardener/notify.env
+```
+
+No webhook configured (neither of the above) means notifications are a
+clean no-op — `gardener align` still works exactly the same, nothing
+prints or fails because of it. See [Alerting design](#alerting-design)
+below for how this is implemented.
+
 ## Usage
 
 ```
@@ -54,7 +79,9 @@ gardener status [--repo <owner/repo>]
   [Safety model](#safety-model) — so it cannot modify the target repo,
   open a PR, or open an issue no matter what the prompt says. The gap
   checklist prints to stdout and is logged to gardener's local run
-  history.
+  history. If a Discord webhook is configured (see
+  [Alerting (optional)](#alerting-optional)), an informational
+  notification fires too.
 - **`--implement`** — additionally authorizes Claude to implement fixes in
   the target repo: branch, commit, and open a PR, following *the target
   repo's own* conventions (language, build tool, test framework) rather
@@ -106,9 +133,13 @@ Windows (PowerShell):
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude`; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
-parsing and prompt templating. None of the automated tests hit the network
-or a real repo — see [Manual/end-to-end verification](#manualend-to-end-verification)
-for that.
+parsing, prompt templating, and `_notify_run`'s severity mapping (mocking
+the notifier, not `state.Run` construction); `tests/test_notify.py` mocks
+`urllib.request.urlopen` so `DiscordNotifier` is fully covered — success,
+a failed POST, and "no webhook configured" — without ever making a real
+HTTP call. None of the automated tests hit the network or a real repo —
+see [Manual/end-to-end verification](#manualend-to-end-verification) for
+that.
 
 ### Manual/end-to-end verification
 
@@ -128,6 +159,24 @@ have access to and confirm three things:
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.
+
+**Alerting**: `DiscordNotifier` is covered by mocked unit tests (see
+above) rather than a real Discord send in the automated suite — same
+reasoning as the rest of this section, a real send is an environment
+check, not something the test suite should depend on. To verify it for
+real once a webhook is configured (see
+[Alerting (optional)](#alerting-optional)), run:
+
+```bash
+python3 -c "
+from gardener.notify import DiscordNotifier, Level
+DiscordNotifier().notify('gardener: manual test', 'if you see this in Discord, alerting works', Level.SUCCESS)
+"
+```
+
+and confirm the embed shows up in the configured channel with a green
+(`3066993`) color bar. Use a webhook pointed at a private/test channel
+for this, not a shared production alerting channel.
 
 ## Safety model
 
@@ -172,6 +221,56 @@ subprocess call, full output captured synchronously via
 the background after the command returns. This is what makes
 `gardener align`'s output pipeable and scriptable in a way `--bg` isn't.
 
+## Alerting design
+
+`gardener/notify.py` defines a small `Notifier` abstraction so alerting
+isn't hardcoded to Discord — `Notifier` is an ABC with one method,
+`notify(title, message, level)`, where `level` is a `Level` enum
+(`INFO`/`SUCCESS`/`WARNING`/`ERROR`) that each concrete notifier maps to
+its own presentation.
+
+- **`DiscordNotifier`** — the first/primary implementation. Posts a
+  Discord embed via a webhook URL using stdlib `urllib.request` only (no
+  `requests` dependency — see [Architecture](#architecture)). Mirrors
+  `Stephenson-Software/gateway`'s `monitoring/notify-discord.sh` exactly:
+  same title/description/color embed shape, same "no webhook configured →
+  log and return, never fail the caller" behavior, and the same Discord
+  embed colors for success (`3066993`, green) and error (`15158332`,
+  red); the warning color (`16776960`, yellow) matches that repo's
+  `cert-check.sh` "expiring soon" alert. **Never raises** — a bad webhook,
+  a network error, or Discord being down must never be able to break the
+  actual `gardener align` run it's reporting on; every failure path is
+  caught and logged to stderr instead.
+- **`NullNotifier`** — a clean no-op, returned automatically when no
+  webhook is configured (see [Alerting (optional)](#alerting-optional)).
+  "Nothing configured" is a normal state, not an error path callers need
+  to special-case.
+- **`CompositeNotifier`** — fans one notification out to zero-to-many
+  concrete notifiers, for anyone who wants to register more than one
+  destination later without touching any call site.
+
+`cli.py` wires this in with one thin helper, `_notify_run(run)`, called
+right after each place `state.record_run(...)` is called in `cmd_align`.
+It owns the only alerting *business logic* in the codebase — turning a
+recorded `state.Run`'s `outcome`/`mode` into a severity — deliberately
+kept out of `notify.py` itself, which only knows how to present an
+already-decided `(title, message, level)`:
+
+- `outcome == "error"` → always `Level.ERROR`, regardless of mode. This is
+  the case most worth getting right (an error is the easiest outcome to
+  silently miss without an alert), so it's checked first and
+  unconditionally.
+- `mode == "report"` (report-only, no mutation possible — see
+  [Safety model](#safety-model)) → `Level.INFO`.
+- Anything else (`--implement`, `--file-issue`, or any future mode that
+  also authorizes a mutation) → `Level.WARNING`, so a run that actually
+  branched/committed/opened a PR or issue stands out from a routine
+  report-only run rather than blending in with it. This check is written
+  as an `else`, not an explicit list of mode names, specifically so a
+  future mode never has to be added to `notify.py` or `_notify_run` by
+  hand to be covered — it falls into the mutation branch automatically
+  unless it's literally `"report"`.
+
 ## Development
 
 No build step — this is a stdlib-only Python CLI (see
@@ -205,8 +304,9 @@ gardener/
     dispatch.py      — the safety-gated subprocess wrapper around `claude -p`
     conventions.py   — clones/refreshes the local dms-conventions cache
     state.py         — SQLite-backed run history
+    notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
-  tests/             — unit tests (state, cli parsing/templating, mocked dispatch)
+  tests/             — unit tests (state, cli parsing/templating/notify-severity, mocked dispatch, notify)
 ```
 
 ## Relationship to dms-conventions
