@@ -704,6 +704,44 @@ stderr captured to a file for timestamped evidence:
   verification](#manualend-to-end-verification)) held with this addition
   in place, exactly as with every dispatch mode before it.
 
+**`create-dev-loop`'s `add_dirs` fix** (see `dispatch.py`'s module
+docstring finding #8) has also been verified for real, end to end
+(2026-07-18). Root cause: `cmd_tend`'s `create-dev-loop` dispatch never
+passed `add_dirs`, unlike `align`'s `add_dirs=[conv.path]` — `Write` isn't
+sandboxed to `cwd`/`--add-dir` (finding #3), but `Read`/`Bash` are, so a
+stale partial skill file from an earlier failed attempt had no recovery
+path on retry. This was root-caused directly from a real
+`gardener overnight` run's transcripts, then confirmed for real with the
+actual failure's leftover artifact still on disk
+(`~/local-skills/gardener-dev-loop/gardener-dev-loop.md` existed,
+`~/.claude/commands/gardener-dev-loop.md` did not):
+
+- An isolated scratch-directory probe (a real `claude -p` invocation using
+  `MODE_SPECS[Mode.CREATE_DEV_LOOP]`'s exact tool/`--allowedTools` list,
+  unchanged, plus `--add-dir` for two throwaway directories) confirmed
+  `--add-dir` alone was sufficient: `Read` on a pre-existing file,
+  `Bash(mkdir *)`, `Write` (fresh and overwrite-after-read), `Bash(ln -sf
+  ...)`, and `Bash(ls -la ...)` all succeeded, zero `permission_denials` —
+  no `MODE_SPECS` tool/pattern change was needed.
+- After the fix, the stale artifact was removed
+  (`rm -rf ~/local-skills/gardener-dev-loop`) and a real
+  `gardener tend --repo dmccoystephenson/gardener` (no `--allow-merge`) was
+  dispatched from this fix's own code. `create-dev-loop` succeeded this
+  time: both `~/local-skills/gardener-dev-loop/gardener-dev-loop.md` and
+  the `~/.claude/commands/gardener-dev-loop.md` symlink existed
+  immediately afterward. `tend` then proceeded past the bootstrap step and
+  dispatched `/gardener-dev-loop` itself (591.6s, $2.33, `ok=True`, 9
+  permission denials — correctly blocked out-of-scope attempts), which
+  found real work (two open bugs, #2 and #3), opened
+  [PR #7](https://github.com/dmccoystephenson/gardener/pull/7) hardening
+  `cmd_align`/`cmd_tend`/`cmd_overnight` against raw crashes from
+  subprocess timeouts and corrupted garden/allow-list JSON, and correctly
+  ended with a `DECISION NEEDED:` line (merge wasn't authorized). Confirmed
+  afterward: `origin/main` is unchanged (`030d3fc`, same commit as before
+  the run) and PR #7 remains open, not merged — gardener's first real
+  self-tend made genuine progress on its own codebase without ever
+  mutating its own main branch.
+
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
