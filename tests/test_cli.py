@@ -15,6 +15,8 @@ from gardener import dev_loop, garden, merge_allowlist, overnight, state
 from gardener.cli import (
     REPO_RE,
     _notify_run,
+    _record_and_notify,
+    _safe_record_run,
     build_parser,
     build_prompt,
     cmd_garden,
@@ -336,6 +338,39 @@ class TestNotifyRun(unittest.TestCase):
             _notify_run(run)  # must not raise
 
 
+class TestSafeRecordRun(unittest.TestCase):
+    """_safe_record_run/_record_and_notify must never raise, even when
+    state.record_run itself fails — see issue #9: a bare state.record_run
+    call on cmd_align/cmd_tend's success path used to raw-crash the whole
+    process for exceptions state.record_run can raise that aren't among
+    the (DispatchError, RuntimeError, ValueError,
+    subprocess.TimeoutExpired, OSError) tuple those functions already
+    catch around dispatch itself, e.g. sqlite3.OperationalError."""
+
+    def _run(self, **overrides):
+        defaults = dict(
+            repo="owner/name", mode="tend", outcome="tend",
+            timestamp=state.now_iso(), gap_summary="did stuff",
+        )
+        defaults.update(overrides)
+        return state.Run(**defaults)
+
+    @patch("gardener.cli.state.record_run", side_effect=RuntimeError("disk full"))
+    def test_safe_record_run_swallows_a_record_failure(self, mock_record):
+        with redirect_stderr(io.StringIO()) as err:
+            _safe_record_run(self._run(), None)  # must not raise
+        self.assertIn("state.record_run failed", err.getvalue())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.state.record_run", side_effect=RuntimeError("disk full"))
+    def test_record_and_notify_still_notifies_when_recording_fails(self, mock_record, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+        run = self._run()
+        with redirect_stderr(io.StringIO()):
+            _record_and_notify(run, None)  # must not raise
+        mock_notifier.notify.assert_called_once()
+
+
 class TestCmdGarden(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -412,6 +447,33 @@ class TestCmdTendNotifications(unittest.TestCase):
         _title, _message, level = mock_notifier.notify.call_args[0]
         # tend is a mutation-capable mode (like implement/file-issue), not report
         self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.state.record_run", side_effect=RuntimeError("sqlite is locked"))
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_record_run_failure_on_success_path_does_not_crash(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_record, mock_default_notifier
+    ):
+        # Regression test for issue #9: a completed, successful dispatch
+        # must still be reported (exit code, notification) even if
+        # state.record_run itself raises trying to persist it.
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())  # must not raise
+
+        self.assertEqual(exit_code, 0)
+        mock_notifier.notify.assert_called_once()
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")

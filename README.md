@@ -571,9 +571,15 @@ its own presentation.
   concrete notifiers, for anyone who wants to register more than one
   destination later without touching any call site.
 
-`cli.py` wires this in with one thin helper, `_notify_run(run)`, called
-right after each place `state.record_run(...)` is called in `cmd_align`.
-It owns the only alerting *business logic* in the codebase — turning a
+`cli.py` wires this in with `_notify_run(run)`, called via a small
+`_record_and_notify(run, db_path)` wrapper right after each place
+`state.record_run(...)` is called in `cmd_align`/`cmd_tend`. Both the
+record and notify steps are individually failure-isolated — a
+`state.record_run` failure (e.g. a locked/corrupt sqlite file) is caught
+and logged rather than crashing the run whose successful dispatch it was
+merely trying to persist, the same "must never break the run it reports
+on" posture `_notify_run` itself already had for a bad webhook.
+`_notify_run` owns the only alerting *business logic* in the codebase — turning a
 recorded `state.Run`'s `outcome`/`mode` into a severity — deliberately
 kept out of `notify.py` itself, which only knows how to present an
 already-decided `(title, message, level)`:
