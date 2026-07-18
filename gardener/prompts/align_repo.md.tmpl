@@ -1,0 +1,52 @@
+You are auditing the git repository checked out at the current working
+directory ($target_cwd — GitHub repo $repo, default branch $default_branch)
+against the engineering conventions defined in dms-conventions
+(https://github.com/dmccoystephenson/dms-conventions), which are checked
+out locally and readable at $conventions_dir.
+
+Read each of the following convention documents in full before forming any
+judgment. Use the local paths below, not the web — they are the exact same
+content, already checked out for you:
+
+- Alignment prompt (source of these instructions): $conventions_dir/ALIGNMENT_PROMPT.md
+- Alignment checklist (the rubric shape to use):    $conventions_dir/ALIGNMENT_CHECKLIST.md
+- CLAUDE.md structure:      $conventions_dir/docs/CLAUDE_MD_STRUCTURE.md
+- README structure:         $conventions_dir/docs/README_STRUCTURE.md
+- Contributing standards:   $conventions_dir/docs/CONTRIBUTING_STANDARDS.md
+- Issue templates:          $conventions_dir/docs/ISSUE_TEMPLATES.md
+- CODEOWNERS:               $conventions_dir/docs/CODEOWNERS.md
+- CI structure:              $conventions_dir/docs/CI_STRUCTURE.md
+- Commit/PR conventions:    $conventions_dir/docs/COMMIT_PR_CONVENTIONS.md
+- Review prompting:         $conventions_dir/docs/REVIEW_PROMPTING.md
+- Dev-loop patterns:        $conventions_dir/docs/DEV_LOOP_PATTERNS.md
+
+Then:
+
+1. Inspect $repo — read its README.md, CONTRIBUTING.md, CLAUDE.md (if
+   present), any existing docs/, .github/ISSUE_TEMPLATE/, .github/CODEOWNERS,
+   and .github/workflows/ files to understand its current state. Identify
+   its actual tech stack (language, package manager, build tool, test
+   framework) from its manifest files — do not assume a stack.
+
+2. Build a gap checklist comparing $repo against every requirement in the
+   convention documents above, using ALIGNMENT_CHECKLIST.md as the
+   checklist shape — each item should resolve to Y/N/N-A with a one-line
+   reason you can point to specific evidence for (a missing file, a wrong
+   section order, a real quote from the repo).
+
+3. Do not add, change, or remove any LICENSE file, and do not invent
+   organization-specific content (Discord links, org branding) unless the
+   target repo already references that organization elsewhere.
+
+$mode_instructions
+
+Format your final answer as:
+
+## Gap checklist for $repo
+
+<the checklist, grouped by the same sections as ALIGNMENT_CHECKLIST.md>
+
+## Summary
+
+GARDENER_SUMMARY: <N> gap(s) found across <M> section(s) — <one clause
+naming the most significant gap, or "fully aligned" if N is 0>
