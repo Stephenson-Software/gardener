@@ -3,6 +3,7 @@ prompt templating — the deterministic parts of cli.py that don't require
 actually invoking `claude` or `gh`."""
 import argparse
 import io
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -446,6 +447,36 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(level, Level.ERROR)
 
     @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30))
+    def test_timeout_expired_during_setup_is_recorded_not_a_raw_crash(self, mock_clone, mock_default_notifier):
+        # A hung git/gh call (subprocess.TimeoutExpired) used to propagate
+        # unhandled out of clone_or_refresh_target_repo, crashing the whole
+        # process rather than being recorded/alerted like every other setup
+        # failure — see gardener/CLAUDE.md's testing conventions.
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo", side_effect=OSError("git not found"))
+    def test_os_error_during_setup_is_recorded_not_a_raw_crash(self, mock_clone, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
@@ -553,6 +584,24 @@ class TestCmdOvernight(unittest.TestCase):
             exit_code = cmd_overnight(self._args())
         self.assertEqual(exit_code, 0)
         self.assertEqual(self.calls, [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_corrupted_garden_file_is_reported_not_a_raw_crash(self, mock_default_notifier):
+        # A torn/corrupted garden.json (e.g. this device killing a prior
+        # process mid-write) used to propagate a raw ValueError out of
+        # garden.list_garden and crash the whole overnight batch before any
+        # per-repo dispatch could even begin.
+        self.garden_file.write_text("not json{{{")
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(self.calls, [])
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.cmd_tend")
