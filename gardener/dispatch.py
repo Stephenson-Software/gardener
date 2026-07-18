@@ -159,6 +159,47 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
    (confirmed permitted in isolation afterward); no other skill name is
    pre-approved, so any other `Skill` invocation still requires the same
    denied-not-hung behavior as everything else out of scope.
+8. **Unlike `Write` (point 3 above), `Read` and `Bash` ARE sandboxed to
+   `cwd`/`--add-dir` — and a missing `--add-dir` on a mode that needs one is
+   a real dead end, not a graceful degradation.** Discovered live from two
+   real transcripts of the same `gardener overnight` run
+   (`dmccoystephenson/gateway-dev-loop` and `dmccoystephenson/gardener`,
+   both dispatching `create-dev-loop`, 2026-07-18): `create-dev-loop`'s
+   dispatch had `--tools` and `--allowedTools` for `Write`/`Bash(mkdir *)`/
+   `Bash(ln *)`/`Bash(ls *)` (see `MODE_SPECS[Mode.CREATE_DEV_LOOP]` below)
+   but `cli.py`'s `cmd_tend` never passed it any `add_dirs` for
+   `~/local-skills/` or `~/.claude/commands/` (unlike `align`'s
+   `add_dirs=[conv.path]`). The gateway run succeeded anyway because no
+   skill file existed yet, so `Write` (sandbox-exempt per point 3) created
+   it fresh, and one `Bash(ln -sf ...)` call happened to be the only other
+   filesystem touch needed. The gardener run hit a genuinely different
+   repo state — a stale, partially-completed skill file already sitting at
+   `~/local-skills/gardener-dev-loop/gardener-dev-loop.md` from an earlier
+   failed attempt — and `Write` correctly refused to blindly overwrite a
+   file it hadn't read first (a real, separate Claude Code safety feature).
+   The session then tried `Read` on that file: denied, sandboxed outside
+   `cwd`/`--add-dir` despite `Read` being in `--tools`. It then tried
+   `Bash` workarounds (`cat`, `mkdir`, `echo >`, none of which are
+   `Write`-tool calls even though some are pre-approved patterns like
+   `Bash(mkdir *)`): all denied the same way. With no way to even read
+   what was in its way, the session gave up with no usable skill produced.
+   Confirmed directly afterward, isolated from any real repo (throwaway
+   scratch directories, `git log` for the exact probe invocation): the
+   same `MODE_SPECS[Mode.CREATE_DEV_LOOP]` tool/`--allowedTools` list,
+   unchanged, but WITH `--add-dir` for both scratch directories, let a
+   session `Read` a pre-existing file, `Bash(mkdir *)` a new directory,
+   `Write` a fresh file, `Write`-overwrite the pre-existing file (having
+   read it first), `Bash(ln -sf ...)` a symlink, and `Bash(ls -la ...)`
+   the directory — all six steps `ok`, zero `permission_denials`. So
+   `--add-dir` alone (no `MODE_SPECS`/`--allowedTools` change) was the
+   complete fix: `cmd_tend`'s `create-dev-loop` dispatch now passes
+   `add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR]`, the same
+   pattern `align` already used for its own cache directory. The practical
+   rule going forward: any mode whose `Write`/`Edit` legitimately reaches
+   outside `cwd` still needs `Read`/`Bash` to reach the same directories
+   via `--add-dir` for that mode to have any recovery path when a prior
+   attempt leaves partial state behind — `Write`'s sandbox exemption alone
+   is not enough to make a directory usable end to end.
 
 ## Merge allow-list (`tend --allow-merge`)
 
@@ -345,7 +386,11 @@ MODE_SPECS: dict[Mode, ModeSpec] = {
         # ever instructed to touch the skill file location, never the
         # target repo (see the prompt's explicit scoping note — Write
         # itself isn't structurally confined to any directory, per the
-        # module docstring's finding #3).
+        # module docstring's finding #3). Unlike Write, Read/Bash ARE
+        # sandboxed to cwd/--add-dir (module docstring finding #8) — cli.py's
+        # cmd_tend must pass add_dirs=[dev_loop.LOCAL_SKILLS_DIR,
+        # dev_loop.COMMANDS_DIR] on every dispatch of this mode, or a stale
+        # partial artifact in either directory has no recovery path on retry.
         tools=("Read", "Grep", "Glob", "Write", "Bash"),
         permission_mode="default",
         allowed_tools=(

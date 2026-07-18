@@ -324,6 +324,20 @@ def cmd_tend(args: argparse.Namespace) -> int:
                 mode=Mode.CREATE_DEV_LOOP,
                 prompt=create_prompt,
                 cwd=target_dir,
+                # Symmetric with align's add_dirs=[conv.path]: this dispatch's
+                # whole job is reading/writing exactly these two directories
+                # (see dev_loop.py's LOCAL_SKILLS_DIR/COMMANDS_DIR and
+                # dispatch.py's module docstring finding #3) — without this,
+                # Read/Bash(mkdir *)/Bash(ls *) etc. are sandboxed out of both
+                # dirs even though Write itself isn't, so a first attempt that
+                # leaves any partial state (skill file written, symlink not
+                # yet created) has no recovery path on retry: the dispatched
+                # session can't even read what's in its way. Confirmed as the
+                # root cause of a real failed run (dmccoystephenson/gardener,
+                # 2026-07-18) — see this repo's git history for the transcript
+                # comparison against the same run's successful gateway-dev-loop
+                # dispatch, which had no stale artifact blocking it.
+                add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
                 model=args.model,
                 timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
             )
