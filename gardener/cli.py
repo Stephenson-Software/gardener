@@ -1037,7 +1037,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
-    status.add_argument("--limit", type=int, default=20)
+    status.add_argument(
+        "--limit", type=int, default=20,
+        help="How many most-recent runs to show (default 20)",
+    )
     status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     status.set_defaults(func=cmd_status)
 
