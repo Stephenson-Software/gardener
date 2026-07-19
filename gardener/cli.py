@@ -491,10 +491,18 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
                 model=args.model,
                 timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
             )
+            # gh repo create is never in this mode's allowed_tools (a
+            # deliberate, higher-risk-class exclusion — see
+            # dispatch.py's MODE_SPECS[Mode.CREATE_DEV_LOOP]), so
+            # create-dev-loop's own Step 6 ("Create a private GitHub repo
+            # for the skill") always gets structurally skipped here. Check
+            # this live rather than assuming, per dev_loop.step6_unreachable's
+            # own docstring — see issue #12.
+            step6_gap = create_result.ok and dev_loop.step6_unreachable()
             create_run = state.Run(
                 repo=args.repo,
                 mode=Mode.CREATE_DEV_LOOP.value,
-                outcome="error" if not create_result.ok else "created",
+                outcome="error" if not create_result.ok else ("created_incomplete" if step6_gap else "created"),
                 timestamp=state.now_iso(),
                 gap_summary=extract_gap_summary(create_result.result_text)
                 if create_result.result_text
@@ -518,7 +526,19 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
                 # since the tend dispatch itself never ran.
                 _notify_run(create_run)
                 return TendResult(exit_code=1, dispatched=False, run=create_run)
-            print(f"gardener: /{slug} skill created", file=sys.stderr)
+            if step6_gap:
+                print(
+                    f"gardener: WARNING — /{slug} skill created, but create-dev-loop's "
+                    "Step 6 (GitHub repo + issue tracker) was skipped — `gh repo create` "
+                    "is outside this dispatch's allowed tools (see CLAUDE.md's dispatch "
+                    "safety model). This skill's own dev-loop cycle has nowhere to file "
+                    "self-audit findings until a human completes create-dev-loop's Step 6 "
+                    f"manually (create a private GitHub repo for /{slug} and point it there).",
+                    file=sys.stderr,
+                )
+                _notify_run(create_run)
+            else:
+                print(f"gardener: /{slug} skill created", file=sys.stderr)
         else:
             print(f"gardener: found existing /{slug} skill", file=sys.stderr)
 

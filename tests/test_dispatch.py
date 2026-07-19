@@ -55,7 +55,7 @@ class TestModeSpecs(unittest.TestCase):
 
 class TestBuildInvocation(unittest.TestCase):
     def test_report_mode_argv_has_no_write_tools_and_uses_plan_permission(self):
-        argv = _build_invocation(Mode.REPORT, "prompt text", Path("/tmp"), [])
+        argv = _build_invocation(Mode.REPORT, "prompt text", [])
         self.assertIn("--permission-mode", argv)
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
         tools_value = argv[argv.index("--tools") + 1]
@@ -69,7 +69,7 @@ class TestBuildInvocation(unittest.TestCase):
         self.assertEqual(argv[argv.index("-p") + 1], "prompt text")
 
     def test_add_dir_does_not_swallow_the_prompt(self):
-        argv = _build_invocation(Mode.REPORT, "prompt text", Path("/tmp"), [Path("/a")])
+        argv = _build_invocation(Mode.REPORT, "prompt text", [Path("/a")])
         self.assertEqual(argv[argv.index("-p") + 1], "prompt text")
         self.assertEqual(argv[argv.index("--add-dir") + 1], "/a")
         # --add-dir's value must be the directory, not the prompt swallowed
@@ -77,20 +77,20 @@ class TestBuildInvocation(unittest.TestCase):
         self.assertNotEqual(argv[argv.index("--add-dir") + 1], "prompt text")
 
     def test_implement_mode_argv_scopes_bash_and_uses_default_permission(self):
-        argv = _build_invocation(Mode.IMPLEMENT, "prompt", Path("/tmp"), [])
+        argv = _build_invocation(Mode.IMPLEMENT, "prompt", [])
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
         allowed = argv[argv.index("--allowedTools") + 1]
         self.assertIn("Bash(git *)", allowed)
         self.assertNotIn("bypassPermissions", argv)
 
     def test_add_dirs_are_passed_through(self):
-        argv = _build_invocation(Mode.REPORT, "prompt", Path("/tmp"), [Path("/a"), Path("/b")])
+        argv = _build_invocation(Mode.REPORT, "prompt", [Path("/a"), Path("/b")])
         self.assertEqual(argv.count("--add-dir"), 2)
         self.assertIn("/a", argv)
         self.assertIn("/b", argv)
 
     def test_model_override_passed_through(self):
-        argv = _build_invocation(Mode.REPORT, "prompt", Path("/tmp"), [], model="opus")
+        argv = _build_invocation(Mode.REPORT, "prompt", [], model="opus")
         self.assertIn("--model", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "opus")
 
@@ -101,7 +101,7 @@ class TestBuildInvocation(unittest.TestCase):
                 # per invocation and must be built with tend_mode_spec()
                 # (see TestTendModeSpec below).
                 continue
-            argv = _build_invocation(mode, "prompt", Path("/tmp"), [])
+            argv = _build_invocation(mode, "prompt", [])
             self.assertNotIn("bypassPermissions", argv)
 
 
@@ -119,7 +119,7 @@ class TestCreateDevLoopModeSpec(unittest.TestCase):
         self.assertIn(spec.permission_mode, ALLOWED_PERMISSION_MODES)
 
     def test_argv_builds_without_a_mode_spec_override(self):
-        argv = _build_invocation(Mode.CREATE_DEV_LOOP, "prompt", Path("/tmp"), [])
+        argv = _build_invocation(Mode.CREATE_DEV_LOOP, "prompt", [])
         self.assertIn("Write", argv[argv.index("--tools") + 1].split(","))
 
 
@@ -155,10 +155,10 @@ class TestTendModeSpec(unittest.TestCase):
 
     def test_argv_reflects_eligibility_via_mode_spec_override(self):
         argv_ineligible = _build_invocation(
-            Mode.TEND, "prompt", Path("/tmp"), [], mode_spec=tend_mode_spec(False)
+            Mode.TEND, "prompt", [], mode_spec=tend_mode_spec(False)
         )
         argv_eligible = _build_invocation(
-            Mode.TEND, "prompt", Path("/tmp"), [], mode_spec=tend_mode_spec(True)
+            Mode.TEND, "prompt", [], mode_spec=tend_mode_spec(True)
         )
         self.assertNotIn(MERGE_ALLOWED_TOOL, argv_ineligible[argv_ineligible.index("--allowedTools") + 1])
         self.assertIn(MERGE_ALLOWED_TOOL, argv_eligible[argv_eligible.index("--allowedTools") + 1])

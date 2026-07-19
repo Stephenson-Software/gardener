@@ -141,7 +141,16 @@ several repos, dispatched one after another, nobody watching.
    distinct, more tightly scoped mode — see `dispatch.py`) to generate and
    register one, then confirms the file actually landed before proceeding.
    If that dispatch fails or the file still isn't there afterward, `tend`
-   stops and reports an error rather than guessing.
+   stops and reports an error rather than guessing. `create-dev-loop`'s own
+   Step 6 ("create a private GitHub repo for the skill", meant to serve as
+   that skill's own issue tracker) is structurally out of reach here —
+   `gh repo create` is deliberately absent from this mode's allowed tools,
+   a different, higher-stakes risk class than editing an already-existing
+   target repo — so the dispatched session is told to skip it. A skill
+   bootstrapped this way therefore always comes back "incomplete": `tend`
+   prints a distinct WARNING (not a plain success) and fires a notification
+   so a human knows to finish Step 6 by hand before that skill's own
+   dev-loop cycle has anywhere to file self-audit findings.
 4. Dispatches the `<slug>-dev-loop` skill itself via `claude -p
    "/<slug>-dev-loop ..."`, with `cwd` set to gardener's own controlled
    clone (not wherever the skill's own hardcoded "Working directory" line

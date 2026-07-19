@@ -57,6 +57,27 @@ class TestHasDevLoopSkill(unittest.TestCase):
                 self.assertFalse(dev_loop.has_dev_loop_skill("foo-dev-loop"))
 
 
+class TestStep6Unreachable(unittest.TestCase):
+    """See issue #12: create-dev-loop's Step 6 (`gh repo create`) is
+    structurally denied by MODE_SPECS[Mode.CREATE_DEV_LOOP], so this must
+    stay True unless that allow-list is deliberately widened."""
+
+    def test_true_against_the_real_mode_spec(self):
+        self.assertTrue(dev_loop.step6_unreachable())
+
+    def test_false_once_gh_repo_create_is_granted(self):
+        from gardener.dispatch import MODE_SPECS, Mode, ModeSpec
+
+        real_spec = MODE_SPECS[Mode.CREATE_DEV_LOOP]
+        widened_spec = ModeSpec(
+            tools=real_spec.tools,
+            permission_mode=real_spec.permission_mode,
+            allowed_tools=real_spec.allowed_tools + ("Bash(gh repo create *)",),
+        )
+        with patch.dict(MODE_SPECS, {Mode.CREATE_DEV_LOOP: widened_spec}):
+            self.assertFalse(dev_loop.step6_unreachable())
+
+
 class TestPromptBuilding(unittest.TestCase):
     def test_create_prompt_specifies_exact_slug_and_forbids_target_repo_writes(self):
         prompt = dev_loop.build_create_dev_loop_prompt(
@@ -67,6 +88,14 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn("target repo checkout", prompt)
         self.assertIn("nowhere else", prompt)
         self.assertIn("GARDENER_SUMMARY", prompt)
+
+    def test_create_prompt_tells_dispatched_session_to_skip_step_6(self):
+        prompt = dev_loop.build_create_dev_loop_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/target")
+        )
+        self.assertIn("Step 6", prompt)
+        self.assertIn("gh repo create", prompt)
+        self.assertIn("Skip", prompt)
 
     def test_tend_prompt_includes_headless_safety_preamble(self):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)

@@ -453,7 +453,6 @@ class DispatchResult:
 def _build_invocation(
     mode: Mode,
     prompt: str,
-    cwd: Path,
     add_dirs: list[Path],
     model: Optional[str] = None,
     mode_spec: Optional[ModeSpec] = None,
@@ -517,7 +516,7 @@ def run_claude(
     if mode_spec is None and mode not in MODE_SPECS:
         raise DispatchError(f"unknown mode: {mode} (no mode_spec given and no fixed entry)")
 
-    argv = _build_invocation(mode, prompt, cwd, add_dirs or [], model=model, mode_spec=mode_spec)
+    argv = _build_invocation(mode, prompt, add_dirs or [], model=model, mode_spec=mode_spec)
 
     # Started right before the blocking call below so the poll runs
     # concurrently with the real dispatch, not before or after it — see
