@@ -39,17 +39,86 @@ Two things this module deliberately does NOT try to do:
   many repos it actually attempted — so the *next* `gardener overnight`
   invocation picks up where this one left off instead of re-tending the
   same first few repos every night and never reaching the rest.
+
+## Repo-selection strategies and the resume cursor (issue #6, #14)
+
+`--strategy` (see `cli.py`'s `overnight_parser`) selects which of three
+pluggable `garden -> ordered list[str]`-shaped functions below decides this
+run's attempt order:
+
+- `round-robin` (`repos_to_attempt`, default — byte-for-byte the original,
+  only implementation, unchanged): rotates the alphabetically-sorted garden
+  to start at the resume cursor.
+- `issue-count` (`order_by_issue_count`): sorts descending by each repo's
+  live open-GitHub-issue count. The count-fetching `gh` call itself is kept
+  out of this function (and out of this whole module) — it's injected in
+  as an already-fetched `dict[str, int]` — so this stays unit-testable
+  without ever invoking `gh`; the actual fetch lives in `cli.py`'s
+  `fetch_issue_counts`, mirroring `find_orphaned_pr`'s existing gh-calling
+  pattern there.
+- `random` (`random_order`): a fresh shuffle every call. Takes an
+  injectable `random.Random` rather than reaching for the `random` module's
+  global functions, so tests can assert a deterministic shuffle instead of
+  mocking global state — the same `time_fn`/`sleep_fn`-injection convention
+  `cli.py`'s transcript polling and this module's own tests already use.
+
+**The resume cursor design decision.** `round-robin`'s existing
+`read_cursor`/`write_cursor` (a bare list index into the alphabetically-
+sorted garden, in `overnight_cursor.json`'s `next_index` field) is only
+meaningful because round-robin's ordering is stable across runs — index 3
+means the same repo every time, as long as the garden itself hasn't
+changed. `issue-count` and `random` both break that assumption: issue-count
+re-sorts by a live count that can change between runs (a repo gaining or
+losing issues reshuffles the whole ordering), and random reshuffles
+unconditionally every run — under either, a bare index would silently
+resume at the *wrong* repo, not just a suboptimal one.
+
+Rather than force either of those two into round-robin's index-based
+cursor (which would be actively wrong) or give them no resume behavior at
+all (which would re-attempt whichever repos happen to sort/shuffle first
+every single night, exactly the fairness problem issue #14 exists to
+solve), this module keys their resume state by **repo name** instead of
+position: `read_attempted`/`write_attempted` persist the list of repo names
+already attempted since the current "cycle" through the garden started
+(a separate `attempted` field in the same cursor JSON file — round-robin's
+`next_index` and issue-count/random's `attempted` coexist in one file
+without clobbering each other, so switching `--strategy` across runs
+doesn't lose either strategy's own progress). `resume_order` filters this
+run's strategy-ordered candidate list down to whatever hasn't been
+attempted yet in the current cycle (preserving that run's own order,
+e.g. still highest-issue-count-first); once every repo in the garden has
+been attempted at least once, the cycle is considered complete and the
+next call starts a fresh cycle from a freshly-computed full ordering
+(`next_attempted` resets the persisted list to just what's newly attempted
+that fresh-cycle run, discarding the just-completed cycle's now-irrelevant
+history) — so both non-round-robin strategies still guarantee every garden
+repo gets attempted at least once per cycle, the same fairness guarantee
+round-robin's rotation already provided, just keyed by name instead of
+position so a re-sort or a reshuffle can never point it at the wrong repo.
 """
 from __future__ import annotations
 
 import json
 import os
+import random
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from gardener import notify, state
+
+
+class Strategy(str, Enum):
+    """`gardener overnight --strategy` values — see this module's docstring
+    section on repo-selection strategies and the resume cursor for what each
+    one actually does and why the cursor works differently per strategy."""
+
+    ROUND_ROBIN = "round-robin"
+    ISSUE_COUNT = "issue-count"
+    RANDOM = "random"
+
 
 # A full night's sleep — the use case this subcommand exists for. 8h
 # comfortably covers several TEND_DEFAULT_TIMEOUT_SECONDS (45 min)
@@ -66,25 +135,71 @@ def default_cursor_path() -> Path:
     return base / "overnight_cursor.json"
 
 
-def read_cursor(path: Optional[Path] = None) -> int:
-    """0 (start of the garden list) if no cursor has ever been written, or
-    if the file is missing/corrupt — same "absence is a safe, normal
-    default" posture as garden.py/merge_allowlist.py, not an error."""
-    path = path or default_cursor_path()
+def _load_cursor_file(path: Path) -> dict:
+    """The raw cursor JSON object, or `{}` if missing/corrupt/not-an-object
+    — shared by `read_cursor`/`read_attempted` (each only look at their own
+    key) and by both write functions (each merges into whatever the other
+    strategy already persisted, rather than clobbering it — see this
+    module's docstring on why round-robin's `next_index` and issue-count/
+    random's `attempted` coexist in one file)."""
     if not path.exists():
-        return 0
+        return {}
     try:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
-        return 0
-    idx = data.get("next_index", 0) if isinstance(data, dict) else 0
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_cursor(path: Optional[Path] = None) -> int:
+    """0 (start of the garden list) if no cursor has ever been written, or
+    if the file is missing/corrupt — same "absence is a safe, normal
+    default" posture as garden.py/merge_allowlist.py, not an error.
+
+    `round-robin`-only: see this module's docstring for why `issue-count`/
+    `random` use `read_attempted` instead."""
+    data = _load_cursor_file(path or default_cursor_path())
+    idx = data.get("next_index", 0)
     return idx if isinstance(idx, int) and idx >= 0 else 0
 
 
 def write_cursor(index: int, path: Optional[Path] = None) -> None:
+    """`round-robin`-only. Merges into the existing cursor file rather than
+    overwriting it outright, so a previous `--strategy issue-count`/
+    `random` run's own `attempted` field (see `write_attempted`) survives a
+    later round-robin run untouched — each strategy only ever touches its
+    own key in this shared file."""
     path = path or default_cursor_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"next_index": index}) + "\n")
+    data = _load_cursor_file(path)
+    data["next_index"] = index
+    path.write_text(json.dumps(data) + "\n")
+
+
+def read_attempted(path: Optional[Path] = None) -> list[str]:
+    """Repo names already attempted since the current cycle through the
+    garden started, for `issue-count`/`random` — the name-keyed equivalent
+    of `read_cursor`'s bare index, used instead of it because neither
+    strategy's ordering is stable across runs (see this module's docstring).
+    Empty list if no cursor has ever been written for this key, or if the
+    file/field is missing, corrupt, or not a list of strings — same
+    "absence is a safe, normal default" posture as `read_cursor`."""
+    data = _load_cursor_file(path or default_cursor_path())
+    names = data.get("attempted", [])
+    if isinstance(names, list) and all(isinstance(n, str) for n in names):
+        return names
+    return []
+
+
+def write_attempted(names: list[str], path: Optional[Path] = None) -> None:
+    """`issue-count`/`random`-only. Merges into the existing cursor file the
+    same way `write_cursor` does, so it never clobbers round-robin's own
+    `next_index` field."""
+    path = path or default_cursor_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_cursor_file(path)
+    data["attempted"] = names
+    path.write_text(json.dumps(data) + "\n")
 
 
 def batch_repos(order: list[str], concurrency: int) -> list[list[str]]:
@@ -117,6 +232,90 @@ def repos_to_attempt(garden: list[str], start_index: int) -> list[str]:
     n = len(garden)
     start = start_index % n
     return [garden[(start + i) % n] for i in range(n)]
+
+
+def order_by_issue_count(garden: list[str], issue_counts: dict[str, int]) -> list[str]:
+    """`issue-count` strategy: `garden` sorted descending by each repo's
+    open-issue count, taken from an already-fetched `issue_counts` mapping
+    rather than calling `gh` itself — the actual `gh issue list ...` fetch
+    lives in `cli.py`'s `fetch_issue_counts` (mirroring `find_orphaned_pr`'s
+    existing gh-calling pattern there), kept out of this function so it
+    stays unit-testable without ever invoking `gh` (see gardener/CLAUDE.md's
+    testing conventions).
+
+    A repo missing from `issue_counts` (its fetch failed, or `gh`/network
+    was unavailable) is treated as count 0 — the lowest priority, same as a
+    repo that genuinely has no open issues — rather than crashing the whole
+    ordering over one repo's fetch failure, or artificially prioritizing it.
+    Ties (including "everything missing, everything 0") break alphabetically
+    so the result is fully deterministic given the same inputs — the same
+    tie-break `garden.py`'s own sorted storage already uses."""
+    return sorted(garden, key=lambda repo: (-issue_counts.get(repo, 0), repo))
+
+
+def random_order(garden: list[str], rng: Optional[random.Random] = None) -> list[str]:
+    """`random` strategy: a fresh shuffle of `garden` every call. Takes an
+    injectable `random.Random` (falling back to a real one, seeded from
+    system entropy, only when `rng` is omitted) rather than reaching for the
+    `random` module's global functions directly — so tests can assert
+    against a deterministic shuffle (`random.Random(<fixed seed>)`) instead
+    of mocking global state, the same injection convention `cli.py`'s
+    transcript polling (`time_fn`/`sleep_fn`) and this module's own tests
+    already use."""
+    rng = rng if rng is not None else random.Random()
+    order = list(garden)
+    rng.shuffle(order)
+    return order
+
+
+def resume_order(full_order: list[str], attempted: list[str]) -> tuple[list[str], bool]:
+    """The `issue-count`/`random` equivalent of `repos_to_attempt`'s
+    index-based rotation, but keyed by repo name (see this module's
+    docstring for why a bare index doesn't work once the ordering itself
+    isn't stable across runs).
+
+    `full_order` is this run's freshly-(re)computed strategy ordering
+    (`order_by_issue_count`/`random_order`'s output); `attempted` is every
+    repo name already attempted since the current cycle through the garden
+    began (`read_attempted`'s output). Returns `(order_for_this_run,
+    cycle_reset)`:
+
+    - If any repo in `full_order` hasn't been attempted yet this cycle,
+      returns just those, in `full_order`'s own relative order (still
+      highest-issue-count-first, or still this run's shuffle order) —
+      `cycle_reset=False`.
+    - If every repo has already been attempted (the cycle is complete),
+      returns `full_order` unchanged, starting a fresh cycle —
+      `cycle_reset=True`. Without this fallback, a completed cycle would
+      leave an empty candidate list and `overnight` would silently stop
+      dispatching anything at all under these two strategies once every
+      repo had been attempted once.
+    """
+    attempted_set = set(attempted)
+    remaining = [repo for repo in full_order if repo not in attempted_set]
+    if remaining:
+        return remaining, False
+    return full_order, True
+
+
+def next_attempted(attempted_before: list[str], cycle_reset: bool, newly_attempted: list[str]) -> list[str]:
+    """The `attempted` list to persist (`write_attempted`) after a run under
+    `issue-count`/`random`: `attempted_before` (this cycle's attempted names
+    prior to this run) plus `newly_attempted` (the repos this run actually
+    dispatched, in the order `cmd_overnight` attempted them) — unless
+    `resume_order` reported `cycle_reset=True` for this run, in which case
+    the just-completed cycle's history is no longer relevant and this run's
+    own attempts start the next cycle's history instead. Deduplicates while
+    preserving order, defensively, though the two lists are not expected to
+    overlap in normal operation."""
+    base = [] if cycle_reset else attempted_before
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in (*base, *newly_attempted):
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
 
 
 def has_time_for_another_repo(

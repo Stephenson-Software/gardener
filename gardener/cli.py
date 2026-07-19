@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -196,6 +197,56 @@ def find_orphaned_pr(repo: str, timeout: int = 30) -> Optional[dev_loop.Orphaned
     candidates.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)
     newest = candidates[0]
     return dev_loop.OrphanedPR(number=newest["number"], head_branch=newest["headRefName"])
+
+
+def fetch_open_issue_count(repo: str, timeout: int = 30) -> Optional[int]:
+    """One repo's open-issue count, via `gh issue list --state open --json
+    number -q length` — the actual `gh`-calling side of the `issue-count`
+    overnight strategy (see `overnight.py`'s `order_by_issue_count`, which
+    takes the result as an already-fetched mapping rather than calling this
+    itself, so that function stays unit-testable without `gh`).
+
+    Best-effort, same posture as `find_orphaned_pr`: any `gh` failure (not
+    authenticated, network hiccup, timeout, malformed output) returns `None`
+    rather than raising — one repo's fetch failing must not abort ordering
+    the rest of the garden; `order_by_issue_count` treats a `None`/missing
+    entry as count 0 (lowest priority), not a crash."""
+    if shutil.which("gh") is None:
+        return None
+    try:
+        res = _run(
+            ["gh", "issue", "list", "--repo", repo, "--state", "open",
+             "--json", "number", "-q", "length"],
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if res.returncode != 0:
+        return None
+    try:
+        return int((res.stdout or "").strip())
+    except ValueError:
+        return None
+
+
+def fetch_issue_counts(garden: list[str], timeout: int = 30) -> dict[str, int]:
+    """Every garden repo's open-issue count, one `gh` call per repo. Issue
+    #6 also floats a batched GraphQL query as an alternative to N sequential
+    `gh` calls — skipped here since gardener's garden is meant to stay a
+    small, hand-curated, opt-in list (see `garden.py`'s module docstring),
+    not something growing large enough for N sequential `gh` calls once per
+    `overnight` run to matter; revisit if that assumption stops holding.
+
+    Repos whose fetch fails are simply omitted from the returned mapping —
+    `order_by_issue_count` treats a missing entry as priority 0, so one
+    repo's `gh` hiccup deprioritizes it this run rather than aborting the
+    whole ordering."""
+    counts: dict[str, int] = {}
+    for repo in garden:
+        count = fetch_open_issue_count(repo, timeout=timeout)
+        if count is not None:
+            counts[repo] = count
+    return counts
 
 
 def build_prompt(mode: Mode, repo: str, target_cwd: Path, conventions_dir: Path, default_branch: str) -> str:
@@ -665,6 +716,16 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     `concurrency > 1` — see that function's docstring and `overnight.py`'s
     `batch_repos` for why this is safe now that `_dispatch_tend` returns a
     `TendResult` instead of `cmd_overnight` needing to capture stdout.
+
+    `args.strategy` (default `round-robin`, see `overnight.Strategy` and its
+    module docstring's "Repo-selection strategies and the resume cursor"
+    section) picks this run's ordering function and, correspondingly, which
+    half of the resume-cursor file it reads/writes: `round-robin` uses
+    `read_cursor`/`write_cursor` (a bare index, unchanged from before this
+    flag existed); `issue-count`/`random` use `read_attempted`/
+    `write_attempted` (repo names) plus `resume_order`/`next_attempted`
+    instead, since neither of those two strategies' orderings are stable
+    across runs — a bare index would silently resume at the wrong repo.
     """
     try:
         garden_list = garden.list_garden(path=args.garden_file)
@@ -694,14 +755,42 @@ def cmd_overnight(args: argparse.Namespace) -> int:
 
     budget_seconds = args.hours * 3600
     cursor_path = args.cursor_file or overnight.default_cursor_path()
-    start_index = overnight.read_cursor(path=cursor_path) % len(garden_list)
-    order = overnight.repos_to_attempt(garden_list, start_index)
+    strategy = overnight.Strategy(getattr(args, "strategy", overnight.Strategy.ROUND_ROBIN.value))
 
-    print(
-        f"gardener: overnight starting — {len(garden_list)} repo(s) in garden, "
-        f"budget={args.hours}h, resuming at index {start_index} ({order[0]})",
-        file=sys.stderr,
-    )
+    start_index: Optional[int] = None
+    attempted_before: list[str] = []
+    cycle_reset = False
+    if strategy is overnight.Strategy.ROUND_ROBIN:
+        start_index = overnight.read_cursor(path=cursor_path) % len(garden_list)
+        order = overnight.repos_to_attempt(garden_list, start_index)
+        print(
+            f"gardener: overnight starting — {len(garden_list)} repo(s) in garden, "
+            f"strategy={strategy.value}, budget={args.hours}h, "
+            f"resuming at index {start_index} ({order[0]})",
+            file=sys.stderr,
+        )
+    else:
+        if strategy is overnight.Strategy.ISSUE_COUNT:
+            print(f"gardener: overnight: fetching open-issue counts for {len(garden_list)} repo(s)...",
+                  file=sys.stderr)
+            counts = fetch_issue_counts(garden_list)
+            full_order = overnight.order_by_issue_count(garden_list, counts)
+        else:
+            seed = getattr(args, "random_seed", None)
+            rng = random.Random(seed) if seed is not None else None
+            full_order = overnight.random_order(garden_list, rng=rng)
+        attempted_before = overnight.read_attempted(path=cursor_path)
+        order, cycle_reset = overnight.resume_order(full_order, attempted_before)
+        print(
+            f"gardener: overnight starting — {len(garden_list)} repo(s) in garden, "
+            f"strategy={strategy.value}, budget={args.hours}h, "
+            + (
+                "starting a fresh cycle (every repo already attempted last cycle)"
+                if cycle_reset
+                else f"{len(attempted_before)} repo(s) already attempted this cycle"
+            ),
+            file=sys.stderr,
+        )
 
     concurrency = max(1, getattr(args, "concurrency", 1) or 1)
     outcomes: list[overnight.RepoOutcome] = []
@@ -752,8 +841,13 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             outcomes.extend(results_by_repo[repo] for repo in repo_batch)
         attempted += len(repo_batch)
 
-    next_index = (start_index + attempted) % len(garden_list)
-    overnight.write_cursor(next_index, path=cursor_path)
+    if strategy is overnight.Strategy.ROUND_ROBIN:
+        next_index = (start_index + attempted) % len(garden_list)
+        overnight.write_cursor(next_index, path=cursor_path)
+    else:
+        newly_attempted = [outcome.repo for outcome in outcomes]
+        updated_attempted = overnight.next_attempted(attempted_before, cycle_reset, newly_attempted)
+        overnight.write_attempted(updated_attempted, path=cursor_path)
 
     elapsed_total = time.monotonic() - start_time
     skipped = len(order) - attempted
@@ -903,9 +997,22 @@ def build_parser() -> argparse.ArgumentParser:
              "simultaneously via separate OS processes/threads — mind this "
              "device's real CPU/RAM limits before raising it for an unattended run.",
     )
+    overnight_parser.add_argument(
+        "--strategy", choices=[s.value for s in overnight.Strategy],
+        default=overnight.Strategy.ROUND_ROBIN.value,
+        help="Repo selection order for this run (default round-robin, preserving "
+             "prior behavior for existing cron/devsrv invocations). round-robin "
+             "rotates the alphabetically-sorted garden from where the last run left "
+             "off. issue-count sorts descending by each repo's live open-GitHub-issue "
+             "count (one `gh` call per garden repo). random reshuffles the garden "
+             "fresh every run. issue-count/random resume by repo name rather than "
+             "list position, since their ordering isn't stable across runs — see "
+             "README's Overnight section.",
+    )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    overnight_parser.add_argument("--random-seed", type=int, default=None, help=argparse.SUPPRESS)
     overnight_parser.set_defaults(func=cmd_overnight)
 
     status = sub.add_parser("status", help="Show local run history")
