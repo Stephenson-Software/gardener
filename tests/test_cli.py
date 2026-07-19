@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import dev_loop, garden, merge_allowlist, overnight, state
@@ -20,6 +21,8 @@ from gardener.cli import (
     _safe_record_run,
     build_parser,
     build_prompt,
+    cmd_align,
+    cmd_allowlist,
     cmd_garden,
     cmd_overnight,
     cmd_tend,
@@ -398,6 +401,187 @@ class TestCmdGarden(unittest.TestCase):
         with patch("sys.stdout", new=io.StringIO()):
             cmd_garden(remove_args)
         self.assertEqual(garden.list_garden(path=self.path), [])
+
+
+class TestCmdAllowlist(unittest.TestCase):
+    """Mirrors TestCmdGarden — cmd_allowlist and cmd_garden are structurally
+    identical (see cmd_garden's own docstring), but only cmd_garden had
+    coverage until now (issue #5)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmpdir.name) / "merge_allowlist.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_list_when_empty(self):
+        args = argparse.Namespace(allowlist_action="list", allowlist_path=self.path)
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()) as out:
+            cmd_allowlist(args)
+        self.assertIn("merge allow-list is empty", out.getvalue())
+
+    def test_add_then_list(self):
+        add_args = argparse.Namespace(allowlist_action="add", repo="owner/name", allowlist_path=self.path)
+        with patch("sys.stdout", new=io.StringIO()):
+            cmd_allowlist(add_args)
+        self.assertEqual(merge_allowlist.list_allowed(path=self.path), ["owner/name"])
+
+    def test_remove(self):
+        merge_allowlist.add("owner/name", path=self.path)
+        remove_args = argparse.Namespace(allowlist_action="remove", repo="owner/name", allowlist_path=self.path)
+        with patch("sys.stdout", new=io.StringIO()):
+            cmd_allowlist(remove_args)
+        self.assertEqual(merge_allowlist.list_allowed(path=self.path), [])
+
+
+class TestCmdAlign(unittest.TestCase):
+    """cmd_align's own orchestration (mode selection, state.record_run/
+    _notify_run wiring, exit codes) had no direct coverage — only its helper
+    functions (build_prompt, extract_gap_summary, REPO_RE) did. Mirrors
+    TestCmdTendNotifications's shape (issue #5), with conventions.ensure_
+    conventions and clone_or_refresh_target_repo both mocked."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_db = Path(self._tmpdir.name) / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, repo="owner/name", implement=False, file_issue=False):
+        return argparse.Namespace(
+            repo=repo, implement=implement, file_issue=file_issue, model=None,
+            timeout=1800, no_refresh_conventions=False, no_refresh_target=False,
+            state_db=self.state_db,
+        )
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_report_mode_fires_an_info_level_notification(
+        self, mock_conv, mock_clone, mock_branch, mock_run_claude, mock_default_notifier
+    ):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 2 gaps found, no changes made",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_align(self._args())
+
+        self.assertEqual(exit_code, 0)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.INFO)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_implement_mode_fires_a_warning_level_mutation_notification(
+        self, mock_conv, mock_clone, mock_branch, mock_run_claude, mock_default_notifier
+    ):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: PR #12 opened closing 2 gaps",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_align(self._args(implement=True))
+
+        self.assertEqual(exit_code, 0)
+        mock_run_claude.assert_called_once()
+        self.assertEqual(mock_run_claude.call_args.kwargs["mode"], Mode.IMPLEMENT)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_file_issue_mode_fires_a_warning_level_mutation_notification(
+        self, mock_conv, mock_clone, mock_branch, mock_run_claude, mock_default_notifier
+    ):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: issue #7 filed for 2 gaps",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_align(self._args(file_issue=True))
+
+        self.assertEqual(exit_code, 0)
+        mock_run_claude.assert_called_once()
+        self.assertEqual(mock_run_claude.call_args.kwargs["mode"], Mode.FILE_ISSUE)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.WARNING)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_failed_dispatch_fires_an_error_level_notification(
+        self, mock_conv, mock_clone, mock_branch, mock_run_claude, mock_default_notifier
+    ):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=False, result_text="", raw_stdout="", stderr="boom", exit_code=1, duration_ms=50,
+            cost_usd=None, session_id=None, permission_denials=[], is_error=True,
+        )
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_align(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.conventions.ensure_conventions", side_effect=RuntimeError("clone failed"))
+    def test_setup_error_fires_an_error_level_notification(self, mock_conv, mock_default_notifier):
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_align(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_notifier.notify.assert_called_once()
+        _title, _message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+
+    def test_implement_and_file_issue_mutual_exclusivity_guard(self):
+        # Belt-and-suspenders check inside cmd_align itself, independent of
+        # argparse's own mutually_exclusive_group (see
+        # TestArgParsing.test_implement_and_file_issue_are_mutually_exclusive) —
+        # exercised here by constructing the Namespace directly, bypassing
+        # argparse entirely.
+        with redirect_stderr(io.StringIO()) as err:
+            exit_code = cmd_align(self._args(implement=True, file_issue=True))
+        self.assertEqual(exit_code, 2)
+        self.assertIn("mutually exclusive", err.getvalue())
 
 
 class TestCmdTendNotifications(unittest.TestCase):
