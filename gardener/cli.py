@@ -13,14 +13,14 @@ docstrings.
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import re
 import shutil
 import subprocess
 import sys
 import time
-from contextlib import redirect_stdout
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -365,7 +365,35 @@ def merge_eligible(repo: str, allow_merge_flag: bool, allowlist_path: Optional[P
     return allow_merge_flag and merge_allowlist.is_allowed(repo, path=allowlist_path)
 
 
-def cmd_tend(args: argparse.Namespace) -> int:
+@dataclass
+class TendResult:
+    """What one `_dispatch_tend` call actually produced, returned as
+    structured data instead of the printed-stdout capture `cmd_overnight`
+    used to rely on (`io.StringIO()` + `contextlib.redirect_stdout` —
+    process-global, not thread-safe, and the actual blocker to dispatching
+    more than one repo's `tend` concurrently — see issue #15). `dispatched`
+    is False for the two paths that return before the real tend dispatch
+    ever runs (a setup exception, or a failed create-dev-loop bootstrap) —
+    `cmd_tend` uses it to skip printing a result/timing summary for those,
+    matching its exact original behavior."""
+
+    exit_code: int
+    dispatched: bool = True
+    ok: bool = False
+    result_text: str = ""
+    run: Optional[state.Run] = None
+    duration_ms: Optional[int] = None
+    cost_usd: Optional[float] = None
+    permission_denials: list = field(default_factory=list)
+    timed_out: bool = False
+
+
+def _dispatch_tend(args: argparse.Namespace) -> TendResult:
+    """The actual clone/dispatch/record/notify work behind `gardener tend`.
+    Split out from `cmd_tend` (a thin CLI wrapper around this) so a caller
+    that wants the dispatched result — namely `cmd_overnight`, which may
+    call this from a worker thread when `--concurrency` > 1 — gets it as a
+    plain return value, not by intercepting stdout."""
     print(f"gardener: tending {args.repo} (allow_merge={args.allow_merge})", file=sys.stderr)
 
     try:
@@ -438,7 +466,7 @@ def cmd_tend(args: argparse.Namespace) -> int:
                 # outcome rather than fabricating a separate "tend" failure,
                 # since the tend dispatch itself never ran.
                 _notify_run(create_run)
-                return 1
+                return TendResult(exit_code=1, dispatched=False, run=create_run)
             print(f"gardener: /{slug} skill created", file=sys.stderr)
         else:
             print(f"gardener: found existing /{slug} skill", file=sys.stderr)
@@ -473,7 +501,7 @@ def cmd_tend(args: argparse.Namespace) -> int:
             gap_summary=str(e),
         )
         _record_and_notify(failed_run, args.state_db)
-        return 1
+        return TendResult(exit_code=1, dispatched=False, run=failed_run)
 
     outcome = "error" if not result.ok else Mode.TEND.value
     gap_summary = extract_gap_summary(result.result_text) if result.result_text else (result.stderr or "no output")
@@ -491,7 +519,14 @@ def cmd_tend(args: argparse.Namespace) -> int:
     )
     _record_and_notify(completed_run, args.state_db)
 
-    print(result.result_text or "(no output)")
+    # Printed here (stderr), not left to cmd_tend's wrapper, so this summary
+    # line still shows up in `gardener overnight`'s log too — cmd_overnight
+    # calls _dispatch_tend directly, bypassing cmd_tend entirely (see
+    # TendResult's docstring), so a print living only in cmd_tend would
+    # silently never fire for the overnight path. Confirmed missing for
+    # real during --concurrency testing (2026-07-18): gateway/gardener/
+    # pocket-rig all completed and were correctly recorded/classified, but
+    # overnight's log never showed a "done in Xms" line for any of them.
     print("", file=sys.stderr)
     print(
         f"gardener: done in {result.duration_ms}ms, "
@@ -507,8 +542,34 @@ def cmd_tend(args: argparse.Namespace) -> int:
         )
     if result.timed_out:
         print(f"gardener: timed out after {args.timeout}s", file=sys.stderr)
-        return 1
-    return 0 if result.ok else 1
+
+    exit_code = 1 if (not result.ok or result.timed_out) else 0
+    return TendResult(
+        exit_code=exit_code,
+        ok=result.ok,
+        result_text=result.result_text or "",
+        run=completed_run,
+        duration_ms=result.duration_ms,
+        cost_usd=result.cost_usd,
+        permission_denials=result.permission_denials,
+        timed_out=result.timed_out,
+    )
+
+
+def cmd_tend(args: argparse.Namespace) -> int:
+    """`gardener tend`'s CLI entry point — dispatches via `_dispatch_tend`
+    (which already prints the "done in Xms" stderr summary itself — see its
+    body — so both direct CLI use and `cmd_overnight` get it) and prints
+    the dispatched result text to stdout, then returns the exit code.
+    Prints nothing beyond `_dispatch_tend`'s own stderr progress lines when
+    the dispatch never actually ran (`dispatched=False` — a setup error or
+    a failed create-dev-loop bootstrap), matching this function's original
+    behavior before the `TendResult` split."""
+    result = _dispatch_tend(args)
+    if not result.dispatched:
+        return result.exit_code
+    print(result.result_text or "(no output)")
+    return result.exit_code
 
 
 def cmd_allowlist(args: argparse.Namespace) -> int:
@@ -557,6 +618,29 @@ def cmd_garden(args: argparse.Namespace) -> int:
     raise AssertionError(f"unreachable garden_action: {args.garden_action}")
 
 
+def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnight.RepoOutcome:
+    """One repo's `tend --allow-merge` dispatch on `cmd_overnight`'s behalf,
+    called either directly (concurrency=1) or from a `ThreadPoolExecutor`
+    worker thread (concurrency>1 — see `cmd_overnight`). Never raises: one
+    repo's crash must not abort the batch or leave a `Future` holding an
+    unhandled exception, so it's caught here and turned into an errored
+    `RepoOutcome` the same way the pre-concurrency sequential loop did."""
+    tend_args = argparse.Namespace(
+        repo=repo,
+        allow_merge=True,
+        model=args.model,
+        timeout=TEND_DEFAULT_TIMEOUT_SECONDS,
+        no_refresh_target=False,
+        state_db=args.state_db,
+    )
+    try:
+        result = _dispatch_tend(tend_args)
+    except Exception as e:  # noqa: BLE001 - one repo's crash must not abort the batch
+        print(f"gardener: overnight: {repo} raised an unexpected error: {e}", file=sys.stderr)
+        return overnight.RepoOutcome(repo=repo, errored=True, gap_summary=str(e))
+    return overnight.classify_outcome(repo, result.run, result.result_text)
+
+
 def cmd_overnight(args: argparse.Namespace) -> int:
     """Tend every repo in the garden, one after another, within an overall
     time budget — the "tend to my garden while I sleep" entry point. See
@@ -564,15 +648,23 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     this function is just the real-time, real-dispatch composition of it.
 
     Dispatches `tend --repo <repo> --allow-merge` **in-process** by calling
-    cmd_tend directly with a synthetic argparse.Namespace, rather than
-    shelling out to `gardener` as a subprocess of itself — reuses cmd_tend's
-    entire existing implementation (clone/refresh, skill bootstrap, the
-    merge-eligibility gate, state.record_run, and now _notify_run) unchanged
-    for each repo. `--allow-merge` is passed unconditionally and is safe to:
-    merge_eligible() (unchanged) still requires the repo to also be on the
-    separate merge allow-list before `gh pr merge` is ever reachable in the
-    dispatched session (see garden.py's module docstring) — being in the
-    garden alone never authorizes a merge.
+    `_dispatch_tend` directly with a synthetic argparse.Namespace, rather
+    than shelling out to `gardener` as a subprocess of itself — reuses
+    `_dispatch_tend`'s entire existing implementation (clone/refresh, skill
+    bootstrap, the merge-eligibility gate, state.record_run, and
+    `_notify_run`) unchanged for each repo. `--allow-merge` is passed
+    unconditionally and is safe to: merge_eligible() (unchanged) still
+    requires the repo to also be on the separate merge allow-list before
+    `gh pr merge` is ever reachable in the dispatched session (see
+    garden.py's module docstring) — being in the garden alone never
+    authorizes a merge.
+
+    Dispatches in batches of `args.concurrency` repos (default 1, i.e.
+    today's exact sequential behavior) via `_dispatch_one_for_overnight`,
+    run concurrently within a batch on a `ThreadPoolExecutor` when
+    `concurrency > 1` — see that function's docstring and `overnight.py`'s
+    `batch_repos` for why this is safe now that `_dispatch_tend` returns a
+    `TendResult` instead of `cmd_overnight` needing to capture stdout.
     """
     try:
         garden_list = garden.list_garden(path=args.garden_file)
@@ -611,11 +703,17 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
 
+    concurrency = max(1, getattr(args, "concurrency", 1) or 1)
     outcomes: list[overnight.RepoOutcome] = []
     start_time = time.monotonic()
     attempted = 0
-    for repo in order:
+    for repo_batch in overnight.batch_repos(order, concurrency):
         elapsed = time.monotonic() - start_time
+        # Checked once per batch, not once per repo: a batch's own
+        # wall-clock time is bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS
+        # (everything inside it runs in parallel, not stacked), so the
+        # existing "elapsed + one repo's timeout <= budget" headroom check
+        # is still the right test here — see overnight.batch_repos.
         if not overnight.has_time_for_another_repo(
             elapsed, budget_seconds, TEND_DEFAULT_TIMEOUT_SECONDS, attempted
         ):
@@ -627,31 +725,32 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             )
             break
 
+        progress = (
+            f"{attempted + 1}/{len(order)}" if len(repo_batch) == 1
+            else f"{attempted + 1}-{attempted + len(repo_batch)}/{len(order)}"
+        )
         print(
-            f"gardener: overnight dispatching tend for {repo} "
-            f"({attempted + 1}/{len(order)} candidates this run)...",
+            f"gardener: overnight dispatching tend for {', '.join(repo_batch)} "
+            f"({progress} candidates this run"
+            + (f", concurrency={len(repo_batch)}" if len(repo_batch) > 1 else "")
+            + ")...",
             file=sys.stderr,
         )
-        tend_args = argparse.Namespace(
-            repo=repo,
-            allow_merge=True,
-            model=args.model,
-            timeout=TEND_DEFAULT_TIMEOUT_SECONDS,
-            no_refresh_target=False,
-            state_db=args.state_db,
-        )
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf):
-                cmd_tend(tend_args)
-        except Exception as e:  # noqa: BLE001 - one repo's crash must not abort the batch
-            print(f"gardener: overnight: {repo} raised an unexpected error: {e}", file=sys.stderr)
-            outcomes.append(overnight.RepoOutcome(repo=repo, errored=True, gap_summary=str(e)))
+        if len(repo_batch) == 1:
+            # No thread pool at all for the (default) concurrency=1 path —
+            # byte-for-byte the same call sequence overnight has always made.
+            outcomes.append(_dispatch_one_for_overnight(repo_batch[0], args))
         else:
-            recent = state.list_runs(db_path=args.state_db, repo=repo, limit=1)
-            last_run = recent[0] if recent else None
-            outcomes.append(overnight.classify_outcome(repo, last_run, buf.getvalue()))
-        attempted += 1
+            with ThreadPoolExecutor(max_workers=len(repo_batch)) as pool:
+                futures = {
+                    pool.submit(_dispatch_one_for_overnight, repo, args): repo
+                    for repo in repo_batch
+                }
+                results_by_repo = {futures[f]: f.result() for f in as_completed(futures)}
+            # Preserve repo_batch's order in `outcomes`, not completion order,
+            # so the batch summary's per-repo list stays deterministic.
+            outcomes.extend(results_by_repo[repo] for repo in repo_batch)
+        attempted += len(repo_batch)
 
     next_index = (start_index + attempted) % len(garden_list)
     overnight.write_cursor(next_index, path=cursor_path)
@@ -797,6 +896,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Overall time budget in hours (default {overnight.DEFAULT_OVERNIGHT_HOURS})",
     )
     overnight_parser.add_argument("--model", default=None, help="Model override passed through to each dispatched tend run")
+    overnight_parser.add_argument(
+        "--concurrency", type=int, default=1,
+        help="How many repos to tend at once (default 1, i.e. today's sequential "
+             "behavior). Raising this dispatches that many `claude -p` sessions "
+             "simultaneously via separate OS processes/threads — mind this "
+             "device's real CPU/RAM limits before raising it for an unattended run.",
+    )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)

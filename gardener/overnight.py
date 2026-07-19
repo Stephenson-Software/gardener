@@ -87,6 +87,22 @@ def write_cursor(index: int, path: Optional[Path] = None) -> None:
     path.write_text(json.dumps({"next_index": index}) + "\n")
 
 
+def batch_repos(order: list[str], concurrency: int) -> list[list[str]]:
+    """Split `repos_to_attempt`'s ordered list into consecutive batches of at
+    most `concurrency` repos each, preserving order — `cmd_overnight`
+    dispatches one batch at a time, concurrently within a batch and
+    sequentially across batches. `concurrency <= 1` yields one repo per
+    batch, i.e. today's exact sequential behavior; this is the default so
+    existing cron invocations see no change unless `--concurrency` is
+    explicitly raised. A batch's own wall-clock time is still bounded by one
+    repo's `TEND_DEFAULT_TIMEOUT_SECONDS` (everything in a batch runs in
+    parallel, not stacked), so `has_time_for_another_repo`'s existing
+    headroom check remains correct when called once per batch instead of
+    once per repo — see `cli.py`'s `cmd_overnight`."""
+    size = max(1, concurrency)
+    return [order[i : i + size] for i in range(0, len(order), size)]
+
+
 def repos_to_attempt(garden: list[str], start_index: int) -> list[str]:
     """The full garden, rotated to start at `start_index` (mod length) —
     round-robins across nights instead of always starting from the top of
@@ -155,17 +171,21 @@ class RepoOutcome:
     gap_summary: str = ""
 
 
-def classify_outcome(repo: str, run: Optional[state.Run], captured_stdout: str) -> RepoOutcome:
+def classify_outcome(repo: str, run: Optional[state.Run], result_text: str) -> RepoOutcome:
     """Turns one repo's already-recorded `state.Run` (the same row
-    `cmd_tend` itself inserted via `state.record_run` — reused here, not
-    duplicated) plus its captured stdout (the dispatched run's own
-    `result_text`, which `cmd_tend` prints verbatim) into a batch-summary
+    `_dispatch_tend` itself inserted via `state.record_run` — reused here,
+    not duplicated) plus the dispatched run's own `result_text` (now passed
+    through directly as a `TendResult` field — see `cli.py`'s
+    `_dispatch_tend`/`TendResult` — rather than recovered by capturing
+    `cmd_tend`'s stdout, which was never safe to do once a repo's dispatch
+    could run on a worker thread; `contextlib.redirect_stdout` patches
+    `sys.stdout` process-wide, not per-thread) into a batch-summary
     classification for `build_batch_summary`."""
     if run is None or run.outcome == "error":
         return RepoOutcome(
             repo=repo, errored=True, gap_summary=(run.gap_summary if run else "no run recorded")
         )
-    text = captured_stdout or ""
+    text = result_text or ""
     return RepoOutcome(
         repo=repo,
         pr_opened=bool(PR_OPENED_RE.search(text)),

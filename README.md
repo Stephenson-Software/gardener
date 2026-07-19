@@ -91,7 +91,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N]
+gardener overnight [--hours N] [--concurrency N]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 ```
@@ -206,16 +206,26 @@ file (`~/.local/state/gardener/garden.json` by default, overridable via
 never touched overnight just because it exists on this machine, only
 because it was explicitly added. See `gardener/garden.py`.
 
-**`gardener overnight [--hours N]`** is the actual "tend to my garden while
-I sleep" entry point:
+**`gardener overnight [--hours N] [--concurrency N]`** is the actual "tend
+to my garden while I sleep" entry point:
 
 1. Reads the garden. An empty garden prints a clear message and exits `0`
    — nothing to do is not an error.
 2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**
-   (calls `cmd_tend` directly, no `gardener` subprocess-of-itself) for each
-   garden repo in turn, starting from wherever the *previous* `overnight`
-   run left off (see "Resuming across nights" below), until either the
-   garden is exhausted for this run or the time budget runs out.
+   (calls `_dispatch_tend` directly, no `gardener` subprocess-of-itself) for
+   each garden repo, in batches of `--concurrency` repos at a time (default
+   `1`, i.e. strictly one after another — unchanged from before this flag
+   existed), starting from wherever the *previous* `overnight` run left off
+   (see "Resuming across nights" below), until either the garden is
+   exhausted for this run or the time budget runs out. Repos within a batch
+   run concurrently on a `ThreadPoolExecutor` (stdlib-only) when
+   `--concurrency` > 1 — each is still just one independent, blocking
+   `claude -p` subprocess (see [Why synchronous
+   dispatch](#why-synchronous-dispatch)), now several running in parallel
+   OS processes rather than one at a time. This device has no true process
+   isolation and real, shared CPU/RAM (see the "no true always-on daemon
+   guarantee" caveat below) — `--concurrency` stays `1` unless you
+   explicitly raise it with that tradeoff in mind.
 3. `--allow-merge` is passed unconditionally to every dispatch. This is
    safe *without* `overnight` needing any merge-decision logic of its own:
    `tend`'s own `merge_eligible()` check still requires the target repo to
@@ -224,11 +234,14 @@ I sleep" entry point:
    above) — being in the garden alone never authorizes a merge. The garden
    and the merge allow-list are two independent, both-opt-in gates.
 4. **Time budget (`--hours`, default `8.0` — a full night's sleep).** The
-   very first repo of a run is always attempted (as long as `--hours` is
-   positive) so a run never silently dispatches nothing; every repo after
+   very first *batch* of a run is always attempted (as long as `--hours` is
+   positive) so a run never silently dispatches nothing; every batch after
    the first requires enough headroom left in the budget for one more
    worst-case `tend` call (`TEND_DEFAULT_TIMEOUT_SECONDS`, 45 min) before
-   it's started — computed from real elapsed time so far, not a
+   it's started — checked once per batch rather than once per repo when
+   `--concurrency` > 1, since a batch's own wall-clock time is bounded by
+   one repo's worst-case timeout (everything inside a batch runs in
+   parallel, not stacked). Computed from real elapsed time so far, not a
    precomputed worst-case-per-repo plan, so a night of faster-than-worst-case
    dispatches (79-250s observed in practice — see Project Status) can fit
    more repos than the naive arithmetic would suggest. A repo already in
@@ -241,8 +254,9 @@ I sleep" entry point:
    only fits 6 per night eventually reaches every repo across several
    nights instead of only ever tending the first 6. See `gardener/overnight.py`.
 6. **Notifications.** Each repo's own outcome is logged and alerted via the
-   *existing* `state.record_run`/`_notify_run` machinery `cmd_tend` already
-   uses (unchanged; see [Alerting design](#alerting-design)) — you get one
+   *existing* `state.record_run`/`_notify_run` machinery `_dispatch_tend`
+   already uses (unchanged, and safe to call from more than one thread at
+   once — see [Alerting design](#alerting-design)) — you get one
    Discord message per repo for free. `overnight` additionally fires **one
    summary notification at the end of the whole batch** — total repos
    attempted, how many opened a PR, how many merged, how many hit a
@@ -381,15 +395,19 @@ A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
 parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
 notifier, not `state.Run` construction), `cmd_tend` with clone/dispatch
-mocked, and `cmd_overnight` with `cmd_tend` itself mocked (and, where the
-budget/headroom logic specifically is under test, `time.monotonic` mocked
-too, so timing assertions never depend on wall-clock jitter);
+mocked, and `cmd_overnight` with `_dispatch_tend` itself mocked — including
+its `--concurrency` batching (one test asserts every repo in a
+`ThreadPoolExecutor`-dispatched batch still gets attempted regardless of
+completion order, another asserts `concurrency=1` never touches
+`ThreadPoolExecutor` at all) — and, where the budget/headroom logic
+specifically is under test, `time.monotonic` mocked too, so timing
+assertions never depend on wall-clock jitter;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
-pure rotation/budget/resume-cursor/outcome-classification logic with real
-files in a tmp dir; `tests/test_transcript.py` covers the encoding rule
+pure rotation/batching/budget/resume-cursor/outcome-classification logic
+with real files in a tmp dir; `tests/test_transcript.py` covers the encoding rule
 (against the two real, empirically-confirmed examples in `transcript.py`'s
 module docstring, not invented ones), the transcript-file-discovery polling
 loop (real files in a tmp dir, but `time_fn`/`sleep_fn` always injected so
@@ -430,6 +448,21 @@ too big for one budget window and confirm the second run tends a
 (3) confirm exactly one additional summary notification fires per
 invocation, on top of each repo's own per-repo notification. See Project
 Status below for the actual run this verified against.
+
+**`--concurrency > 1` specifically** has not yet had its own real,
+end-to-end verification run on this device as of this writing (see Project
+Status) — the automated suite covers the orchestration logic (batching,
+per-batch ordering, one repo's crash not aborting the batch) with
+`_dispatch_tend` mocked, but real concurrent `claude -p` processes
+contending for this device's actual CPU/RAM is a different thing to
+confirm than mocked logic. Before relying on `--concurrency > 1` in an
+unattended overnight run, do a small real check first: `--hours 0.1
+--concurrency 2` against a garden of 2 low-stakes repos, confirming both
+dispatch, both get their own per-repo notification, and neither's recorded
+`state.Run`/notification data is corrupted or swapped with the other's
+(the exact failure mode the old `redirect_stdout`-based capture would have
+been vulnerable to — see [issue
+#15](https://github.com/dmccoystephenson/gardener/issues/15)).
 
 **Alerting**: `DiscordNotifier` is covered by mocked unit tests (see
 above) rather than a real Discord send in the automated suite — same
@@ -805,10 +838,11 @@ gardener/
     garden.py        — local JSON opt-in list of repos `gardener overnight`
                        is permitted to tend unattended (independent of the
                        merge allow-list above — see garden.py's docstring)
-    overnight.py     — pure budget/rotation/resume-cursor/outcome-classification
-                       logic for `gardener overnight`; cli.py's cmd_overnight
-                       composes it with real time and a real (in-process)
-                       tend dispatch
+    overnight.py     — pure budget/rotation/batching/resume-cursor/outcome-
+                       classification logic for `gardener overnight`;
+                       cli.py's cmd_overnight composes it with real time and
+                       a real (in-process, optionally concurrent via
+                       ThreadPoolExecutor) tend dispatch
     conventions.py   — clones/refreshes the local dms-conventions cache
     state.py         — SQLite-backed run history
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
