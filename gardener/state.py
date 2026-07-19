@@ -1,12 +1,13 @@
 """SQLite-backed run history for gardener.
 
 One row per dispatched `claude` run gardener records — `align`, `tend`,
-and the `create-dev-loop` bootstrap `tend` runs first when a target repo
-has no `<slug>-dev-loop` skill yet (see `cli.py`'s `cmd_align`/
-`_dispatch_tend`). This is deliberately the only place gardener keeps
-state across runs — no config daemon, no server, just a local db file
-next to everything else gardener caches (`~/.local/state/gardener/` by
-default, overridable for tests via `GARDENER_STATE_DIR`).
+and the one-off `create-dev-loop` bootstrap dispatch that `tend` runs
+first when a target repo has no `<slug>-dev-loop` skill yet (see
+`cli.py`'s `_dispatch_tend`). This is deliberately the only place
+gardener keeps state across runs — no config daemon, no server, just a
+local db file next to everything else gardener caches
+(`~/.local/state/gardener/` by default, overridable for tests via
+`GARDENER_STATE_DIR`).
 """
 from __future__ import annotations
 
