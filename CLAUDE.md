@@ -114,12 +114,16 @@ record what you actually observed before changing the docstring's claims.
   `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir.
   `test_cli.py` covers argument parsing, prompt templating, `cmd_tend` with
-  clone/dispatch mocked, and `cmd_overnight` with `cmd_tend` mocked (and
-  `time.monotonic` mocked for the budget-specific assertions).
+  clone/dispatch mocked, and `cmd_overnight` with `_dispatch_tend` mocked
+  (including its `--concurrency` batching — one test asserts every repo in
+  a `ThreadPoolExecutor`-dispatched batch is still attempted regardless of
+  completion order, another asserts `concurrency=1` never touches
+  `ThreadPoolExecutor` at all) and `time.monotonic` mocked for the
+  budget-specific assertions.
   `test_dev_loop.py` covers slug derivation and prompt content,
   `test_merge_allowlist.py` covers the allow-list's JSON read/write, and
   `test_garden.py`/`test_overnight.py` cover the garden JSON list and
-  `overnight.py`'s pure rotation/budget/resume-cursor/outcome-classification
+  `overnight.py`'s pure rotation/batching/budget/resume-cursor/outcome-classification
   logic the same way — none of these invoke `claude`, `git`, or `gh` either.
   `test_transcript.py` covers `encode_cwd` against the two real,
   empirically-confirmed examples in `transcript.py`'s module docstring
@@ -161,7 +165,16 @@ record what you actually observed before changing the docstring's claims.
     note above) for this test — `overnight` passes `--allow-merge`
     unconditionally, so whether anything can actually merge depends
     entirely on the separate merge allow-list, same as a direct `tend
-    --allow-merge` call.
+    --allow-merge` call. If `--concurrency > 1` was touched, additionally
+    real-verify it separately (not just the mocked orchestration tests) —
+    `--hours 0.1 --concurrency 2` against 2 low-stakes garden repos,
+    confirming both dispatch, both get their own correct per-repo
+    notification, and neither's recorded `state.Run`/notification data is
+    corrupted or swapped with the other's — this device has no true process
+    isolation and real, shared CPU/RAM (see `~/.claude/CLAUDE.md`'s
+    environment notes), so a real concurrent run is the only thing that
+    actually confirms this works under this device's real resource
+    constraints, not just under mocks.
 - `--implement` and `--file-issue` should be exercised for real (not just
   unit-tested) before being trusted against anything that matters, the
   same way report mode was — this hadn't happened as of this repo's first
