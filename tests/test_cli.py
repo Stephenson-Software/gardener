@@ -893,6 +893,45 @@ class TestCmdTendNotifications(unittest.TestCase):
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", side_effect=[False, True])
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_create_dev_loop_bootstrap_success_warns_about_skipped_step_6(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        """Step 6 (`gh repo create`) is never in create-dev-loop's allowed
+        tools (see dev_loop.step6_unreachable) — a successful bootstrap must
+        still be surfaced as an incomplete skill, not a plain success (issue
+        #12), rather than silently reporting "skill created" with no
+        indication its issue tracker is missing."""
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.side_effect = [
+            DispatchResult(
+                ok=True, result_text="GARDENER_SUMMARY: created dev-loop skill for name-dev-loop",
+                raw_stdout="{}", stderr="", exit_code=0, duration_ms=50, cost_usd=0.01,
+                session_id="s1", permission_denials=[], is_error=False,
+            ),
+            DispatchResult(
+                ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+                raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+                session_id="s2", permission_denials=[], is_error=False,
+            ),
+        ]
+        mock_notifier = mock_default_notifier.return_value
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("WARNING", stderr.getvalue())
+        self.assertIn("Step 6", stderr.getvalue())
+        # one notification for the incomplete bootstrap, one for the tend run itself
+        self.assertEqual(mock_notifier.notify.call_count, 2)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
