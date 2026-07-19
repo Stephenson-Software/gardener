@@ -27,6 +27,8 @@ from gardener.cli import (
     cmd_overnight,
     cmd_tend,
     extract_gap_summary,
+    fetch_issue_counts,
+    fetch_open_issue_count,
     find_orphaned_pr,
     merge_eligible,
 )
@@ -183,6 +185,78 @@ class TestOvernightArgParsing(unittest.TestCase):
         # garden, not a --repo flag
         args = self.parser.parse_args(["overnight"])
         self.assertFalse(hasattr(args, "repo"))
+
+    def test_strategy_defaults_to_round_robin(self):
+        args = self.parser.parse_args(["overnight"])
+        self.assertEqual(args.strategy, overnight.Strategy.ROUND_ROBIN.value)
+
+    def test_strategy_accepts_issue_count_and_random(self):
+        for value in ("issue-count", "random"):
+            args = self.parser.parse_args(["overnight", "--strategy", value])
+            self.assertEqual(args.strategy, value)
+
+    def test_strategy_rejects_unknown_value(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["overnight", "--strategy", "bogus"])
+
+
+class TestFetchIssueCounts(unittest.TestCase):
+    """fetch_open_issue_count/fetch_issue_counts's job is: get one/many
+    repos' open-issue count via `gh issue list`, never raise (a `gh` hiccup
+    must not sink the whole issue-count ordering), and treat a fetch failure
+    as "omit this repo" rather than crashing. `gardener.cli._run` is mocked
+    throughout — this must never invoke a real `gh` process, same testing
+    convention as find_orphaned_pr's own tests."""
+
+    def _completed(self, stdout="", returncode=0, stderr=""):
+        return subprocess.CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_returns_the_parsed_count(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout="7\n")
+        self.assertEqual(fetch_open_issue_count("owner/name"), 7)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_zero_open_issues(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout="0\n")
+        self.assertEqual(fetch_open_issue_count("owner/name"), 0)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_gh_failure_returns_none_not_raised(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(returncode=1, stderr="not authenticated")
+        self.assertIsNone(fetch_open_issue_count("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30))
+    def test_gh_timeout_returns_none_not_raised(self, mock_run, mock_which):
+        self.assertIsNone(fetch_open_issue_count("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_malformed_output_returns_none(self, mock_run, mock_which):
+        mock_run.return_value = self._completed(stdout="not a number")
+        self.assertIsNone(fetch_open_issue_count("owner/name"))
+
+    @patch("gardener.cli.shutil.which", return_value=None)
+    def test_missing_gh_binary_returns_none_without_calling_run(self, mock_which):
+        with patch("gardener.cli._run") as mock_run:
+            self.assertIsNone(fetch_open_issue_count("owner/name"))
+            mock_run.assert_not_called()
+
+    @patch("gardener.cli.fetch_open_issue_count")
+    def test_fetch_issue_counts_queries_every_repo(self, mock_fetch):
+        mock_fetch.side_effect = lambda repo, timeout=30: {"a/one": 3, "a/two": 0}.get(repo)
+        counts = fetch_issue_counts(["a/one", "a/two"])
+        self.assertEqual(counts, {"a/one": 3, "a/two": 0})
+
+    @patch("gardener.cli.fetch_open_issue_count")
+    def test_fetch_issue_counts_omits_repos_whose_fetch_failed(self, mock_fetch):
+        mock_fetch.side_effect = lambda repo, timeout=30: None if repo == "a/broken" else 5
+        counts = fetch_issue_counts(["a/ok", "a/broken"])
+        self.assertEqual(counts, {"a/ok": 5})
 
 
 class TestMergeEligible(unittest.TestCase):
@@ -955,11 +1029,11 @@ class TestCmdOvernight(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def _args(self, hours=8.0, model=None, concurrency=1):
+    def _args(self, hours=8.0, model=None, concurrency=1, strategy="round-robin", random_seed=None):
         return argparse.Namespace(
             hours=hours, model=model, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
-            concurrency=concurrency,
+            concurrency=concurrency, strategy=strategy, random_seed=random_seed,
         )
 
     def _fake_dispatch_tend(self, outcomes: dict):
@@ -1165,6 +1239,129 @@ class TestCmdOvernight(unittest.TestCase):
         with patch("gardener.cli.ThreadPoolExecutor") as mock_pool, redirect_stderr(io.StringIO()):
             cmd_overnight(self._args(hours=8.0, concurrency=1))
         mock_pool.assert_not_called()
+
+
+class TestCmdOvernightStrategies(unittest.TestCase):
+    """cmd_overnight's --strategy wiring: issue-count sorts by a mocked
+    fetch_issue_counts (never invokes `gh`), random uses an injectable seed
+    (never a real shuffle), and both resume by repo name across two
+    invocations rather than round-robin's bare index — see overnight.py's
+    module docstring for why."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, hours=8.0, strategy="round-robin", random_seed=None, concurrency=1):
+        return argparse.Namespace(
+            hours=hours, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=concurrency, strategy=strategy, random_seed=random_seed,
+        )
+
+    def _fake_dispatch_tend(self):
+        def fake(args):
+            self.calls.append(args.repo)
+            run = state.Run(repo=args.repo, mode="tend", outcome="tend", timestamp=state.now_iso())
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, run=run)
+        return fake
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.fetch_issue_counts")
+    @patch("gardener.cli._dispatch_tend")
+    def test_issue_count_strategy_dispatches_highest_count_first(
+        self, mock_dispatch_tend, mock_fetch_counts, mock_default_notifier
+    ):
+        garden.add("owner/low", path=self.garden_file)
+        garden.add("owner/high", path=self.garden_file)
+        garden.add("owner/mid", path=self.garden_file)
+        mock_fetch_counts.return_value = {"owner/low": 1, "owner/high": 20, "owner/mid": 5}
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args(hours=8.0, strategy="issue-count"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/high", "owner/mid", "owner/low"])
+        mock_fetch_counts.assert_called_once()
+        # a full cycle completed -> attempted resets, not a bare index
+        raw = json.loads(self.cursor_file.read_text())
+        self.assertNotIn("next_index", raw)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_random_strategy_with_a_seed_is_deterministic(self, mock_dispatch_tend, mock_default_notifier):
+        for repo in ("owner/a", "owner/b", "owner/c", "owner/d"):
+            garden.add(repo, path=self.garden_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0, strategy="random", random_seed=1234))
+        first_run_order = list(self.calls)
+        self.calls.clear()
+
+        # Reset the cursor file so the second invocation starts a fresh
+        # cycle too, isolating this assertion to "same seed -> same order"
+        # rather than resume-filtering across runs (covered separately below).
+        self.cursor_file.unlink()
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0, strategy="random", random_seed=1234))
+
+        self.assertEqual(first_run_order, self.calls)
+        self.assertEqual(sorted(self.calls), ["owner/a", "owner/b", "owner/c", "owner/d"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.time.monotonic")
+    @patch("gardener.cli._dispatch_tend")
+    def test_random_strategy_resumes_by_name_not_index_across_invocations(
+        self, mock_dispatch_tend, mock_monotonic, mock_default_notifier
+    ):
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+        # Budget exhausted after exactly one repo each run (mirrors
+        # test_stops_dispatching_once_budget_is_exhausted's own numbers).
+        mock_monotonic.side_effect = [0.0, 0.0, 50.0, 50.0, 0.0, 0.0, 50.0, 50.0]
+
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=0.02, strategy="random", random_seed=99))
+        first_attempted = list(self.calls)
+        self.assertEqual(len(first_attempted), 1)
+        self.calls.clear()
+
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=0.02, strategy="random", random_seed=99))
+        second_attempted = list(self.calls)
+        self.assertEqual(len(second_attempted), 1)
+
+        # The second run must not repeat the first run's already-attempted
+        # repo — resuming by name, not a stale index into a reshuffled order.
+        self.assertNotEqual(first_attempted, second_attempted)
+        self.assertEqual(sorted(first_attempted + second_attempted), ["owner/a", "owner/b"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_round_robin_cursor_file_untouched_by_a_random_run(self, mock_dispatch_tend, mock_default_notifier):
+        """round-robin's next_index must survive a --strategy random run
+        against the same cursor file (they share the file but use different
+        keys — see overnight.py's docstring)."""
+        garden.add("owner/a", path=self.garden_file)
+        garden.add("owner/b", path=self.garden_file)
+        overnight.write_cursor(1, path=self.cursor_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(hours=8.0, strategy="random", random_seed=5))
+
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
 
 
 if __name__ == "__main__":
