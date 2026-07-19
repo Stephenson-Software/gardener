@@ -83,6 +83,22 @@ def has_dev_loop_skill(slug: str) -> bool:
     return skill_command_path(slug).exists()
 
 
+def step6_unreachable() -> bool:
+    """True if create-dev-loop's own Step 6 ("Create a private GitHub repo
+    for the skill") is structurally impossible under the current
+    create-dev-loop dispatch's tool allow-list — i.e. `gh repo create` is
+    not present in `MODE_SPECS[Mode.CREATE_DEV_LOOP].allowed_tools`.
+
+    Checked live against dispatch.py's actual table rather than assumed,
+    so `cli.py`'s bootstrap-success warning (see issue #12) stops firing on
+    its own if that allow-list is ever widened to grant Step 6 — imported
+    lazily to avoid a module-load-order dependency on dispatch.py."""
+    from gardener.dispatch import MODE_SPECS, Mode
+
+    spec = MODE_SPECS[Mode.CREATE_DEV_LOOP]
+    return not any(p.startswith("Bash(gh repo create") for p in spec.allowed_tools)
+
+
 # Shared across both the create-dev-loop dispatch and the tend dispatch —
 # every point made here is grounded in dispatch.py's module docstring
 # (points 1, 2, 5, 6); read that first if this text is ever revised.
@@ -180,6 +196,15 @@ create-dev-loop's own Step 1 where they conflict:
   itself ({target_cwd}) — every file this dispatch writes belongs under
   `~/local-skills/{slug}/` or the single symlink under `~/.claude/commands/`,
   nowhere else.
+- Skip create-dev-loop's own Step 6 ("Create a private GitHub repo for the
+  skill") entirely — do not attempt `gh repo create` or any push to a new
+  remote. This dispatch's tool allow-list does not grant it (repo creation
+  is a different, higher-stakes risk class than editing an already-existing
+  target repo, so gardener does not attempt it unattended); the call would
+  simply be denied. This is expected and is not a failure of the rest of
+  the skill — gardener already knows Step 6 never runs under this dispatch
+  and will surface that gap to a human separately, you do not need to
+  mention it in your summary.
 - End your final answer with a line: `GARDENER_SUMMARY: <created|failed> dev-loop skill for {slug}`.
 """
 
