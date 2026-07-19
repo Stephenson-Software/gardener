@@ -394,12 +394,15 @@ A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude`; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
 parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
-notifier, not `state.Run` construction), `cmd_tend` with clone/dispatch
-mocked, and `cmd_overnight` with `_dispatch_tend` itself mocked — including
-its `--concurrency` batching (one test asserts every repo in a
-`ThreadPoolExecutor`-dispatched batch still gets attempted regardless of
-completion order, another asserts `concurrency=1` never touches
-`ThreadPoolExecutor` at all) — and, where the budget/headroom logic
+notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
+clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`
+wiring, and exit codes), `cmd_allowlist` and `cmd_garden` (their
+structurally-identical list/add/remove branches, over the merge allow-list
+and the garden respectively), and `cmd_overnight` with `_dispatch_tend`
+itself mocked — including its `--concurrency` batching (one test asserts
+every repo in a `ThreadPoolExecutor`-dispatched batch still gets attempted
+regardless of completion order, another asserts `concurrency=1` never
+touches `ThreadPoolExecutor` at all) — and, where the budget/headroom logic
 specifically is under test, `time.monotonic` mocked too, so timing
 assertions never depend on wall-clock jitter;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
@@ -407,7 +410,11 @@ is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
-with real files in a tmp dir; `tests/test_transcript.py` covers the encoding rule
+with real files in a tmp dir; `tests/test_conventions.py` covers
+`ConventionsSource.verify_complete()`'s missing-doc detection and
+`ensure_conventions()`'s clone/fetch-reset/no-refresh branches, with
+`_run_git`/`subprocess.run` mocked so no real `git` process ever runs;
+`tests/test_transcript.py` covers the encoding rule
 (against the two real, empirically-confirmed examples in `transcript.py`'s
 module docstring, not invented ones), the transcript-file-discovery polling
 loop (real files in a tmp dir, but `time_fn`/`sleep_fn` always injected so
