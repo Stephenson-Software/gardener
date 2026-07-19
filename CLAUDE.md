@@ -33,12 +33,19 @@ The "tend to my garden overnight" use case above is now real:
 logic, `cli.py`'s `cmd_overnight` for the real orchestration) dispatches
 `tend --allow-merge` in-process across that list within a time budget,
 resuming across invocations via a small cursor file when the garden is
-bigger than one budget window. It adds no new merge-decision logic of its
-own — `tend`'s existing `merge_eligible()` gate (repo must *also* be on the
-separate merge allow-list) is what actually decides whether a merge can
-happen, unchanged. See README's "Overnight / unattended operation" section
-for the full design and the honest reliability caveat about this device
-having no true always-on daemon guarantee.
+bigger than one budget window. `--strategy round-robin|issue-count|random`
+(default `round-robin`, unchanged behavior) picks the attempt order —
+`overnight.py`'s `Strategy` enum and its module docstring's "Repo-selection
+strategies and the resume cursor" section is the source of truth for how
+each one works and, critically, why the resume cursor is keyed differently
+per strategy (a bare list index for `round-robin`, repo names for
+`issue-count`/`random`, since only `round-robin`'s ordering is stable
+across runs). It adds no new merge-decision logic of its own — `tend`'s
+existing `merge_eligible()` gate (repo must *also* be on the separate merge
+allow-list) is what actually decides whether a merge can happen, unchanged.
+See README's "Overnight / unattended operation" section for the full design
+and the honest reliability caveat about this device having no true
+always-on daemon guarantee.
 
 Every dispatch (`align`/`tend`/`overnight`) still runs synchronously — see
 `dispatch.py`'s "Why synchronous dispatch" note — but is no longer a total
@@ -114,17 +121,28 @@ record what you actually observed before changing the docstring's claims.
   `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir.
   `test_cli.py` covers argument parsing, prompt templating, `cmd_tend` with
-  clone/dispatch mocked, and `cmd_overnight` with `_dispatch_tend` mocked
-  (including its `--concurrency` batching — one test asserts every repo in
-  a `ThreadPoolExecutor`-dispatched batch is still attempted regardless of
-  completion order, another asserts `concurrency=1` never touches
-  `ThreadPoolExecutor` at all) and `time.monotonic` mocked for the
+  clone/dispatch mocked, `fetch_open_issue_count`/`fetch_issue_counts` (the
+  `issue-count` strategy's `gh`-calling side) with `_run` mocked the same
+  way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
+  `_dispatch_tend` mocked (including its `--concurrency` batching — one
+  test asserts every repo in a `ThreadPoolExecutor`-dispatched batch is
+  still attempted regardless of completion order, another asserts
+  `concurrency=1` never touches `ThreadPoolExecutor` at all; and its
+  `--strategy` selection — `issue-count` with `fetch_issue_counts` mocked,
+  `random` with an injected `--random-seed` for a deterministic shuffle,
+  and both asserting the repo-name-keyed resume cursor advances correctly
+  across two invocations without disturbing round-robin's own `next_index`
+  in the same cursor file) and `time.monotonic` mocked for the
   budget-specific assertions.
   `test_dev_loop.py` covers slug derivation and prompt content,
   `test_merge_allowlist.py` covers the allow-list's JSON read/write, and
   `test_garden.py`/`test_overnight.py` cover the garden JSON list and
   `overnight.py`'s pure rotation/batching/budget/resume-cursor/outcome-classification
-  logic the same way — none of these invoke `claude`, `git`, or `gh` either.
+  logic the same way — including `order_by_issue_count` (pure sort over an
+  already-fetched count mapping), `random_order` (injectable
+  `random.Random`, never the module's global functions), and
+  `resume_order`/`next_attempted` (the name-keyed cursor's cycle-completion
+  and reset logic) — none of these invoke `claude`, `git`, or `gh` either.
   `test_transcript.py` covers `encode_cwd` against the two real,
   empirically-confirmed examples in `transcript.py`'s module docstring
   (never invented ones — if `claude`'s actual encoding rule ever changes,
