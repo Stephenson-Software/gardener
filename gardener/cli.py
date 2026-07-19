@@ -25,7 +25,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, dev_loop, garden, merge_allowlist, notify, overnight, state, transcript
+from gardener import conventions, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, state, transcript
 from gardener.dispatch import (
     CREATE_DEV_LOOP_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -288,26 +288,38 @@ def cmd_align(args: argparse.Namespace) -> int:
         print("gardener: report-only — Claude has no write/shell tools in this run", file=sys.stderr)
 
     try:
-        conv = conventions.ensure_conventions(refresh=not args.no_refresh_conventions)
-        print(f"gardener: dms-conventions checked out at {conv.path}", file=sys.stderr)
+        with repo_lock.repo_lock(args.repo):
+            conv = conventions.ensure_conventions(refresh=not args.no_refresh_conventions)
+            print(f"gardener: dms-conventions checked out at {conv.path}", file=sys.stderr)
 
-        target_dir = clone_or_refresh_target_repo(
-            args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
+            target_dir = clone_or_refresh_target_repo(
+                args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
+            )
+            print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
+
+            branch = current_branch(target_dir)
+            prompt = build_prompt(mode, args.repo, target_dir, conv.path, branch)
+
+            print("gardener: dispatching claude (this can take a while)...", file=sys.stderr)
+            result = run_claude(
+                mode=mode,
+                prompt=prompt,
+                cwd=target_dir,
+                add_dirs=[conv.path],
+                model=args.model,
+                timeout=args.timeout,
+            )
+    except repo_lock.RepoLockedError as e:
+        print(f"gardener: {e}", file=sys.stderr)
+        locked_run = state.Run(
+            repo=args.repo,
+            mode=mode.value,
+            outcome="error",
+            timestamp=state.now_iso(),
+            gap_summary=str(e),
         )
-        print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
-
-        branch = current_branch(target_dir)
-        prompt = build_prompt(mode, args.repo, target_dir, conv.path, branch)
-
-        print("gardener: dispatching claude (this can take a while)...", file=sys.stderr)
-        result = run_claude(
-            mode=mode,
-            prompt=prompt,
-            cwd=target_dir,
-            add_dirs=[conv.path],
-            model=args.model,
-            timeout=args.timeout,
-        )
+        _record_and_notify(locked_run, args.state_db)
+        return 1
     except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
         failed_run = state.Run(
@@ -397,100 +409,112 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
     print(f"gardener: tending {args.repo} (allow_merge={args.allow_merge})", file=sys.stderr)
 
     try:
-        target_dir = clone_or_refresh_target_repo(
-            args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
-        )
-        print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
-        branch = current_branch(target_dir)
+        with repo_lock.repo_lock(args.repo):
+            target_dir = clone_or_refresh_target_repo(
+                args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
+            )
+            print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
+            branch = current_branch(target_dir)
 
-        orphaned_pr = find_orphaned_pr(args.repo)
-        if orphaned_pr is not None:
-            print(
-                f"gardener: found orphaned PR #{orphaned_pr.number} (branch "
-                f"{orphaned_pr.head_branch!r}) on {args.repo} — this run will continue "
-                "it instead of starting fresh",
-                file=sys.stderr,
-            )
-
-        slug = dev_loop.skill_slug(args.repo)
-        if not dev_loop.has_dev_loop_skill(slug):
-            print(
-                f"gardener: no existing /{slug} skill — dispatching create-dev-loop first",
-                file=sys.stderr,
-            )
-            create_prompt = dev_loop.build_create_dev_loop_prompt(args.repo, slug, target_dir)
-            create_result = run_claude(
-                mode=Mode.CREATE_DEV_LOOP,
-                prompt=create_prompt,
-                cwd=target_dir,
-                # Symmetric with align's add_dirs=[conv.path]: this dispatch's
-                # whole job is reading/writing exactly these two directories
-                # (see dev_loop.py's LOCAL_SKILLS_DIR/COMMANDS_DIR and
-                # dispatch.py's module docstring finding #3) — without this,
-                # Read/Bash(mkdir *)/Bash(ls *) etc. are sandboxed out of both
-                # dirs even though Write itself isn't, so a first attempt that
-                # leaves any partial state (skill file written, symlink not
-                # yet created) has no recovery path on retry: the dispatched
-                # session can't even read what's in its way. Confirmed as the
-                # root cause of a real failed run (dmccoystephenson/gardener,
-                # 2026-07-18) — see this repo's git history for the transcript
-                # comparison against the same run's successful gateway-dev-loop
-                # dispatch, which had no stale artifact blocking it.
-                add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
-                model=args.model,
-                timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
-            )
-            create_run = state.Run(
-                repo=args.repo,
-                mode=Mode.CREATE_DEV_LOOP.value,
-                outcome="error" if not create_result.ok else "created",
-                timestamp=state.now_iso(),
-                gap_summary=extract_gap_summary(create_result.result_text)
-                if create_result.result_text
-                else (create_result.stderr or "no output"),
-                exit_code=create_result.exit_code,
-                duration_ms=create_result.duration_ms,
-                cost_usd=create_result.cost_usd,
-                claude_session_id=create_result.session_id,
-            )
-            _safe_record_run(create_run, args.state_db)
-            if not create_result.ok or not dev_loop.has_dev_loop_skill(slug):
+            orphaned_pr = find_orphaned_pr(args.repo)
+            if orphaned_pr is not None:
                 print(
-                    f"gardener: error: create-dev-loop dispatch did not produce a usable "
-                    f"/{slug} skill (ok={create_result.ok}, "
-                    f"exists={dev_loop.has_dev_loop_skill(slug)}) — not proceeding to tend",
+                    f"gardener: found orphaned PR #{orphaned_pr.number} (branch "
+                    f"{orphaned_pr.head_branch!r}) on {args.repo} — this run will continue "
+                    "it instead of starting fresh",
                     file=sys.stderr,
                 )
-                # This dispatch's own outcome is already recorded above with
-                # its real mode ("create-dev-loop"); notify with that same
-                # outcome rather than fabricating a separate "tend" failure,
-                # since the tend dispatch itself never ran.
-                _notify_run(create_run)
-                return TendResult(exit_code=1, dispatched=False, run=create_run)
-            print(f"gardener: /{slug} skill created", file=sys.stderr)
-        else:
-            print(f"gardener: found existing /{slug} skill", file=sys.stderr)
 
-        eligible = merge_eligible(args.repo, args.allow_merge)
-        if args.allow_merge and not eligible:
-            print(
-                f"gardener: NOTE — --allow-merge was passed but {args.repo} is not in the "
-                "merge allow-list (see `gardener allowlist add`) — merge stays disabled this run",
-                file=sys.stderr,
+            slug = dev_loop.skill_slug(args.repo)
+            if not dev_loop.has_dev_loop_skill(slug):
+                print(
+                    f"gardener: no existing /{slug} skill — dispatching create-dev-loop first",
+                    file=sys.stderr,
+                )
+                create_prompt = dev_loop.build_create_dev_loop_prompt(args.repo, slug, target_dir)
+                create_result = run_claude(
+                    mode=Mode.CREATE_DEV_LOOP,
+                    prompt=create_prompt,
+                    cwd=target_dir,
+                    # Symmetric with align's add_dirs=[conv.path]: this dispatch's
+                    # whole job is reading/writing exactly these two directories
+                    # (see dev_loop.py's LOCAL_SKILLS_DIR/COMMANDS_DIR and
+                    # dispatch.py's module docstring finding #3) — without this,
+                    # Read/Bash(mkdir *)/Bash(ls *) etc. are sandboxed out of both
+                    # dirs even though Write itself isn't, so a first attempt that
+                    # leaves any partial state (skill file written, symlink not
+                    # yet created) has no recovery path on retry: the dispatched
+                    # session can't even read what's in its way. Confirmed as the
+                    # root cause of a real failed run (dmccoystephenson/gardener,
+                    # 2026-07-18) — see this repo's git history for the transcript
+                    # comparison against the same run's successful gateway-dev-loop
+                    # dispatch, which had no stale artifact blocking it.
+                    add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
+                    model=args.model,
+                    timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
+                )
+                create_run = state.Run(
+                    repo=args.repo,
+                    mode=Mode.CREATE_DEV_LOOP.value,
+                    outcome="error" if not create_result.ok else "created",
+                    timestamp=state.now_iso(),
+                    gap_summary=extract_gap_summary(create_result.result_text)
+                    if create_result.result_text
+                    else (create_result.stderr or "no output"),
+                    exit_code=create_result.exit_code,
+                    duration_ms=create_result.duration_ms,
+                    cost_usd=create_result.cost_usd,
+                    claude_session_id=create_result.session_id,
+                )
+                _safe_record_run(create_run, args.state_db)
+                if not create_result.ok or not dev_loop.has_dev_loop_skill(slug):
+                    print(
+                        f"gardener: error: create-dev-loop dispatch did not produce a usable "
+                        f"/{slug} skill (ok={create_result.ok}, "
+                        f"exists={dev_loop.has_dev_loop_skill(slug)}) — not proceeding to tend",
+                        file=sys.stderr,
+                    )
+                    # This dispatch's own outcome is already recorded above with
+                    # its real mode ("create-dev-loop"); notify with that same
+                    # outcome rather than fabricating a separate "tend" failure,
+                    # since the tend dispatch itself never ran.
+                    _notify_run(create_run)
+                    return TendResult(exit_code=1, dispatched=False, run=create_run)
+                print(f"gardener: /{slug} skill created", file=sys.stderr)
+            else:
+                print(f"gardener: found existing /{slug} skill", file=sys.stderr)
+
+            eligible = merge_eligible(args.repo, args.allow_merge)
+            if args.allow_merge and not eligible:
+                print(
+                    f"gardener: NOTE — --allow-merge was passed but {args.repo} is not in the "
+                    "merge allow-list (see `gardener allowlist add`) — merge stays disabled this run",
+                    file=sys.stderr,
+                )
+            print(f"gardener: dispatching /{slug} (merge_eligible={eligible})...", file=sys.stderr)
+
+            tend_prompt = dev_loop.build_tend_prompt(
+                args.repo, slug, target_dir, branch, eligible, orphaned_pr=orphaned_pr
             )
-        print(f"gardener: dispatching /{slug} (merge_eligible={eligible})...", file=sys.stderr)
-
-        tend_prompt = dev_loop.build_tend_prompt(
-            args.repo, slug, target_dir, branch, eligible, orphaned_pr=orphaned_pr
+            result = run_claude(
+                mode=Mode.TEND,
+                prompt=tend_prompt,
+                cwd=target_dir,
+                model=args.model,
+                timeout=args.timeout,
+                mode_spec=tend_mode_spec(eligible),
+            )
+    except repo_lock.RepoLockedError as e:
+        print(f"gardener: {e}", file=sys.stderr)
+        locked_run = state.Run(
+            repo=args.repo,
+            mode=Mode.TEND.value,
+            outcome="error",
+            timestamp=state.now_iso(),
+            gap_summary=str(e),
         )
-        result = run_claude(
-            mode=Mode.TEND,
-            prompt=tend_prompt,
-            cwd=target_dir,
-            model=args.model,
-            timeout=args.timeout,
-            mode_spec=tend_mode_spec(eligible),
-        )
+        _record_and_notify(locked_run, args.state_db)
+        return TendResult(exit_code=1, dispatched=False, run=locked_run)
     except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
         failed_run = state.Run(

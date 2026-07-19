@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gardener import dev_loop, garden, merge_allowlist, overnight, state
+from gardener import dev_loop, garden, merge_allowlist, overnight, repo_lock, state
 from gardener.cli import (
     REPO_RE,
     TendResult,
@@ -583,6 +583,28 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertIn("mutually exclusive", err.getvalue())
 
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
+    def test_repo_already_locked_skips_the_dispatch_and_notifies(
+        self, mock_lock, mock_run_claude, mock_default_notifier
+    ):
+        # Another gardener process (a manual invocation, or an overlapping
+        # overnight run) holding this repo's lock must short-circuit before
+        # any clone/dispatch happens — never silently proceed to clone or
+        # dispatch claude against the same working tree.
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_align(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_run_claude.assert_not_called()
+        mock_notifier.notify.assert_called_once()
+        _title, message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+        self.assertIn("already being worked on", message)
+
 
 class TestCmdTendNotifications(unittest.TestCase):
     """cmd_tend previously recorded outcomes via state.record_run but never
@@ -857,6 +879,31 @@ class TestCmdTendNotifications(unittest.TestCase):
             kwargs["add_dirs"],
             [dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
         )
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
+    def test_repo_already_locked_skips_the_dispatch_and_notifies(
+        self, mock_lock, mock_clone, mock_run_claude, mock_default_notifier
+    ):
+        # Guards the exact scenario `gardener overnight` and a manual
+        # `gardener tend`/`gardener align` racing each other against the
+        # same repo is meant to prevent: never clone into or dispatch
+        # against a repo another gardener process already holds the lock
+        # for (see repo_lock.py's module docstring).
+        mock_notifier = mock_default_notifier.return_value
+
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            exit_code = cmd_tend(self._args())
+
+        self.assertEqual(exit_code, 1)
+        mock_clone.assert_not_called()
+        mock_run_claude.assert_not_called()
+        mock_notifier.notify.assert_called_once()
+        _title, message, level = mock_notifier.notify.call_args[0]
+        self.assertEqual(level, Level.ERROR)
+        self.assertIn("already being worked on", message)
 
 
 class TestFindOrphanedPR(unittest.TestCase):
