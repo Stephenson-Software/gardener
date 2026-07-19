@@ -257,6 +257,25 @@ def _notify_run(run: state.Run) -> None:
         print(f"gardener: notification failed (non-fatal): {e}", file=sys.stderr)
 
 
+def _safe_record_run(run: state.Run, db_path: Optional[Path]) -> None:
+    """state.record_run, without ever raising — mirrors _notify_run's own
+    "alerting must never break the run it reports on" stance, extended to
+    the record step itself. Without this, a state.record_run failure (e.g.
+    sqlite3.OperationalError, or an OSError creating
+    ~/.local/state/gardener/) raw-crashes the whole process merely for
+    trying to record a dispatch that already completed — see issue #9."""
+    try:
+        state.record_run(run, db_path=db_path)
+    except Exception as e:  # noqa: BLE001 - recording must never break the run it reports on
+        print(f"gardener: state.record_run failed (non-fatal): {e}", file=sys.stderr)
+
+
+def _record_and_notify(run: state.Run, db_path: Optional[Path]) -> None:
+    """Record a completed run and notify its outcome, without ever raising."""
+    _safe_record_run(run, db_path)
+    _notify_run(run)
+
+
 def cmd_align(args: argparse.Namespace) -> int:
     if args.implement and args.file_issue:
         print("error: --implement and --file-issue are mutually exclusive", file=sys.stderr)
@@ -298,8 +317,7 @@ def cmd_align(args: argparse.Namespace) -> int:
             timestamp=state.now_iso(),
             gap_summary=str(e),
         )
-        state.record_run(failed_run, db_path=args.state_db)
-        _notify_run(failed_run)
+        _record_and_notify(failed_run, args.state_db)
         return 1
 
     outcome = "error" if not result.ok else mode.value
@@ -316,8 +334,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         cost_usd=result.cost_usd,
         claude_session_id=result.session_id,
     )
-    state.record_run(completed_run, db_path=args.state_db)
-    _notify_run(completed_run)
+    _record_and_notify(completed_run, args.state_db)
 
     print(result.result_text or "(no output)")
     print("", file=sys.stderr)
@@ -436,7 +453,7 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
                 cost_usd=create_result.cost_usd,
                 claude_session_id=create_result.session_id,
             )
-            state.record_run(create_run, db_path=args.state_db)
+            _safe_record_run(create_run, args.state_db)
             if not create_result.ok or not dev_loop.has_dev_loop_skill(slug):
                 print(
                     f"gardener: error: create-dev-loop dispatch did not produce a usable "
@@ -483,8 +500,7 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
             timestamp=state.now_iso(),
             gap_summary=str(e),
         )
-        state.record_run(failed_run, db_path=args.state_db)
-        _notify_run(failed_run)
+        _record_and_notify(failed_run, args.state_db)
         return TendResult(exit_code=1, dispatched=False, run=failed_run)
 
     outcome = "error" if not result.ok else Mode.TEND.value
@@ -501,8 +517,7 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
         cost_usd=result.cost_usd,
         claude_session_id=result.session_id,
     )
-    state.record_run(completed_run, db_path=args.state_db)
-    _notify_run(completed_run)
+    _record_and_notify(completed_run, args.state_db)
 
     # Printed here (stderr), not left to cmd_tend's wrapper, so this summary
     # line still shows up in `gardener overnight`'s log too — cmd_overnight
