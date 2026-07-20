@@ -84,13 +84,16 @@ class TestLoadWebhookUrl(unittest.TestCase):
 
 class TestDiscordNotifier(unittest.TestCase):
     def test_not_configured_is_a_silent_no_op(self):
-        notifier = DiscordNotifier(webhook_url=None)
-        self.assertFalse(notifier.configured)
-        with patch("gardener.notify.urllib.request.urlopen") as mock_urlopen:
-            with redirect_stderr(io.StringIO()) as err:
-                notifier.notify("title", "message")
-            mock_urlopen.assert_not_called()
-        self.assertIn("skipping alert", err.getvalue())
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict("os.environ", {"GARDENER_STATE_DIR": td}, clear=False):
+                os.environ.pop("GARDENER_DISCORD_WEBHOOK_URL", None)
+                notifier = DiscordNotifier(webhook_url=None)
+                self.assertFalse(notifier.configured)
+                with patch("gardener.notify.urllib.request.urlopen") as mock_urlopen:
+                    with redirect_stderr(io.StringIO()) as err:
+                        notifier.notify("title", "message")
+                    mock_urlopen.assert_not_called()
+                self.assertIn("skipping alert", err.getvalue())
 
     @patch("gardener.notify.urllib.request.urlopen")
     def test_configured_webhook_posts_successfully(self, mock_urlopen):
