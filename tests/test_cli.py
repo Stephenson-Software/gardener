@@ -25,6 +25,7 @@ from gardener.cli import (
     cmd_allowlist,
     cmd_garden,
     cmd_overnight,
+    cmd_status,
     cmd_tend,
     extract_gap_summary,
     fetch_issue_counts,
@@ -507,6 +508,78 @@ class TestCmdAllowlist(unittest.TestCase):
         with patch("sys.stdout", new=io.StringIO()):
             cmd_allowlist(remove_args)
         self.assertEqual(merge_allowlist.list_allowed(path=self.path), [])
+
+
+class TestCmdStatus(unittest.TestCase):
+    """cmd_status's own rendering (empty-history message, header/row
+    formatting, long-summary truncation) had no direct coverage before —
+    only argparse-level coverage in TestArgParsing. Uses a real sqlite3
+    tmp-dir db the same way TestCmdAlign/TestCmdOvernight already do
+    (state.record_run is the thing under test's data source, not something
+    to mock away)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_db = Path(self._tmpdir.name) / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, repo=None, limit=20):
+        return argparse.Namespace(repo=repo, limit=limit, state_db=self.state_db)
+
+    def test_no_runs_prints_a_clear_message(self):
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            result = cmd_status(self._args())
+        self.assertEqual(result, 0)
+        self.assertIn("no runs recorded yet", out.getvalue())
+
+    def test_prints_header_and_row_for_a_recorded_run(self):
+        run = state.Run(
+            repo="owner/name", mode="tend", outcome="pr_opened",
+            timestamp=state.now_iso(), gap_summary="opened a PR",
+        )
+        state.record_run(run, db_path=self.state_db)
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            result = cmd_status(self._args())
+        self.assertEqual(result, 0)
+        output = out.getvalue()
+        self.assertIn("timestamp", output)
+        self.assertIn("repo", output)
+        self.assertIn("mode", output)
+        self.assertIn("outcome", output)
+        self.assertIn("owner/name", output)
+        self.assertIn("tend", output)
+        self.assertIn("pr_opened", output)
+        self.assertIn("opened a PR", output)
+
+    def test_long_summary_is_truncated_with_an_ellipsis(self):
+        long_summary = "x" * 100
+        run = state.Run(
+            repo="owner/name", mode="align", outcome="report",
+            timestamp=state.now_iso(), gap_summary=long_summary,
+        )
+        state.record_run(run, db_path=self.state_db)
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            cmd_status(self._args())
+        output = out.getvalue()
+        self.assertNotIn(long_summary, output)
+        self.assertIn("x" * 57 + "...", output)
+
+    def test_repo_filter_is_passed_through_to_state_list_runs(self):
+        state.record_run(
+            state.Run(repo="owner/one", mode="tend", outcome="pr_opened", timestamp=state.now_iso()),
+            db_path=self.state_db,
+        )
+        state.record_run(
+            state.Run(repo="owner/two", mode="tend", outcome="pr_opened", timestamp=state.now_iso()),
+            db_path=self.state_db,
+        )
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            cmd_status(self._args(repo="owner/one"))
+        output = out.getvalue()
+        self.assertIn("owner/one", output)
+        self.assertNotIn("owner/two", output)
 
 
 class TestCmdAlign(unittest.TestCase):
