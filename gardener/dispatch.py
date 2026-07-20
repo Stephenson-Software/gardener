@@ -391,12 +391,37 @@ MODE_SPECS: dict[Mode, ModeSpec] = {
         # cmd_tend must pass add_dirs=[dev_loop.LOCAL_SKILLS_DIR,
         # dev_loop.COMMANDS_DIR] on every dispatch of this mode, or a stale
         # partial artifact in either directory has no recovery path on retry.
+        #
+        # `Bash(gh repo create *)` / `Bash(gh api user *)` / `Bash(gh label
+        # create *)` (added 2026-07-19, see dev_loop.step6_unreachable and
+        # issue #12) grant create-dev-loop's own Step 6 — creating the
+        # private `<slug>-dev-loop` GitHub repo that serves as that skill's
+        # self-audit issue tracker, reading the invoking account's own login
+        # via `gh api user -q .login`, and pre-creating Step 6's gap-issue
+        # labels on that new repo — exactly the three `gh` invocations
+        # Step 6 actually runs (create-dev-loop.md's own Step 6 block),
+        # nothing broader (`gh api user` only, not a bare `gh api *`; `gh
+        # label create` only, not `gh label *`). This was withheld
+        # originally as "a different, higher-stakes risk class than editing
+        # an already-existing target repo" (see README/CLAUDE.md history);
+        # it's granted now on the same reasoning `MERGE_ALLOWED_TOOL`
+        # already uses elsewhere in this file — a repo created here is
+        # always a brand-new, empty, private `<slug>-dev-loop` tracker this
+        # dispatch itself just named, never an existing repo of any kind,
+        # so the blast radius is "one new empty private repo," not
+        # "arbitrary write access to something that already has content."
+        # `gh repo delete` is deliberately NOT granted alongside this — a
+        # mistakenly-created repo is a human cleanup step, not something
+        # this dispatch should be able to undo unattended either.
         tools=("Read", "Grep", "Glob", "Write", "Bash"),
         permission_mode="default",
         allowed_tools=(
             "Write",
             "Bash(git *)",
             "Bash(gh repo view *)",
+            "Bash(gh repo create *)",
+            "Bash(gh api user *)",
+            "Bash(gh label create *)",
             "Bash(gh pr list *)",
             "Bash(mkdir *)",
             "Bash(ln *)",

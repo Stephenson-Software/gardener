@@ -143,14 +143,23 @@ several repos, dispatched one after another, nobody watching.
    If that dispatch fails or the file still isn't there afterward, `tend`
    stops and reports an error rather than guessing. `create-dev-loop`'s own
    Step 6 ("create a private GitHub repo for the skill", meant to serve as
-   that skill's own issue tracker) is structurally out of reach here —
-   `gh repo create` is deliberately absent from this mode's allowed tools,
-   a different, higher-stakes risk class than editing an already-existing
-   target repo — so the dispatched session is told to skip it. A skill
-   bootstrapped this way therefore always comes back "incomplete": `tend`
-   prints a distinct WARNING (not a plain success) and fires a notification
-   so a human knows to finish Step 6 by hand before that skill's own
-   dev-loop cycle has anywhere to file self-audit findings.
+   that skill's own issue tracker) now runs for real: this mode's allowed
+   tools grant exactly the three `gh` invocations Step 6 needs
+   (`gh repo create`, `gh api user`, `gh label create` — never a broader
+   `gh api *`/`gh repo *`/`gh label *`, and never `gh repo delete`), so the
+   dispatched session creates the private `<slug>-dev-loop` repo, pushes
+   the skill file to it, and pre-creates its gap-issue labels itself. This
+   was withheld originally as "a different, higher-stakes risk class than
+   editing an already-existing target repo" (see git history / issue #12)
+   — granted 2026-07-19 on the reasoning that a repo created here is always
+   a brand-new, empty, private tracker this dispatch itself just named, so
+   the actual blast radius is "one new empty private repo," not write
+   access to something pre-existing. `dev_loop.step6_unreachable()` still
+   checks this live against `MODE_SPECS` rather than assuming — if Step 6
+   is ever withdrawn again, `cli.py`'s `cmd_tend` automatically goes back
+   to treating the bootstrap as incomplete (a distinct WARNING plus its own
+   notification, rather than a plain success) instead of silently
+   over-reporting.
 4. Dispatches the `<slug>-dev-loop` skill itself via `claude -p
    "/<slug>-dev-loop ..."`, with `cwd` set to gardener's own controlled
    clone (not wherever the skill's own hardcoded "Working directory" line

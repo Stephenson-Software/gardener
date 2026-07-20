@@ -196,15 +196,22 @@ create-dev-loop's own Step 1 where they conflict:
   itself ({target_cwd}) — every file this dispatch writes belongs under
   `~/local-skills/{slug}/` or the single symlink under `~/.claude/commands/`,
   nowhere else.
-- Skip create-dev-loop's own Step 6 ("Create a private GitHub repo for the
-  skill") entirely — do not attempt `gh repo create` or any push to a new
-  remote. This dispatch's tool allow-list does not grant it (repo creation
-  is a different, higher-stakes risk class than editing an already-existing
-  target repo, so gardener does not attempt it unattended); the call would
-  simply be denied. This is expected and is not a failure of the rest of
-  the skill — gardener already knows Step 6 never runs under this dispatch
-  and will surface that gap to a human separately, you do not need to
-  mention it in your summary.
+- Perform create-dev-loop's own Step 6 ("Create a private GitHub repo for
+  the skill") for real — this dispatch's tool allow-list now grants exactly
+  the three `gh` invocations Step 6 needs (`gh repo create`, `gh api user`,
+  `gh label create`), plus `git` for the local-repo init/push. Follow Step
+  6's own commands as written, using `{slug}` in place of `<slug>`: create
+  the repo as `gh repo create {slug} --private --description "..."` (this
+  creates it under your own authenticated account — do not pass an
+  `--org`/owner prefix), then `cd ~/local-skills/{slug}` and run its
+  `git init`/`git remote add origin`/`git push -u origin main` sequence,
+  then create Step 6's five gap-issue labels on the new repo. Do not create
+  any other GitHub repo this run, and do not attempt `gh repo delete` under
+  any circumstance (not granted, and not this dispatch's call to make even
+  if it were). If any of these calls is denied or fails for a reason other
+  than "repo/label already exists" (e.g. an existing `{slug}-dev-loop` repo
+  from a prior partial run), leave what you have and end with a
+  `DECISION NEEDED:` line rather than retrying destructively.
 - End your final answer with a line: `GARDENER_SUMMARY: <created|failed> dev-loop skill for {slug}`.
 """
 
