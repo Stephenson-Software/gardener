@@ -180,10 +180,11 @@ class DiscordNotifier(Notifier):
         request = urllib.request.Request(
             self._webhook_url,
             data=payload,
-            # Discord's edge (Cloudflare) 403s the default "Python-urllib/x.y"
-            # User-Agent outright — confirmed directly: the exact same POST
-            # succeeds with any browser/curl-like UA. See gardener PR for the
-            # real webhook test that caught this.
+            # Discord's edge (Cloudflare) 403s requests carrying urllib's
+            # default `Python-urllib/x.y` User-Agent — confirmed directly:
+            # the identical payload succeeded via curl and failed via
+            # urlopen with no other difference. Any non-default UA clears
+            # it; this one just says what's actually posting.
             headers={"Content-Type": "application/json", "User-Agent": "gardener-discord-notifier/1.0"},
             method="POST",
         )

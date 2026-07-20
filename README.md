@@ -193,6 +193,32 @@ branch from the default branch — see `dev_loop.py`'s `build_tend_prompt`
 for the exact instructions. Once a human merges or closes that PR, it
 naturally stops matching on the next run — no separate cleanup needed.
 
+### Concurrent dispatch safety
+
+Nothing stops two independent `gardener` invocations from targeting the
+same repo at the same time — a manual `gardener tend --repo X` run by hand
+while `gardener overnight` is already dispatching `X`, or two overlapping
+`overnight` runs (e.g. one started by hand while the `devsrv`-managed one
+is also up). Without anything guarding against this, both processes would
+clone/checkout/dispatch against the *same* shared working tree in
+`~/.cache/gardener/repos/<owner>__<repo>` concurrently — the same class of
+failure that has corrupted `.git/objects` in this ecosystem before (see
+`~/pocket-rig/CLAUDE.md`'s documented `git worktree` corruption incident).
+
+`gardener align` and `gardener tend` (and therefore `gardener overnight`,
+which dispatches `tend` in-process) now take an exclusive, non-blocking,
+cross-process lock on the target repo (`gardener/repo_lock.py`, keyed by
+`owner/repo`, held for the full clone-through-dispatch duration) before
+touching its clone directory. If another gardener process already holds
+it, the dispatch is skipped rather than queued — you'll see an ERROR-level
+outcome/notification along the lines of "owner/repo is already being
+worked on by another gardener process" instead of a hang or a corrupted
+clone. Deliberately non-blocking: a stuck lock must never turn into
+`overnight` silently waiting out its own per-repo timeout budget. Distinct
+repos never contend with each other, so this doesn't limit
+`--concurrency`'s within-process parallelism — only two processes racing
+on the *same* repo ever hit this path.
+
 ### Merge allow-list
 
 `gardener allowlist add --repo owner/repo` / `remove --repo owner/repo` /
