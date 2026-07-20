@@ -91,7 +91,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--concurrency N]
+gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 ```
@@ -141,7 +141,16 @@ several repos, dispatched one after another, nobody watching.
    distinct, more tightly scoped mode — see `dispatch.py`) to generate and
    register one, then confirms the file actually landed before proceeding.
    If that dispatch fails or the file still isn't there afterward, `tend`
-   stops and reports an error rather than guessing.
+   stops and reports an error rather than guessing. `create-dev-loop`'s own
+   Step 6 ("create a private GitHub repo for the skill", meant to serve as
+   that skill's own issue tracker) is structurally out of reach here —
+   `gh repo create` is deliberately absent from this mode's allowed tools,
+   a different, higher-stakes risk class than editing an already-existing
+   target repo — so the dispatched session is told to skip it. A skill
+   bootstrapped this way therefore always comes back "incomplete": `tend`
+   prints a distinct WARNING (not a plain success) and fires a notification
+   so a human knows to finish Step 6 by hand before that skill's own
+   dev-loop cycle has anywhere to file self-audit findings.
 4. Dispatches the `<slug>-dev-loop` skill itself via `claude -p
    "/<slug>-dev-loop ..."`, with `cwd` set to gardener's own controlled
    clone (not wherever the skill's own hardcoded "Working directory" line
@@ -232,7 +241,7 @@ file (`~/.local/state/gardener/garden.json` by default, overridable via
 never touched overnight just because it exists on this machine, only
 because it was explicitly added. See `gardener/garden.py`.
 
-**`gardener overnight [--hours N] [--concurrency N]`** is the actual "tend
+**`gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]`** is the actual "tend
 to my garden while I sleep" entry point:
 
 1. Reads the garden. An empty garden prints a clear message and exits `0`
@@ -273,13 +282,53 @@ to my garden while I sleep" entry point:
    more repos than the naive arithmetic would suggest. A repo already in
    progress is never hard-killed mid-run to respect the budget; the budget
    only gates whether a *new* repo is started.
-5. **Resuming across nights.** If the garden is longer than one night's
-   budget can cover, a small resume cursor
-   (`~/.local/state/gardener/overnight_cursor.json`) tracks which repo to
-   start from next, round-robin — so a garden of 20 repos and a budget that
-   only fits 6 per night eventually reaches every repo across several
-   nights instead of only ever tending the first 6. See `gardener/overnight.py`.
-6. **Notifications.** Each repo's own outcome is logged and alerted via the
+5. **Repo-selection strategy (`--strategy`, default `round-robin`).** Picks
+   which order this run attempts the garden in — see `gardener/overnight.py`'s
+   `Strategy` enum for the pluggable `garden -> ordered list[str]`-shaped
+   implementations:
+   - **`round-robin`** (default, byte-for-byte the original and only
+     behavior before this flag existed — existing cron/devsrv invocations
+     that never pass `--strategy` see no change): the alphabetically-sorted
+     garden, rotated to start wherever the *previous* run's resume cursor
+     left off.
+   - **`issue-count`**: sorts the garden descending by each repo's live
+     open-GitHub-issue count (`gh issue list --state open`, one call per
+     garden repo — `cli.py`'s `fetch_issue_counts`), so repos with more
+     waiting work get attempted first. A repo whose count fetch fails is
+     treated as count 0 (lowest priority), not a crash.
+   - **`random`**: reshuffles the garden fresh every run, so which repos
+     get skipped when the time budget runs out varies night to night
+     instead of consistently penalizing whichever repos happen to sort (or
+     count) last.
+6. **Resuming across nights, and the cursor design per strategy.** If the
+   garden is longer than one night's budget can cover, a resume cursor
+   (`~/.local/state/gardener/overnight_cursor.json`) tracks where the next
+   `overnight` run should pick up, so a garden of 20 repos and a budget
+   that only fits 6 per night eventually reaches every repo across several
+   nights instead of only ever tending the first 6 (or the first 6 by
+   issue count, or the first 6 of a reshuffle). **The cursor works
+   differently depending on the active strategy, a deliberate design
+   decision** (see `overnight.py`'s module docstring for the full
+   reasoning): `round-robin`'s ordering is stable across runs (the same
+   alphabetically-sorted list every time), so a bare list index
+   (`next_index`) genuinely means "the Nth repo in that stable order" from
+   one run to the next — unchanged from before this flag existed.
+   `issue-count` and `random` do **not** have a stable ordering across runs
+   (a live issue count can change; a shuffle is fresh every time), so a
+   bare index would silently resume at the *wrong* repo — worse than no
+   cursor at all. Both instead resume by **repo name**: the cursor file
+   gains a second field, `attempted` (a list of repo full names already
+   attempted since the current pass through the garden began), read/written
+   by `overnight.py`'s `read_attempted`/`write_attempted` and applied by
+   `resume_order`. Each run computes a fresh strategy-ordered list, then
+   filters out whichever names are already in `attempted` — once every
+   repo has been attempted at least once, the next run detects the cycle
+   is complete and starts a fresh one. `next_index` and `attempted` live in
+   the *same* cursor file under different keys, so switching `--strategy`
+   between runs never clobbers the other strategy's own progress — round-
+   robin's index and issue-count/random's attempted-name list simply sit
+   side by side, each only ever read/written by its own strategy.
+7. **Notifications.** Each repo's own outcome is logged and alerted via the
    *existing* `state.record_run`/`_notify_run` machinery `_dispatch_tend`
    already uses (unchanged, and safe to call from more than one thread at
    once — see [Alerting design](#alerting-design)) — you get one
@@ -291,7 +340,7 @@ to my garden while I sleep" entry point:
    With no Discord webhook configured, the summary is still printed to
    stderr; the notification call itself is a clean no-op (`NullNotifier`,
    see [Alerting (optional)](#alerting-optional)), not a failure.
-7. One repo failing or timing out does not abort the batch — it's logged,
+8. One repo failing or timing out does not abort the batch — it's logged,
    notified, and `overnight` moves on to the next repo.
 
 #### Wiring it to "tend to my garden while I sleep"
@@ -424,20 +473,30 @@ notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
 clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`
 wiring, and exit codes), `cmd_allowlist` and `cmd_garden` (their
 structurally-identical list/add/remove branches, over the merge allow-list
-and the garden respectively), and `cmd_overnight` with `_dispatch_tend`
-itself mocked — including its `--concurrency` batching (one test asserts
-every repo in a `ThreadPoolExecutor`-dispatched batch still gets attempted
-regardless of completion order, another asserts `concurrency=1` never
-touches `ThreadPoolExecutor` at all) — and, where the budget/headroom logic
-specifically is under test, `time.monotonic` mocked too, so timing
-assertions never depend on wall-clock jitter;
+and the garden respectively), `fetch_open_issue_count`/`fetch_issue_counts`
+(the `issue-count` strategy's `gh`-calling side) with `_run` mocked the
+same way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
+`_dispatch_tend` itself mocked — including its `--concurrency` batching
+(one test asserts every repo in a `ThreadPoolExecutor`-dispatched batch
+still gets attempted regardless of completion order, another asserts
+`concurrency=1` never touches `ThreadPoolExecutor` at all) and its
+`--strategy` selection (`issue-count` with `fetch_issue_counts` mocked,
+`random` with an injected `--random-seed` for a deterministic shuffle, both
+asserting the repo-name-keyed resume cursor advances correctly across two
+invocations without disturbing round-robin's own `next_index` in the same
+cursor file) — and, where the budget/headroom logic specifically is under
+test, `time.monotonic` mocked too, so timing assertions never depend on
+wall-clock jitter;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
-with real files in a tmp dir; `tests/test_conventions.py` covers
-`ConventionsSource.verify_complete()`'s missing-doc detection and
+with real files in a tmp dir, including `order_by_issue_count` (pure sort
+over an already-fetched count mapping), `random_order` (injectable
+`random.Random`), and `resume_order`/`next_attempted` (the name-keyed
+cursor's cycle-completion and reset logic); `tests/test_conventions.py`
+covers `ConventionsSource.verify_complete()`'s missing-doc detection and
 `ensure_conventions()`'s clone/fetch-reset/no-refresh branches, with
 `_run_git`/`subprocess.run` mocked so no real `git` process ever runs;
 `tests/test_transcript.py` covers the encoding rule
@@ -481,6 +540,20 @@ too big for one budget window and confirm the second run tends a
 (3) confirm exactly one additional summary notification fires per
 invocation, on top of each repo's own per-repo notification. See Project
 Status below for the actual run this verified against.
+
+**`--strategy issue-count`/`random` specifically** are pure orchestration
+changes (no change to `dispatch.py`, `dev_loop.py`, or a prompt template),
+so this repo's manual-real-dispatch gate (see "Testing changes" above)
+doesn't apply — but a small real check is still worth doing before relying
+on either in an unattended run: `--strategy issue-count --hours 0.1`
+against 2-3 low-stakes garden repos with varying real open-issue counts,
+confirming the higher-count repo is attempted first and the stderr log's
+`fetching open-issue counts...` line shows real `gh` calls succeeding; and
+`--strategy random --hours 0.1`, run twice in a row, confirming the second
+run's attempted repo differs from the first's (the name-keyed cursor
+correctly avoided repeating it) rather than either strategy's automated
+coverage (fully mocked `gh`/deterministic seeded shuffle) standing in for
+this on its own.
 
 **`--concurrency > 1` specifically** has not yet had its own real,
 end-to-end verification run on this device as of this writing (see Project

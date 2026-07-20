@@ -4,6 +4,7 @@ classification/summary building. None of this invokes `claude`, `git`, or
 `gh`; `cmd_overnight`'s real-dispatch orchestration in cli.py is covered
 separately in test_cli.py with `_dispatch_tend` mocked."""
 import json
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,175 @@ class TestCursor(unittest.TestCase):
         overnight.write_cursor(2, path=self.path)
         raw = json.loads(self.path.read_text())
         self.assertEqual(raw, {"next_index": 2})
+
+
+class TestAttemptedCursor(unittest.TestCase):
+    """read_attempted/write_attempted — the name-keyed resume cursor used by
+    issue-count/random, instead of round-robin's bare index (see
+    overnight.py's module docstring)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmpdir.name) / "cursor.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_missing_file_reads_as_empty_list(self):
+        self.assertEqual(overnight.read_attempted(path=self.path), [])
+
+    def test_write_then_read_round_trips(self):
+        overnight.write_attempted(["a/one", "a/two"], path=self.path)
+        self.assertEqual(overnight.read_attempted(path=self.path), ["a/one", "a/two"])
+
+    def test_malformed_json_reads_as_empty_list(self):
+        self.path.write_text("not json{{{")
+        self.assertEqual(overnight.read_attempted(path=self.path), [])
+
+    def test_non_object_json_reads_as_empty_list(self):
+        self.path.write_text(json.dumps([1, 2, 3]))
+        self.assertEqual(overnight.read_attempted(path=self.path), [])
+
+    def test_non_list_of_strings_reads_as_empty_list(self):
+        self.path.write_text(json.dumps({"attempted": [1, 2, 3]}))
+        self.assertEqual(overnight.read_attempted(path=self.path), [])
+
+    def test_creates_parent_directories(self):
+        nested = Path(self._tmpdir.name) / "a" / "b" / "cursor.json"
+        overnight.write_attempted(["a/one"], path=nested)
+        self.assertTrue(nested.exists())
+
+    def test_write_attempted_preserves_next_index_in_same_file(self):
+        # round-robin's own field must survive a later issue-count/random
+        # run writing to the same cursor file — each strategy only touches
+        # its own key (see overnight.py's docstring).
+        overnight.write_cursor(3, path=self.path)
+        overnight.write_attempted(["a/one"], path=self.path)
+        raw = json.loads(self.path.read_text())
+        self.assertEqual(raw["next_index"], 3)
+        self.assertEqual(raw["attempted"], ["a/one"])
+        self.assertEqual(overnight.read_cursor(path=self.path), 3)
+
+    def test_write_cursor_preserves_attempted_in_same_file(self):
+        overnight.write_attempted(["a/one"], path=self.path)
+        overnight.write_cursor(2, path=self.path)
+        raw = json.loads(self.path.read_text())
+        self.assertEqual(raw["attempted"], ["a/one"])
+        self.assertEqual(raw["next_index"], 2)
+        self.assertEqual(overnight.read_attempted(path=self.path), ["a/one"])
+
+
+class TestOrderByIssueCount(unittest.TestCase):
+    def test_sorts_descending_by_count(self):
+        order = overnight.order_by_issue_count(
+            ["a/low", "a/high", "a/mid"], {"a/low": 1, "a/high": 10, "a/mid": 5}
+        )
+        self.assertEqual(order, ["a/high", "a/mid", "a/low"])
+
+    def test_missing_counts_treated_as_zero_lowest_priority(self):
+        order = overnight.order_by_issue_count(
+            ["a/known", "a/unknown"], {"a/known": 1}
+        )
+        self.assertEqual(order, ["a/known", "a/unknown"])
+
+    def test_all_missing_falls_back_to_alphabetical(self):
+        order = overnight.order_by_issue_count(["c/repo", "a/repo", "b/repo"], {})
+        self.assertEqual(order, ["a/repo", "b/repo", "c/repo"])
+
+    def test_ties_break_alphabetically(self):
+        order = overnight.order_by_issue_count(
+            ["b/repo", "a/repo"], {"b/repo": 5, "a/repo": 5}
+        )
+        self.assertEqual(order, ["a/repo", "b/repo"])
+
+    def test_every_repo_appears_exactly_once(self):
+        garden = ["a", "b", "c", "d"]
+        order = overnight.order_by_issue_count(garden, {"a": 2, "c": 9})
+        self.assertEqual(sorted(order), sorted(garden))
+
+    def test_empty_garden_returns_empty(self):
+        self.assertEqual(overnight.order_by_issue_count([], {}), [])
+
+
+class TestRandomOrder(unittest.TestCase):
+    def test_injectable_rng_gives_a_deterministic_shuffle(self):
+        garden = ["a", "b", "c", "d", "e"]
+        order1 = overnight.random_order(garden, rng=random.Random(42))
+        order2 = overnight.random_order(garden, rng=random.Random(42))
+        self.assertEqual(order1, order2)
+
+    def test_different_seeds_can_give_different_orders(self):
+        garden = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        order1 = overnight.random_order(garden, rng=random.Random(1))
+        order2 = overnight.random_order(garden, rng=random.Random(2))
+        self.assertNotEqual(order1, order2)
+
+    def test_every_repo_appears_exactly_once(self):
+        garden = ["a", "b", "c", "d", "e"]
+        order = overnight.random_order(garden, rng=random.Random(7))
+        self.assertEqual(sorted(order), sorted(garden))
+        self.assertEqual(len(order), len(garden))
+
+    def test_does_not_mutate_the_input_list(self):
+        garden = ["a", "b", "c"]
+        overnight.random_order(garden, rng=random.Random(3))
+        self.assertEqual(garden, ["a", "b", "c"])
+
+    def test_empty_garden_returns_empty(self):
+        self.assertEqual(overnight.random_order([], rng=random.Random(1)), [])
+
+    def test_omitted_rng_still_returns_a_valid_permutation(self):
+        # No injected rng -> falls back to a real random.Random() instance;
+        # this just confirms that path doesn't crash and still permutes.
+        garden = ["a", "b", "c"]
+        order = overnight.random_order(garden)
+        self.assertEqual(sorted(order), garden)
+
+
+class TestResumeOrder(unittest.TestCase):
+    def test_nothing_attempted_yet_returns_full_order_unchanged(self):
+        order, cycle_reset = overnight.resume_order(["a", "b", "c"], [])
+        self.assertEqual(order, ["a", "b", "c"])
+        self.assertFalse(cycle_reset)
+
+    def test_filters_out_already_attempted_preserving_relative_order(self):
+        order, cycle_reset = overnight.resume_order(["a", "b", "c", "d"], ["a", "c"])
+        self.assertEqual(order, ["b", "d"])
+        self.assertFalse(cycle_reset)
+
+    def test_everything_attempted_resets_to_full_order(self):
+        order, cycle_reset = overnight.resume_order(["a", "b"], ["b", "a"])
+        self.assertEqual(order, ["a", "b"])
+        self.assertTrue(cycle_reset)
+
+    def test_attempted_names_no_longer_in_the_garden_are_harmless(self):
+        # e.g. a repo removed from the garden between runs.
+        order, cycle_reset = overnight.resume_order(["a", "b"], ["x", "y"])
+        self.assertEqual(order, ["a", "b"])
+        self.assertFalse(cycle_reset)
+
+    def test_empty_full_order_reports_cycle_reset(self):
+        order, cycle_reset = overnight.resume_order([], [])
+        self.assertEqual(order, [])
+        self.assertTrue(cycle_reset)
+
+
+class TestNextAttempted(unittest.TestCase):
+    def test_appends_newly_attempted_when_cycle_not_reset(self):
+        result = overnight.next_attempted(["a"], False, ["b", "c"])
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_cycle_reset_discards_prior_attempted(self):
+        result = overnight.next_attempted(["a", "b"], True, ["c"])
+        self.assertEqual(result, ["c"])
+
+    def test_deduplicates_while_preserving_order(self):
+        result = overnight.next_attempted(["a", "b"], False, ["b", "c"])
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_no_new_attempts_leaves_prior_list_unchanged(self):
+        result = overnight.next_attempted(["a", "b"], False, [])
+        self.assertEqual(result, ["a", "b"])
 
 
 class TestReposToAttempt(unittest.TestCase):
