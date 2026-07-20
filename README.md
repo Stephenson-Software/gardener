@@ -40,6 +40,10 @@ it*. See [Usage](#usage) below for the full command set.
   and the unattended batch dispatcher that tends them one after another
   overnight. See [Overnight / unattended operation](#overnight--unattended-operation)
   below.
+- **`gardener dashboard`**: a local, read-only web UI over `gardener
+  status`'s own run history plus whatever `tend`/`overnight` log was
+  written to most recently, so an unattended overnight run doesn't require
+  polling the CLI by hand to see what it's doing.
 
 ## Installation
 
@@ -94,6 +98,7 @@ gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
+gardener dashboard [--port N]
 ```
 
 - **`gardener align --repo owner/repo`** (no flags) — **report-only,
@@ -119,6 +124,17 @@ gardener tail-transcript <path> [-f]
 - **`gardener status [--repo owner/repo]`** — reads gardener's local
   SQLite run history (`~/.local/state/gardener/gardener.sqlite3` by
   default) and prints it: target repo, timestamp, mode, outcome summary.
+- **`gardener dashboard [--port N]`** — serves a small web page (default
+  `http://127.0.0.1:8765`, binds loopback-only — see `dashboard.py`'s
+  module docstring, there is no authentication) with the same run history
+  `gardener status` prints, plus the garden list, the merge allow-list, and
+  a live-updating tail of whichever `tend`/`overnight` log file was most
+  recently written to (auto-refreshes every 4s; "currently tending" is a
+  best-effort parse of that log's own progress lines, not a second source
+  of truth — `gardener status`'s sqlite db remains the one authoritative
+  outcome record). If `--port` is already bound (e.g. a previous
+  invocation still running), gardener picks a free one instead of failing
+  and says so on stderr.
 
 ### `gardener tend` — dispatching a target repo's own dev-loop
 
