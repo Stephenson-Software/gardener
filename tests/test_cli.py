@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gardener import dev_loop, garden, merge_allowlist, overnight, repo_lock, state
+from gardener import dashboard, dev_loop, garden, merge_allowlist, overnight, repo_lock, state
 from gardener.cli import (
     REPO_RE,
     TendResult,
@@ -23,9 +23,11 @@ from gardener.cli import (
     build_prompt,
     cmd_align,
     cmd_allowlist,
+    cmd_dashboard,
     cmd_garden,
     cmd_overnight,
     cmd_status,
+    cmd_tail_transcript,
     cmd_tend,
     extract_gap_summary,
     fetch_issue_counts,
@@ -199,6 +201,42 @@ class TestOvernightArgParsing(unittest.TestCase):
     def test_strategy_rejects_unknown_value(self):
         with self.assertRaises(SystemExit):
             self.parser.parse_args(["overnight", "--strategy", "bogus"])
+
+
+class TestTailTranscriptArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_requires_path(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.parser.parse_args(["tail-transcript"])
+
+    def test_path_is_converted_to_a_path_object(self):
+        args = self.parser.parse_args(["tail-transcript", "/tmp/session.jsonl"])
+        self.assertEqual(args.path, Path("/tmp/session.jsonl"))
+
+    def test_follow_defaults_to_false(self):
+        args = self.parser.parse_args(["tail-transcript", "/tmp/session.jsonl"])
+        self.assertFalse(args.follow)
+
+    def test_follow_flag_short_and_long_form(self):
+        for flag in ("-f", "--follow"):
+            args = self.parser.parse_args(["tail-transcript", "/tmp/session.jsonl", flag])
+            self.assertTrue(args.follow)
+
+
+class TestDashboardArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_port_defaults_to_dashboard_default_port(self):
+        args = self.parser.parse_args(["dashboard"])
+        self.assertEqual(args.port, dashboard.DEFAULT_PORT)
+
+    def test_port_override(self):
+        args = self.parser.parse_args(["dashboard", "--port", "9001"])
+        self.assertEqual(args.port, 9001)
 
 
 class TestFetchIssueCounts(unittest.TestCase):
@@ -580,6 +618,65 @@ class TestCmdStatus(unittest.TestCase):
         output = out.getvalue()
         self.assertIn("owner/one", output)
         self.assertNotIn("owner/two", output)
+
+
+class TestCmdTailTranscript(unittest.TestCase):
+    """cmd_tail_transcript is a thin pass-through to
+    transcript.print_transcript — this only checks the wiring (args
+    forwarded, return code forwarded), not print_transcript's own
+    behavior, which test_transcript.py already covers directly."""
+
+    def _args(self, path=Path("/tmp/session.jsonl"), follow=False):
+        return argparse.Namespace(path=path, follow=follow)
+
+    def test_forwards_path_and_follow_and_return_code(self):
+        with patch("gardener.cli.transcript.print_transcript", return_value=0) as mock_print:
+            result = cmd_tail_transcript(self._args(path=Path("/tmp/a.jsonl"), follow=True))
+        mock_print.assert_called_once_with(Path("/tmp/a.jsonl"), follow=True)
+        self.assertEqual(result, 0)
+
+    def test_forwards_a_non_zero_return_code(self):
+        with patch("gardener.cli.transcript.print_transcript", return_value=1):
+            result = cmd_tail_transcript(self._args())
+        self.assertEqual(result, 1)
+
+
+class TestCmdDashboard(unittest.TestCase):
+    """cmd_dashboard's own job is picking a port (falling back and warning
+    if the requested one is taken) and wiring state_dir through to
+    run_server — dashboard.find_free_port/run_server's own behavior is
+    covered directly in test_dashboard.py."""
+
+    def _args(self, port=dashboard.DEFAULT_PORT, state_dir=None):
+        return argparse.Namespace(port=port, state_dir=state_dir)
+
+    def test_serves_on_the_requested_port_when_free(self):
+        with patch("gardener.cli.dashboard.find_free_port", return_value=8765) as mock_find, \
+                patch("gardener.cli.dashboard.run_server") as mock_run, \
+                patch("sys.stderr", new=io.StringIO()) as err:
+            result = cmd_dashboard(self._args(port=8765))
+        mock_find.assert_called_once_with(preferred=8765)
+        mock_run.assert_called_once_with(port=8765, state_dir=None)
+        self.assertEqual(result, 0)
+        self.assertNotIn("already in use", err.getvalue())
+
+    def test_falls_back_and_warns_when_the_requested_port_is_taken(self):
+        with patch("gardener.cli.dashboard.find_free_port", return_value=8766), \
+                patch("gardener.cli.dashboard.run_server") as mock_run, \
+                patch("sys.stderr", new=io.StringIO()) as err:
+            result = cmd_dashboard(self._args(port=8765))
+        mock_run.assert_called_once_with(port=8766, state_dir=None)
+        self.assertEqual(result, 0)
+        self.assertIn("8765", err.getvalue())
+        self.assertIn("already in use", err.getvalue())
+        self.assertIn("8766", err.getvalue())
+
+    def test_state_dir_is_forwarded_to_run_server(self):
+        state_dir = Path("/tmp/gardener-state")
+        with patch("gardener.cli.dashboard.find_free_port", return_value=8765), \
+                patch("gardener.cli.dashboard.run_server") as mock_run:
+            cmd_dashboard(self._args(state_dir=state_dir))
+        mock_run.assert_called_once_with(port=8765, state_dir=state_dir)
 
 
 class TestCmdAlign(unittest.TestCase):
