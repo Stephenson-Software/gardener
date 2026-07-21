@@ -496,9 +496,14 @@ uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
 parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
 notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
 clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`
-wiring, and exit codes), `cmd_allowlist` and `cmd_garden` (their
-structurally-identical list/add/remove branches, over the merge allow-list
-and the garden respectively), `fetch_open_issue_count`/`fetch_issue_counts`
+wiring, and exit codes), `cmd_status`'s own rendering (empty-history
+message, header/row formatting, long-summary truncation, over a real
+sqlite3 tmp-dir db), `cmd_tail_transcript`/`cmd_dashboard`'s argparse
+wiring and thin pass-through behavior (path/follow forwarded to
+`transcript.print_transcript`; port fallback and `state_dir` forwarded to
+`dashboard.find_free_port`/`run_server`), `cmd_allowlist` and `cmd_garden`
+(their structurally-identical list/add/remove branches, over the merge
+allow-list and the garden respectively), `fetch_open_issue_count`/`fetch_issue_counts`
 (the `issue-count` strategy's `gh`-calling side) with `_run` mocked the
 same way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
 `_dispatch_tend` itself mocked — including its `--concurrency` batching
@@ -530,7 +535,19 @@ module docstring, not invented ones), the transcript-file-discovery polling
 loop (real files in a tmp dir, but `time_fn`/`sleep_fn` always injected so
 nothing ever sleeps for a real second), and the pretty-printer's
 line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
-`tool_result`, malformed JSON, and blank lines). None of the automated
+`tool_result`, malformed JSON, and blank lines); `tests/test_dashboard.py`
+covers the dashboard's pure log-parsing and status-assembly functions —
+`find_active_log`, `tail_lines`, `parse_in_progress`,
+`parse_batch_progress`, `find_free_port`, and `build_status` (including its
+`state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
+`overnight.py`, not just `state.py`'s own db path) — plus `run_server`'s
+loopback-only enforcement, without ever covering its `http.server` layer
+directly (mirroring how `test_dispatch.py` mocks rather than invokes the
+real `claude` subprocess call); `tests/test_repo_lock.py` covers
+`lock_file_path`'s naming convention and the `repo_lock` context manager's
+exclusivity and release-on-exit (normal and exception) using real
+`fcntl.flock` calls against a tmp dir, not a mock, since the whole point is
+proving the OS-level exclusion actually holds. None of the automated
 tests hit the network or a real repo, or invoke a real `claude` process —
 see [Manual/end-to-end verification](#manualend-to-end-verification) for
 that.
