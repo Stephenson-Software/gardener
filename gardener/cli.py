@@ -26,7 +26,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, state, transcript
+from gardener import conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, state, transcript
 from gardener.dispatch import (
     CREATE_DEV_LOOP_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -933,6 +933,17 @@ def cmd_tail_transcript(args: argparse.Namespace) -> int:
     return transcript.print_transcript(args.path, follow=args.follow)
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    port = dashboard.find_free_port(preferred=args.port)
+    if port != args.port:
+        print(
+            f"gardener: port {args.port} is already in use — serving on {port} instead",
+            file=sys.stderr,
+        )
+    dashboard.run_server(port=port, state_dir=args.state_dir)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gardener",
@@ -1082,6 +1093,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep reading as the file grows, like `tail -f`, instead of exiting at EOF",
     )
     tail_transcript.set_defaults(func=cmd_tail_transcript)
+
+    dashboard_parser = sub.add_parser(
+        "dashboard",
+        help="Serve a local read-only web UI over run history + the active tend/overnight log",
+    )
+    dashboard_parser.add_argument(
+        "--port", type=int, default=dashboard.DEFAULT_PORT,
+        help=f"Port to bind on 127.0.0.1 (default {dashboard.DEFAULT_PORT}; picks a free "
+             "port instead if this one is already in use)",
+    )
+    dashboard_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    dashboard_parser.set_defaults(func=cmd_dashboard)
 
     return parser
 
