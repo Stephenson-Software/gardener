@@ -29,6 +29,7 @@ running," not gardener's authoritative record of it.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import socket
@@ -67,11 +68,36 @@ def find_active_log(logs_dir: Path) -> Optional[Path]:
 
 
 def tail_lines(path: Path, n: int = 400) -> list[str]:
+    """Return the last `n` lines of `path` without loading the entire file.
+
+    Seeks backwards from the end of the file in chunks, stopping as soon as
+    `n` newlines have been collected — so only the tail is ever in memory,
+    regardless of file size. This matters at a 4 s poll rate when a
+    long-running overnight session can produce a multi-MB log."""
     try:
-        text = path.read_text(errors="replace")
+        f = path.open("rb")
     except OSError:
         return []
-    lines = text.splitlines()
+    with f:
+        f.seek(0, 2)
+        size = f.tell()
+        if size == 0:
+            return []
+        chunk_size = 4096
+        collected: list[bytes] = []
+        pos = size
+        newlines_found = 0
+        # Read backwards in chunks until we have n+1 newlines (n+1 so we
+        # can discard any partial leading line) or reach the start.
+        while pos > 0 and newlines_found <= n:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            collected.append(chunk)
+            newlines_found += chunk.count(b"\n")
+        raw = b"".join(reversed(collected))
+    lines = raw.decode("utf-8", errors="replace").splitlines()
     return lines[-n:]
 
 
@@ -95,6 +121,18 @@ def parse_in_progress(lines: list[str]) -> list[str]:
             if mode == "tend" or (mode == "create-dev-loop" and "FAILED — " in line):
                 terminal.add(repo)
     return [r for r in started if r not in terminal]
+
+
+def _safe_list(fn) -> list:
+    """Call `fn()` and return its result, or `[]` on `ValueError`.
+
+    Guards `build_status` against a corrupt/mid-write garden or
+    merge-allowlist JSON file — the dashboard must stay usable even when
+    those files are temporarily invalid."""
+    try:
+        return fn()
+    except ValueError:
+        return []
 
 
 def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
@@ -156,8 +194,10 @@ def build_status(
             "recent_cost_usd": round(recent_cost, 2),
             "recent_error_count": recent_error_count,
         },
-        "garden": garden.list_garden(path=base / "garden.json"),
-        "merge_allowlist": merge_allowlist.list_allowed(path=base / "merge_allowlist.json"),
+        "garden": _safe_list(lambda: garden.list_garden(path=base / "garden.json")),
+        "merge_allowlist": _safe_list(
+            lambda: merge_allowlist.list_allowed(path=base / "merge_allowlist.json")
+        ),
         "overnight_next_index": overnight.read_cursor(path=base / "overnight_cursor.json"),
     }
 
@@ -381,7 +421,30 @@ def run_server(port: int = DEFAULT_PORT, state_dir: Optional[Path] = None, host:
     default) only — this has no authentication, so it must never be bound
     to 0.0.0.0/a real interface. WSL2 forwards a loopback bind through to
     the Windows host's own localhost automatically, so the default is
-    reachable from a Windows browser without any extra network config."""
+    reachable from a Windows browser without any extra network config.
+
+    Raises `ValueError` if `host` does not resolve to a loopback address,
+    so a future caller can't accidentally expose the dashboard on 0.0.0.0
+    just by passing a different `host`."""
+    try:
+        addr_info = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"dashboard host {host!r} could not be resolved: {exc}") from exc
+    for _family, _type, _proto, _canonname, sockaddr in addr_info:
+        ip = sockaddr[0]
+        try:
+            if not ipaddress.ip_address(ip).is_loopback:
+                raise ValueError(
+                    f"dashboard host {host!r} resolves to non-loopback address {ip!r}; "
+                    "the dashboard has no authentication and must only bind to loopback"
+                )
+        except ValueError as exc:
+            # Re-raise ValueErrors from our own check unchanged; swallow
+            # ipaddress.ip_address() parse errors (shouldn't happen —
+            # getaddrinfo returns valid IPs — but guard against unexpected
+            # formats).
+            if "loopback" in str(exc):
+                raise
     # Class attribute, not an instance one: http.server instantiates
     # handler_class(request, client_address, server) itself per request,
     # so this is how per-server config (which state dir to read) reaches

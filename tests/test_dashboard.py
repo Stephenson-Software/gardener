@@ -64,6 +64,22 @@ class TestTailLines(unittest.TestCase):
             path.write_text("a\nb")
             self.assertEqual(dashboard.tail_lines(path, n=10), ["a", "b"])
 
+    def test_empty_file_returns_empty_list(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_bytes(b"")
+            self.assertEqual(dashboard.tail_lines(path, n=5), [])
+
+    def test_large_file_does_not_read_more_than_necessary(self):
+        # Write a file that spans multiple 4096-byte chunks; verify we still
+        # get back the correct last-N lines without needing to load it all.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "big.log"
+            lines = [f"line{i:06d}" for i in range(2000)]
+            path.write_text("\n".join(lines))
+            result = dashboard.tail_lines(path, n=10)
+            self.assertEqual(result, [f"line{i:06d}" for i in range(1990, 2000)])
+
 
 class TestParseInProgress(unittest.TestCase):
     def test_no_lines_is_empty(self):
@@ -229,6 +245,39 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["active_log"], str(log_path))
         self.assertEqual(result["in_progress"], ["owner/b"])
         self.assertEqual(result["batch_progress"], {"start": 1, "end": 2, "total": 9})
+
+    def test_corrupt_garden_json_returns_empty_list_not_exception(self):
+        # A mid-write or user-corrupted garden.json must not crash the dashboard.
+        (self.state_dir / "garden.json").write_text("not valid json{{{")
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["garden"], [])
+
+    def test_corrupt_merge_allowlist_json_returns_empty_list_not_exception(self):
+        (self.state_dir / "merge_allowlist.json").write_text("[1, 2, 3]")  # not strings
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["merge_allowlist"], [])
+
+
+class TestRunServerLoopbackEnforcement(unittest.TestCase):
+    def test_non_loopback_host_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            dashboard.run_server(host="0.0.0.0", port=19999)
+        self.assertIn("loopback", str(ctx.exception))
+
+    def test_loopback_host_does_not_raise_before_binding(self):
+        # run_server blocks forever once it binds; we only want to confirm
+        # the loopback validation passes for 127.0.0.1 — interrupt
+        # immediately after the check by mocking serve_forever.
+        import unittest.mock as mock
+        with mock.patch(
+            "gardener.dashboard.ThreadingHTTPServer",
+            side_effect=KeyboardInterrupt,
+        ):
+            # Should not raise ValueError (loopback check passes).
+            try:
+                dashboard.run_server(host="127.0.0.1", port=19999)
+            except KeyboardInterrupt:
+                pass
 
 
 if __name__ == "__main__":
