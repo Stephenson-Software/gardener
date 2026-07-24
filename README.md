@@ -129,10 +129,11 @@ gardener dashboard [--port N]
   module docstring, there is no authentication) with the same run history
   `gardener status` prints, plus the garden list, the merge allow-list, and
   a live-updating tail of whichever `tend`/`overnight` log file was most
-  recently written to (auto-refreshes every 4s; "currently tending" is a
-  best-effort parse of that log's own progress lines, not a second source
-  of truth — `gardener status`'s sqlite db remains the one authoritative
-  outcome record). If `--port` is already bound (e.g. a previous
+  recently written to (auto-refreshes every 4s; "currently tending" and the
+  "candidate N of T this run" batch-progress bar are both a best-effort
+  parse of that log's own progress lines, not a second source of truth —
+  `gardener status`'s sqlite db remains the one authoritative outcome
+  record). If `--port` is already bound (e.g. a previous
   invocation still running), gardener picks a free one instead of failing
   and says so on stderr.
 
