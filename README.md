@@ -425,6 +425,16 @@ starting a duplicate; see "Orphaned work recovery" above.
 - `--no-refresh-conventions` (`align` only) / `--no-refresh-target`
   (`align` and `tend`) — reuse whatever is already cached instead of
   fetching latest first.
+- `--repo <owner/name>` is validated at parse time (exit `2`, a normal
+  argparse usage error) for `align`, `tend`, `allowlist add`, and `garden
+  add` — so a typo is rejected at the point you make it rather than hours
+  later mid-`overnight`, and a misspelled merge-allow-list entry can't sit
+  in the JSON silently never matching. `allowlist remove` / `garden remove`
+  deliberately skip this check, so an entry that's *already* malformed
+  (hand-edited in) stays removable. `clone_or_refresh_target_repo` keeps its
+  own identical check as the backstop for the paths that don't go through
+  argparse — `overnight`'s in-process dispatch and a hand-edited
+  `garden.json`.
 
 ### Live session visibility
 
@@ -493,7 +503,10 @@ Windows (PowerShell):
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude`; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
-parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
+parsing (including `repo_arg`'s parse-time `owner/name` validation — that
+`align`/`tend`/`allowlist add`/`garden add` reject a malformed `--repo` and
+that `allowlist remove`/`garden remove` still accept one), prompt
+templating, `_notify_run`'s severity mapping (mocking the
 notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
 clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`
 wiring, and exit codes), `cmd_status`'s own rendering (empty-history
@@ -516,7 +529,11 @@ asserting the repo-name-keyed resume cursor advances correctly across two
 invocations without disturbing round-robin's own `next_index` in the same
 cursor file) — and, where the budget/headroom logic specifically is under
 test, `time.monotonic` mocked too, so timing assertions never depend on
-wall-clock jitter;
+wall-clock jitter. Two of those `cmd_overnight` tests assert against its
+*real captured stderr* rather than a hand-written fixture, checking that
+`dashboard.parse_batch_progress` can actually parse the progress line
+`cmd_overnight` prints at both `--concurrency 1` and `--concurrency 2` —
+that coupling had silently drifted for the default sequential shape;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and
@@ -538,7 +555,9 @@ line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
 `tool_result`, malformed JSON, and blank lines); `tests/test_dashboard.py`
 covers the dashboard's pure log-parsing and status-assembly functions —
 `find_active_log`, `tail_lines`, `parse_in_progress`,
-`parse_batch_progress`, `find_free_port`, and `build_status` (including its
+`parse_batch_progress` (both progress-line shapes `cmd_overnight` emits: a
+concurrent batch's `N-M/T` range and a single-repo batch's bare `N/T`),
+`find_free_port`, and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
 `overnight.py`, not just `state.py`'s own db path) — plus `run_server`'s
 loopback-only enforcement, without ever covering its `http.server` layer

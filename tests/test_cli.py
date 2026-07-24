@@ -34,6 +34,7 @@ from gardener.cli import (
     fetch_open_issue_count,
     find_orphaned_pr,
     merge_eligible,
+    repo_arg,
 )
 from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, DispatchResult, Mode
 from gardener.notify import Level
@@ -329,6 +330,53 @@ class TestRepoRegex(unittest.TestCase):
     def test_rejects_flag_injection_attempts(self):
         for bad in ["--upload-pack=x/y", "/leading-slash", "owner/", "owner/--evil"]:
             self.assertIsNone(REPO_RE.match(bad), bad)
+
+
+class TestRepoArg(unittest.TestCase):
+    """`repo_arg` — the argparse `type=` wrapper around REPO_RE above (issue
+    #36), so a malformed --repo is a parse-time usage error rather than
+    something caught later in clone_or_refresh_target_repo (align/tend) or
+    never caught at all (allowlist/garden add)."""
+
+    def test_returns_a_valid_value_unchanged(self):
+        self.assertEqual(repo_arg("dmccoystephenson/gardener"), "dmccoystephenson/gardener")
+
+    def test_raises_argument_type_error_with_the_offending_value(self):
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            repo_arg("just-a-name")
+        self.assertIn("owner/name", str(ctx.exception))
+        self.assertIn("just-a-name", str(ctx.exception))
+
+
+class TestRepoValidationAtParseTime(unittest.TestCase):
+    """Which --repo arguments actually enforce repo_arg. `add` does (a typo
+    would otherwise sit in the JSON until an unattended overnight run trips
+    over it, or — for the merge allow-list — silently never match); `remove`
+    deliberately does not, so an already-malformed entry stays removable."""
+
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_add_and_dispatch_subcommands_reject_a_malformed_repo(self):
+        for argv in (
+            ["align", "--repo", "just-a-name"],
+            ["tend", "--repo", "just-a-name"],
+            ["allowlist", "add", "--repo", "just-a-name"],
+            ["garden", "add", "--repo", "just-a-name"],
+        ):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.parser.parse_args(argv)
+
+    def test_remove_still_accepts_a_malformed_repo(self):
+        for argv in (
+            ["allowlist", "remove", "--repo", "just-a-name"],
+            ["garden", "remove", "--repo", "just-a-name"],
+        ):
+            with self.subTest(argv=argv):
+                args = self.parser.parse_args(argv)
+                self.assertEqual(args.repo, "just-a-name")
 
 
 class TestPromptTemplating(unittest.TestCase):
@@ -1355,6 +1403,46 @@ class TestCmdOvernight(unittest.TestCase):
             exit_code = cmd_overnight(self._args())
         self.assertEqual(exit_code, 0)
         self.assertEqual(self.calls, [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_progress_log_line_is_parseable_by_the_dashboard(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # Guards the coupling between the progress line cmd_overnight prints
+        # and dashboard.BATCH_RE, which parses it out of the log file — the
+        # two drifted apart for the *default* concurrency=1 shape (issue
+        # #35), so this asserts against cmd_overnight's real captured stderr
+        # rather than a hand-written fixture of what it's assumed to print.
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({})
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            cmd_overnight(self._args(concurrency=1))
+
+        lines = stderr.getvalue().splitlines()
+        # Last batch of a 3-repo sequential run: candidate 3 of 3.
+        self.assertEqual(dashboard.parse_batch_progress(lines), (3, 3, 3))
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_concurrent_progress_log_line_is_parseable_by_the_dashboard(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({})
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            cmd_overnight(self._args(concurrency=2))
+
+        lines = stderr.getvalue().splitlines()
+        # Batches of 2 over 3 repos: the last one is the single leftover repo,
+        # which prints the bare `3/3` form even at --concurrency 2.
+        self.assertEqual(dashboard.parse_batch_progress(lines), (3, 3, 3))
 
     @patch("gardener.cli.notify.default_notifier")
     def test_corrupted_garden_file_is_reported_not_a_raw_crash(self, mock_default_notifier):

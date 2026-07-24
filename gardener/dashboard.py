@@ -45,7 +45,12 @@ DEFAULT_PORT = 8765
 
 TENDING_RE = re.compile(r"^gardener: tending (\S+) \(allow_merge=")
 NOTIFY_RE = re.compile(r"^notify: sent to Discord: gardener (\S+): (?:MUTATION — |FAILED — )?(.+)$")
-BATCH_RE = re.compile(r"\((\d+)-(\d+)/(\d+) candidates this run")
+# Matches both shapes `cmd_overnight`'s progress line can take: the bare
+# `N/T` a single-repo batch prints (the default `--concurrency 1`, i.e. what
+# every existing cron/devsrv invocation produces) and the `N-M/T` range a
+# concurrent batch prints. The end of the range is optional precisely because
+# the sequential form omits it — see `parse_batch_progress`.
+BATCH_RE = re.compile(r"\((\d+)(?:-(\d+))?/(\d+) candidates this run")
 
 
 def default_logs_dir(state_dir: Optional[Path] = None) -> Path:
@@ -136,10 +141,16 @@ def _safe_list(fn) -> list:
 
 
 def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
-    """(range_start, range_end, total) from the most recent 'N-M/T
-    candidates this run' line `cmd_overnight` prints, or None if this log
-    has no such line (e.g. a plain `tend --repo` dispatch, not
-    `overnight`)."""
+    """(range_start, range_end, total) from the most recent 'candidates this
+    run' line `cmd_overnight` prints, or None if this log has no such line
+    (e.g. a plain `tend --repo` dispatch, not `overnight`).
+
+    Handles both progress shapes `cmd_overnight` emits: a concurrent batch's
+    `N-M/T`, and a single-repo batch's bare `N/T` — which is what the default
+    `--concurrency 1` prints, so parsing only the range form left this
+    returning None for the common case (see issue #35). A bare `N/T` is
+    reported as the one-repo range `(N, N, T)`, since a batch of one starts
+    and ends at the same candidate."""
     match = None
     for line in lines:
         m = BATCH_RE.search(line)
@@ -147,7 +158,9 @@ def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
             match = m
     if match is None:
         return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) is not None else start
+    return (start, end, int(match.group(3)))
 
 
 def build_status(

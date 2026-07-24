@@ -1,5 +1,7 @@
 """argparse-based CLI: `gardener align`, `gardener tend`,
-`gardener allowlist`, and `gardener status`.
+`gardener allowlist`, `gardener garden`, `gardener overnight`,
+`gardener status`, `gardener tail-transcript`, and `gardener dashboard` —
+`build_parser` below is the authoritative list.
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
@@ -38,6 +40,29 @@ from gardener.dispatch import (
 )
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def repo_arg(value: str) -> str:
+    """argparse `type=` for every `--repo` that names a repo gardener will
+    act on — `align`/`tend` (dispatched against it) and `allowlist add`/
+    `garden add` (persisted into an opt-in list and acted on later). Rejects
+    a malformed value at parse time, as a normal usage error, before any
+    lock/network/dispatch work happens (see issue #36).
+
+    Not applied to `allowlist remove`/`garden remove`: removing an entry
+    that is *already* malformed — hand-edited into the JSON, or added before
+    this validation existed — has to stay possible.
+
+    This does not replace `clone_or_refresh_target_repo`'s own `REPO_RE`
+    check, which stays the backstop for the callers that never go through
+    argparse: `cmd_overnight`'s synthetic `argparse.Namespace` (see
+    `_dispatch_one_for_overnight`) and a hand-edited `garden.json`.
+    """
+    if not REPO_RE.match(value):
+        raise argparse.ArgumentTypeError(
+            f"must look like owner/name, got: {value!r}"
+        )
+    return value
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
@@ -952,7 +977,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     align = sub.add_parser("align", help="Audit (and optionally fix) a target repo's alignment gaps")
-    align.add_argument("--repo", required=True, help="owner/name of the target GitHub repo")
+    align.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the target GitHub repo")
     group = align.add_mutually_exclusive_group()
     group.add_argument(
         "--implement", action="store_true",
@@ -982,7 +1007,7 @@ def build_parser() -> argparse.ArgumentParser:
         "tend",
         help="Dispatch a target repo's own *-dev-loop skill (generating one first if needed)",
     )
-    tend.add_argument("--repo", required=True, help="owner/name of the target GitHub repo")
+    tend.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the target GitHub repo")
     tend.add_argument(
         "--allow-merge", action="store_true",
         help="Permit `gh pr merge` this run — still requires --repo be in the merge allow-list "
@@ -1008,7 +1033,7 @@ def build_parser() -> argparse.ArgumentParser:
     allowlist_list.set_defaults(func=cmd_allowlist)
 
     allowlist_add = allowlist_sub.add_parser("add", help="Add a repo to the allow-list")
-    allowlist_add.add_argument("--repo", required=True, help="owner/name of the repo to allow")
+    allowlist_add.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the repo to allow")
     allowlist_add.add_argument("--allowlist-path", dest="allowlist_path", type=Path, default=None, help=argparse.SUPPRESS)
     allowlist_add.set_defaults(func=cmd_allowlist)
 
@@ -1027,7 +1052,7 @@ def build_parser() -> argparse.ArgumentParser:
     garden_list.set_defaults(func=cmd_garden)
 
     garden_add = garden_sub.add_parser("add", help="Add a repo to the garden")
-    garden_add.add_argument("--repo", required=True, help="owner/name of the repo to tend overnight")
+    garden_add.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the repo to tend overnight")
     garden_add.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     garden_add.set_defaults(func=cmd_garden)
 

@@ -157,6 +157,23 @@ class TestParseBatchProgress(unittest.TestCase):
         ]
         self.assertEqual(dashboard.parse_batch_progress(lines), (5, 8, 28))
 
+    def test_sequential_bare_range_is_parsed_as_a_one_repo_batch(self):
+        # The exact line `cmd_overnight` prints at the default
+        # `--concurrency 1` (no `N-M` range, no `concurrency=` suffix) — this
+        # returned None before issue #35, blanking the dashboard's batch
+        # indicator for every default overnight run.
+        lines = [
+            "gardener: overnight dispatching tend for owner/repo (3/5 candidates this run)...",
+        ]
+        self.assertEqual(dashboard.parse_batch_progress(lines), (3, 3, 5))
+
+    def test_most_recent_line_wins_across_mixed_sequential_and_range_lines(self):
+        lines = [
+            "gardener: overnight dispatching tend for a, b (1-2/9 candidates this run, concurrency=2)...",
+            "gardener: overnight dispatching tend for c (3/9 candidates this run)...",
+        ]
+        self.assertEqual(dashboard.parse_batch_progress(lines), (3, 3, 9))
+
 
 class TestFindFreePort(unittest.TestCase):
     def test_returns_preferred_port_when_free(self):
