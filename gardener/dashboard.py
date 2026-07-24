@@ -353,8 +353,13 @@ async function refresh() {
   `;
 
   const bp = data.batch_progress;
+  // A single-repo batch (the default --concurrency 1) reports start === end;
+  // render it as "candidate 3 of 5" rather than the odd-looking "3–3 of 5".
+  const bpLabel = bp && (bp.start === bp.end
+    ? `candidate ${bp.start} of ${bp.total} this run`
+    : `candidates ${bp.start}–${bp.end} of ${bp.total} this run`);
   document.getElementById("batch").innerHTML = bp
-    ? `<div class="sub">candidates ${bp.start}–${bp.end} of ${bp.total} this run</div>
+    ? `<div class="sub">${bpLabel}</div>
        <div class="progress-bar"><div style="width:${Math.min(100, 100 * bp.end / bp.total)}%"></div></div>`
     : `<div class="empty">no overnight batch in this log</div>`;
 

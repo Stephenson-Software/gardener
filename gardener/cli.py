@@ -64,6 +64,7 @@ def repo_arg(value: str) -> str:
         )
     return value
 
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 MODE_INSTRUCTIONS = {
