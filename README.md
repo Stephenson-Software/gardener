@@ -406,6 +406,58 @@ advances past *completed* repos) — but that re-dispatch now recognizes and
 continues any PR the interrupted session already opened rather than
 starting a duplicate; see "Orphaned work recovery" above.
 
+### Auth failures abort the run instead of consuming the garden
+
+A `claude` authentication failure is the one dispatch outcome that says
+nothing about the repo being tended: it's global to the device, it fails in
+seconds rather than minutes, and every remaining repo in the garden is
+about to fail exactly the same way. `overnight` therefore treats it
+differently from an ordinary per-repo error:
+
+1. The dispatch itself is **retried** a small number of times with backoff
+   (`dispatch.py`'s `AUTH_RETRY_BACKOFF_SECONDS`, currently 30s/120s/300s),
+   which is enough to ride out a token-refresh blip. Only auth failures are
+   retried — a tend cycle that genuinely failed has already mutated its
+   branch and needs triage, not a blind second run.
+2. If it still can't authenticate, the whole run **stops**, and the resume
+   cursor is **not advanced past the affected repo** — so the next
+   invocation retries it rather than skipping it. Repos that tended
+   successfully earlier in the run still count as done.
+3. A dedicated ERROR notification fires alongside the usual batch summary,
+   since the summary alone reads as a pile of ordinary per-repo errors and
+   buries the one thing that actually needs a human (logging `claude` back
+   in).
+
+This is calibrated against a real failure, not a hypothetical one: on
+2026-07-24, twelve of fifteen garden repos failed within about a minute of
+each other with `Failed to authenticate: OAuth session expired and could
+not be refreshed`, each costing $0.00 and lasting 2-5 seconds. The cursor
+advanced past all twelve, so they stayed untended for the night even though
+auth recovered on its own roughly twenty minutes later.
+
+### Dependency caches survive the target-repo refresh
+
+Each `tend`/`align` run refreshes its cached clone
+(`~/.cache/gardener/repos/<owner>__<repo>`) with fetch + `checkout -B` +
+`git clean -fdx`, so no leftover state from a previous run can leak into
+the next one. The clean explicitly **preserves** a short list of dependency
+caches (`cli.py`'s `PRESERVED_DEPENDENCY_DIRS`: `node_modules`, `.venv`,
+`venv`, `.gradle`) via `git clean`'s `-e` flag, which is still honored when
+`-x` is passed. Build *outputs* (`build/`, `target/`, `dist/`) are
+deliberately not preserved — a stale one leaking into a later run is
+exactly what the `-x` clean exists to prevent, whereas a stale dependency
+cache is just a download the next run doesn't have to repeat.
+
+The clean step also gets its own, longer timeout
+(`CLEAN_TIMEOUT_SECONDS`, 300s) than the network-bound fetch/checkout steps
+(`REFRESH_TIMEOUT_SECONDS`, 60s), because it's bound by how fast this
+device can unlink a large number of files. Both halves come from a real,
+every-single-run failure: `Dans-Plugins/dansplugins-dot-com`'s cache clone
+carries a 190MB `node_modules`, which `git clean -fdx` could not remove
+inside the shared 60s timeout, so that repo failed with
+`Command '['git', 'clean', '-fdx']' timed out after 60 seconds` before its
+dispatch could even start.
+
 ### Other flags
 
 - `--model <name>` — override the model `claude` uses (`align`, `tend`, and
@@ -491,7 +543,12 @@ Windows (PowerShell):
     $env:PYTHONPATH = "."; python -m unittest discover -s tests -v
 
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
-`subprocess.run` and never actually invokes `claude`; `tests/test_state.py`
+`subprocess.run` and never actually invokes `claude` — including the
+auth-failure retry policy (`looks_like_auth_failure`'s matching, that the
+retry stops as soon as auth recovers and gives up once the backoff is
+exhausted, and that ordinary failures, timeouts, and successful runs
+quoting an auth-error string are never retried or misclassified), always
+with `sleep_fn` injected so no test actually sleeps; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
@@ -522,9 +579,19 @@ dashboard reads them with) and its
 `random` with an injected `--random-seed` for a deterministic shuffle, both
 asserting the repo-name-keyed resume cursor advances correctly across two
 invocations without disturbing round-robin's own `next_index` in the same
-cursor file) — and, where the budget/headroom logic specifically is under
-test, `time.monotonic` mocked too, so timing assertions never depend on
-wall-clock jitter;
+cursor file) and its auth-abort behavior (that an auth failure stops the
+run rather than dispatching the rest of the garden, that the cursor keeps
+the progress made before the failure but never advances past the repo that
+hit it — asserted for both the positional round-robin cursor and the
+name-keyed strategy cursor — that a dedicated ERROR notification fires
+alongside the batch summary and a failing notifier doesn't crash the run,
+and that an *ordinary* per-repo error still does not abort the batch) — and,
+where the budget/headroom logic specifically is under test,
+`time.monotonic` mocked too, so timing assertions never depend on
+wall-clock jitter. `tests/test_cli.py` also covers the target-repo refresh's
+`git clean` invocation with `_run` mocked (dependency caches excluded via
+`-e`, build outputs still cleaned, the clean step's longer timeout, and a
+failing clean still raising with the full command in the message);
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and

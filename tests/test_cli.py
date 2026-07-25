@@ -14,8 +14,12 @@ from unittest.mock import patch
 
 from gardener import dashboard, dev_loop, garden, merge_allowlist, overnight, repo_lock, state
 from gardener.cli import (
+    CLEAN_TIMEOUT_SECONDS,
+    PRESERVED_DEPENDENCY_DIRS,
+    REFRESH_TIMEOUT_SECONDS,
     REPO_RE,
     TendResult,
+    clone_or_refresh_target_repo,
     _notify_run,
     _record_and_notify,
     _safe_record_run,
@@ -1407,6 +1411,7 @@ class TestCmdOvernight(unittest.TestCase):
             return TendResult(
                 exit_code=1 if errored else 0, ok=not errored,
                 result_text=spec.get("stdout", ""), run=run,
+                auth_failed=bool(spec.get("auth_failed")),
             )
         return fake
 
@@ -1627,6 +1632,237 @@ class TestCmdOvernight(unittest.TestCase):
         with patch("gardener.cli.ThreadPoolExecutor") as mock_pool, redirect_stderr(io.StringIO()):
             cmd_overnight(self._args(hours=8.0, concurrency=1))
         mock_pool.assert_not_called()
+
+
+class TestCloneOrRefreshClean(unittest.TestCase):
+    """The refresh step's `git clean` invocation. `_run` is mocked — these
+    tests never actually run `git`/`gh`.
+
+    Regression coverage for a real, every-single-run failure:
+    Dans-Plugins/dansplugins-dot-com's cache clone carries a 190MB
+    `node_modules`, and `git clean -fdx` could not unlink it inside the
+    60s timeout every refresh command used to share, so that repo failed
+    with `Command '['git', 'clean', '-fdx']' timed out after 60 seconds`
+    before its tend dispatch could even start."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.dest = Path(self._tmpdir.name) / "owner__repo"
+        (self.dest / ".git").mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _refresh(self, mock_run):
+        def fake(argv, cwd=None, timeout=120):
+            stdout = "main\n" if argv[:2] == ["gh", "repo"] else "https://github.com/owner/repo\n"
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=stdout, stderr="")
+
+        mock_run.side_effect = fake
+        with patch("gardener.cli.shutil.which", return_value="/usr/bin/gh"):
+            clone_or_refresh_target_repo("owner/repo", self.dest.parent, refresh=True)
+        return [call.args[0] for call in mock_run.call_args_list]
+
+    def _clean_call(self, mock_run):
+        for call in mock_run.call_args_list:
+            if call.args[0][:2] == ["git", "clean"]:
+                return call
+        self.fail("no `git clean` invocation was made")
+
+    @patch("gardener.cli._run")
+    def test_clean_preserves_dependency_caches(self, mock_run):
+        self._refresh(mock_run)
+        argv = self._clean_call(mock_run).args[0]
+        for preserved in PRESERVED_DEPENDENCY_DIRS:
+            self.assertIn(preserved, argv)
+            self.assertEqual(argv[argv.index(preserved) - 1], "-e")
+
+    @patch("gardener.cli._run")
+    def test_clean_still_removes_everything_else(self, mock_run):
+        # -fdx is retained: the point is to keep dependency caches, not to
+        # stop cleaning. A stale build output must still be removed.
+        self._refresh(mock_run)
+        argv = self._clean_call(mock_run).args[0]
+        self.assertEqual(argv[:3], ["git", "clean", "-fdx"])
+        for build_output in ("build", "target", "dist"):
+            self.assertNotIn(build_output, argv)
+
+    @patch("gardener.cli._run")
+    def test_clean_gets_a_longer_timeout_than_fetch_and_checkout(self, mock_run):
+        self._refresh(mock_run)
+        self.assertEqual(self._clean_call(mock_run).kwargs["timeout"], CLEAN_TIMEOUT_SECONDS)
+        self.assertGreater(CLEAN_TIMEOUT_SECONDS, REFRESH_TIMEOUT_SECONDS)
+        for call in mock_run.call_args_list:
+            if call.args[0][:2] in (["git", "fetch"], ["git", "checkout"]):
+                self.assertEqual(call.kwargs["timeout"], REFRESH_TIMEOUT_SECONDS)
+
+    @patch("gardener.cli._run")
+    def test_a_failing_clean_still_raises_with_the_full_command(self, mock_run):
+        def fake(argv, cwd=None, timeout=120):
+            if argv[:2] == ["git", "clean"]:
+                return subprocess.CompletedProcess(argv, returncode=1, stdout="", stderr="boom")
+            stdout = "main\n" if argv[:2] == ["gh", "repo"] else "https://github.com/owner/repo\n"
+            return subprocess.CompletedProcess(argv, returncode=0, stdout=stdout, stderr="")
+
+        mock_run.side_effect = fake
+        with patch("gardener.cli.shutil.which", return_value="/usr/bin/gh"):
+            with self.assertRaises(RuntimeError) as ctx:
+                clone_or_refresh_target_repo("owner/repo", self.dest.parent, refresh=True)
+        self.assertIn("git clean", str(ctx.exception))
+
+
+class TestCmdOvernightAuthAbort(unittest.TestCase):
+    """An auth failure is device-global, so `cmd_overnight` must stop the
+    whole run and hold its resume cursor back rather than marching the rest
+    of the garden through a credential that's currently broken.
+
+    Regression coverage for a real incident (2026-07-24): twelve of fifteen
+    garden repos failed in under a minute with
+    "Failed to authenticate: OAuth session expired and could not be
+    refreshed", the cursor advanced past all twelve, and those repos went
+    untended for the night even though auth recovered ~20 minutes later."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, strategy="round-robin", concurrency=1):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=concurrency, strategy=strategy, random_seed=None,
+        )
+
+    def _fake_dispatch_tend(self, auth_failures: set):
+        def fake(args):
+            self.calls.append(args.repo)
+            failed = args.repo in auth_failures
+            run = state.Run(
+                repo=args.repo, mode="tend",
+                outcome="error" if failed else "tend",
+                timestamp=state.now_iso(),
+                gap_summary="Failed to authenticate: OAuth session expired" if failed else "",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(
+                exit_code=1 if failed else 0, ok=not failed, run=run, auth_failed=failed,
+            )
+        return fake
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_auth_failure_stops_the_run_instead_of_burning_the_garden(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a"})
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        # owner/b and owner/c were never dispatched — they'd have failed
+        # identically, in seconds, and been marked as attempted.
+        self.assertEqual(self.calls, ["owner/a"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_cursor_is_not_advanced_past_an_auth_failed_repo(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a"})
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        # Still 0: the next invocation retries owner/a rather than skipping it.
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_cursor_keeps_the_progress_made_before_the_auth_failure(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # owner/a tended fine; owner/b then hit the auth wall. The run's real
+        # progress (one repo) is kept, and the cursor stops exactly at the
+        # repo that failed — not before it, not past it.
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/b"})
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        self.assertEqual(self.calls, ["owner/a", "owner/b"])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_auth_abort_fires_a_dedicated_error_notification(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a"})
+        mock_notifier = mock_default_notifier.return_value
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        # Two notifications: the dedicated auth alert plus the usual batch
+        # summary — the summary alone reads as ordinary per-repo errors and
+        # buries the one thing an operator has to act on.
+        self.assertEqual(mock_notifier.notify.call_count, 2)
+        title, message, level = mock_notifier.notify.call_args_list[0].args
+        self.assertIn("authenticate", title.lower())
+        self.assertEqual(level, Level.ERROR)
+        self.assertIn("cursor", message.lower())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_notifier_failure_on_the_abort_path_does_not_crash_the_run(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a"})
+        mock_default_notifier.return_value.notify.side_effect = RuntimeError("webhook down")
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_non_auth_error_does_not_abort_the_run(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # The complement of the above: an ordinary per-repo failure is local
+        # to that repo, so the rest of the garden must still be tended.
+        def fake(args):
+            self.calls.append(args.repo)
+            failed = args.repo == "owner/a"
+            run = state.Run(
+                repo=args.repo, mode="tend", outcome="error" if failed else "tend",
+                timestamp=state.now_iso(), gap_summary="the build broke" if failed else "",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=1 if failed else 0, ok=not failed, run=run)
+
+        mock_dispatch_tend.side_effect = fake
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        self.assertEqual(self.calls, ["owner/a", "owner/b", "owner/c"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_name_based_cursor_drops_only_the_auth_failed_repo(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # For the name-keyed strategies the cursor is a set, not a position,
+        # so it can be exact: the repo that tended fine stays recorded as
+        # attempted and only the auth-failed one is left for the next run.
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/b"})
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(strategy="random", concurrency=2))
+        attempted = overnight.read_attempted(path=self.cursor_file)
+        self.assertNotIn("owner/b", attempted)
+        for repo in self.calls:
+            if repo != "owner/b":
+                self.assertIn(repo, attempted)
 
 
 class TestCmdOvernightStrategies(unittest.TestCase):

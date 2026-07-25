@@ -237,6 +237,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -276,6 +277,50 @@ TEND_DEFAULT_TIMEOUT_SECONDS = 2700
 # cover repo exploration + writing one skill file, which is lighter than
 # either align's gap analysis or a full tend cycle.
 CREATE_DEV_LOOP_TIMEOUT_SECONDS = 900
+
+# Substrings that identify a failed dispatch as an *auth* failure — the
+# `claude` CLI could not authenticate at all, so the run never started and
+# nothing about the target repo caused it. Matched case-insensitively
+# against both the parsed `result` text and stderr, since which of the two
+# carries the message depends on whether claude got far enough to emit its
+# JSON envelope (the 2026-07-24 occurrence below produced JSON with
+# `is_error` set and this text in `result`, cost 0.0).
+#
+# Grounded in a real, observed failure, not invented defensively: on
+# 2026-07-24 19:14-19:15, twelve of the fifteen repos in an `overnight`
+# batch failed in under 60 seconds total, every one of them with exit code
+# 1, cost $0.00, a 2.2-5.5s duration, and the exact string
+# "Failed to authenticate: OAuth session expired and could not be
+# refreshed". Auth recovered on its own by 19:36 and the remaining repos
+# tended normally. Keep these patterns broad (substring, not anchored) —
+# the CLI's exact wording is not a stable contract, and a missed match
+# costs a whole overnight batch while a false positive costs one retry.
+AUTH_FAILURE_MARKERS = (
+    "failed to authenticate",
+    "oauth session expired",
+    "please run /login",
+    "invalid api key",
+    "authentication_error",
+)
+
+# Bounded retry for an auth failure inside a single dispatch. Deliberately
+# modest: this covers a brief token-refresh blip, NOT a long outage. The
+# real protection against a long one is `cmd_overnight` aborting the batch
+# without advancing its resume cursor, so the next invocation picks up at
+# the repo that failed rather than 12 repos past it — retrying here for the
+# full ~20 minutes the 2026-07-24 outage actually lasted would just burn the
+# night's budget sitting in a sleep loop.
+AUTH_RETRY_BACKOFF_SECONDS = (30, 120, 300)
+
+
+def looks_like_auth_failure(result_text: str, stderr: str) -> bool:
+    """Whether a *failed* dispatch failed for auth reasons. Callers must
+    only consult this for a run that already failed — a successful run's
+    output could legitimately quote one of these strings (a repo whose code
+    or docs mention `invalid api key`, say) and must never be reclassified
+    as an auth failure because of it."""
+    haystack = f"{result_text}\n{stderr}".lower()
+    return any(marker in haystack for marker in AUTH_FAILURE_MARKERS)
 
 
 class Mode(str, Enum):
@@ -473,6 +518,13 @@ class DispatchResult:
     permission_denials: list
     is_error: bool
     timed_out: bool = False
+    # True only for a failed run whose failure was `claude` being unable to
+    # authenticate (see `looks_like_auth_failure`). Distinguishes "this
+    # device's credentials are currently broken, and every other repo in
+    # this batch is about to fail identically" from "this repo's tend cycle
+    # went wrong", which callers must handle very differently — see
+    # `cli.py`'s `cmd_overnight`.
+    auth_failed: bool = False
 
 
 def _build_invocation(
@@ -521,8 +573,12 @@ def run_claude(
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     mode_spec: Optional[ModeSpec] = None,
+    auth_backoff_seconds: tuple[int, ...] = AUTH_RETRY_BACKOFF_SECONDS,
+    sleep_fn=time.sleep,
 ) -> DispatchResult:
-    """Dispatch one headless `claude -p` run and block until it finishes.
+    """Dispatch one headless `claude -p` run and block until it finishes,
+    retrying a limited number of times if — and only if — the run failed
+    because `claude` could not authenticate.
 
     `mode_spec` is required for Mode.TEND (build it with `tend_mode_spec()`
     first, since its allowed_tools varies per invocation) and optional for
@@ -533,7 +589,48 @@ def run_claude(
     result, or a timeout) is reported back in DispatchResult rather than
     raised, since "the run happened but found a problem" is a normal
     outcome gardener needs to log, not an exceptional one.
+
+    Auth failures are the one exception to "report, don't retry": they say
+    nothing about the target repo, they're frequently transient (see
+    `AUTH_FAILURE_MARKERS` for the real occurrence this is calibrated
+    against), and they fail in seconds, so a retry is cheap and a
+    non-retried one throws away a whole dispatch slot. Only auth failures
+    are retried — a repo whose tend cycle genuinely failed, or timed out,
+    must NOT be re-dispatched here, since a 45-minute tend that failed
+    halfway has already mutated its branch and would need triage, not a
+    blind second run. `auth_backoff_seconds`/`sleep_fn` are injectable so
+    tests never actually sleep.
     """
+    attempts = len(auth_backoff_seconds) + 1
+    for attempt in range(attempts):
+        result = _run_claude_once(
+            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec
+        )
+        if not result.auth_failed or attempt == attempts - 1:
+            return result
+        delay = auth_backoff_seconds[attempt]
+        print(
+            f"gardener: dispatch failed to authenticate (attempt {attempt + 1}/{attempts}) — "
+            f"retrying in {delay}s",
+            file=sys.stderr,
+        )
+        sleep_fn(delay)
+    return result  # unreachable; the loop always returns
+
+
+def _run_claude_once(
+    mode: Mode,
+    prompt: str,
+    cwd: Path,
+    add_dirs: Optional[list[Path]] = None,
+    model: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    mode_spec: Optional[ModeSpec] = None,
+) -> DispatchResult:
+    """One single `claude -p` invocation, with no retry — `run_claude`'s
+    body before auth retries were added, unchanged apart from setting
+    `auth_failed`. Kept separate so the retry policy above is readable on
+    its own and testable without re-mocking the whole subprocess layer."""
     if shutil.which(CLAUDE_BIN) is None:
         raise DispatchError(
             f"`{CLAUDE_BIN}` not found on PATH — install Claude Code CLI first"
@@ -585,6 +682,9 @@ def run_claude(
         parsed = None
 
     if parsed is None:
+        # No JSON envelope at all — claude died early enough that whatever
+        # went wrong is only on stderr (or in unparseable stdout), which is
+        # exactly where an auth failure lands in that case.
         return DispatchResult(
             ok=False,
             result_text="",
@@ -596,12 +696,15 @@ def run_claude(
             session_id=None,
             permission_denials=[],
             is_error=True,
+            auth_failed=looks_like_auth_failure(stdout, proc.stderr or ""),
         )
 
     is_error = bool(parsed.get("is_error"))
+    ok = proc.returncode == 0 and not is_error
+    result_text = parsed.get("result", "")
     return DispatchResult(
-        ok=(proc.returncode == 0 and not is_error),
-        result_text=parsed.get("result", ""),
+        ok=ok,
+        result_text=result_text,
         raw_stdout=stdout,
         stderr=proc.stderr or "",
         exit_code=proc.returncode,
@@ -610,4 +713,6 @@ def run_claude(
         session_id=parsed.get("session_id"),
         permission_denials=parsed.get("permission_denials", []),
         is_error=is_error,
+        # Guarded on `not ok` deliberately — see `looks_like_auth_failure`.
+        auth_failed=(not ok) and looks_like_auth_failure(result_text, proc.stderr or ""),
     )
