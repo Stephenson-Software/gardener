@@ -274,8 +274,8 @@ to my garden while I sleep" entry point:
 2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**
    (calls `_dispatch_tend` directly, no `gardener` subprocess-of-itself) for
    each garden repo, in batches of `--concurrency` repos at a time (default
-   `1`, i.e. strictly one after another — unchanged from before this flag
-   existed), starting from wherever the *previous* `overnight` run left off
+   `2`; pass `--concurrency 1` for strictly one after another), starting
+   from wherever the *previous* `overnight` run left off
    (see "Resuming across nights" below), until either the garden is
    exhausted for this run or the time budget runs out. Repos within a batch
    run concurrently on a `ThreadPoolExecutor` (stdlib-only) when
@@ -284,8 +284,9 @@ to my garden while I sleep" entry point:
    dispatch](#why-synchronous-dispatch)), now several running in parallel
    OS processes rather than one at a time. This device has no true process
    isolation and real, shared CPU/RAM (see the "no true always-on daemon
-   guarantee" caveat below) — `--concurrency` stays `1` unless you
-   explicitly raise it with that tradeoff in mind.
+   guarantee" caveat below) — `2` is a deliberately modest default, and
+   raising it further is a decision to make with that tradeoff in mind, not
+   a free speedup.
 3. `--allow-merge` is passed unconditionally to every dispatch. This is
    safe *without* `overnight` needing any merge-decision logic of its own:
    `tend`'s own `merge_eligible()` check still requires the target repo to
@@ -307,15 +308,15 @@ to my garden while I sleep" entry point:
    more repos than the naive arithmetic would suggest. A repo already in
    progress is never hard-killed mid-run to respect the budget; the budget
    only gates whether a *new* repo is started.
-5. **Repo-selection strategy (`--strategy`, default `round-robin`).** Picks
+5. **Repo-selection strategy (`--strategy`, default `random`).** Picks
    which order this run attempts the garden in — see `gardener/overnight.py`'s
    `Strategy` enum for the pluggable `garden -> ordered list[str]`-shaped
    implementations:
-   - **`round-robin`** (default, byte-for-byte the original and only
-     behavior before this flag existed — existing cron/devsrv invocations
-     that never pass `--strategy` see no change): the alphabetically-sorted
-     garden, rotated to start wherever the *previous* run's resume cursor
-     left off.
+   - **`round-robin`** (byte-for-byte the original and only behavior before
+     this flag existed, and the default until the garden grew past a size
+     where a fixed rotation kept pairing the same neighbours in a batch):
+     the alphabetically-sorted garden, rotated to start wherever the
+     *previous* run's resume cursor left off.
    - **`issue-count`**: sorts the garden descending by each repo's live
      open-GitHub-issue count (`gh issue list --state open`, one call per
      garden repo — `cli.py`'s `fetch_issue_counts`), so repos with more
@@ -672,20 +673,19 @@ correctly avoided repeating it) rather than either strategy's automated
 coverage (fully mocked `gh`/deterministic seeded shuffle) standing in for
 this on its own.
 
-**`--concurrency > 1` specifically** has not yet had its own real,
-end-to-end verification run on this device as of this writing (see Project
-Status) — the automated suite covers the orchestration logic (batching,
-per-batch ordering, one repo's crash not aborting the batch) with
-`_dispatch_tend` mocked, but real concurrent `claude -p` processes
-contending for this device's actual CPU/RAM is a different thing to
-confirm than mocked logic. Before relying on `--concurrency > 1` in an
-unattended overnight run, do a small real check first: `--hours 0.1
---concurrency 2` against a garden of 2 low-stakes repos, confirming both
-dispatch, both get their own per-repo notification, and neither's recorded
-`state.Run`/notification data is corrupted or swapped with the other's
-(the exact failure mode the old `redirect_stdout`-based capture would have
-been vulnerable to — see [issue
-#15](https://github.com/dmccoystephenson/gardener/issues/15)).
+**`--concurrency > 1` specifically** has now had real, unattended
+end-to-end exercise on this device: the `gardener-overnight` devsrv
+service ran `--hours 6 --concurrency 3` against the then-15-repo garden on
+2026-07-25, dispatching all 15 in batches of 3 (11 PRs opened, 4 errored,
+one Discord summary). Concurrent dispatch itself held up — no repo's
+recorded `state.Run` or notification was swapped with another's (the
+failure mode the old `redirect_stdout`-based capture would have been
+vulnerable to — see [issue
+#15](https://github.com/dmccoystephenson/gardener/issues/15)). What
+remains unverified is only the *upper bound*: how far concurrency can be
+raised on this device before real CPU/RAM contention starts degrading
+dispatches, which is why the default is a conservative `2` rather than
+the `3` that run happened to use.
 
 **Alerting**: `DiscordNotifier` is covered by mocked unit tests (see
 above) rather than a real Discord send in the automated suite — same
