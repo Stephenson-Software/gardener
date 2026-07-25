@@ -120,14 +120,21 @@ record what you actually observed before changing the docstring's claims.
 - **Automated:** `PYTHONPATH=. python3 -m unittest discover -s tests -v`.
   `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir.
-  `test_cli.py` covers argument parsing, prompt templating, `cmd_tend` with
+  `test_cli.py` covers argument parsing (including `repo_arg`, the
+  `type=` callable that rejects a malformed `--repo` at parse time on
+  `align`/`tend`/`allowlist add`/`garden add` — but deliberately not on
+  the `remove` subcommands, which must stay able to delete an
+  already-malformed entry), prompt templating, `cmd_tend` with
   clone/dispatch mocked, `fetch_open_issue_count`/`fetch_issue_counts` (the
   `issue-count` strategy's `gh`-calling side) with `_run` mocked the same
   way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
   `_dispatch_tend` mocked (including its `--concurrency` batching — one
   test asserts every repo in a `ThreadPoolExecutor`-dispatched batch is
   still attempted regardless of completion order, another asserts
-  `concurrency=1` never touches `ThreadPoolExecutor` at all; and its
+  `concurrency=1` never touches `ThreadPoolExecutor` at all, and a third
+  feeds `cmd_overnight`'s real captured stderr through
+  `dashboard.parse_batch_progress` so the progress lines it emits and the
+  regex the dashboard parses them with can't drift apart; and its
   `--strategy` selection — `issue-count` with `fetch_issue_counts` mocked,
   `random` with an injected `--random-seed` for a deterministic shuffle,
   and both asserting the repo-name-keyed resume cursor advances correctly
