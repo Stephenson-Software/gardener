@@ -368,6 +368,12 @@ class RepoOutcome:
     pr_merged: bool = False
     decision_needed: bool = False
     gap_summary: str = ""
+    # Set by `cli.py`'s `_dispatch_one_for_overnight` from the dispatch's
+    # own `auth_failed` signal rather than inferred from `gap_summary` text
+    # here — this is a fact the dispatch layer already established (see
+    # `dispatch.looks_like_auth_failure`), not something to re-derive by
+    # pattern-matching a summary string a second time.
+    auth_failed: bool = False
 
 
 def classify_outcome(repo: str, run: Optional[state.Run], result_text: str) -> RepoOutcome:
