@@ -550,7 +550,11 @@ exhausted, and that ordinary failures, timeouts, and successful runs
 quoting an auth-error string are never retried or misclassified), always
 with `sleep_fn` injected so no test actually sleeps; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
-parsing, prompt templating, `_notify_run`'s severity mapping (mocking the
+parsing (including `repo_arg`, the `type=` callable that rejects a
+malformed `--repo` as a usage error at parse time on `align`/`tend`/
+`allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
+`status --repo` deliberately still accept one), prompt templating,
+`_notify_run`'s severity mapping (mocking the
 notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
 clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`
 wiring, and exit codes), `cmd_status`'s own rendering (empty-history
@@ -566,7 +570,11 @@ same way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
 `_dispatch_tend` itself mocked — including its `--concurrency` batching
 (one test asserts every repo in a `ThreadPoolExecutor`-dispatched batch
 still gets attempted regardless of completion order, another asserts
-`concurrency=1` never touches `ThreadPoolExecutor` at all) and its
+`concurrency=1` never touches `ThreadPoolExecutor` at all, and a third
+feeds `cmd_overnight`'s real captured stderr through
+`dashboard.parse_batch_progress` so the two log shapes it emits — `N/T`
+sequential and `N-M/T` concurrent — can't drift away from the regex the
+dashboard reads them with) and its
 `--strategy` selection (`issue-count` with `fetch_issue_counts` mocked,
 `random` with an injected `--random-seed` for a deterministic shuffle, both
 asserting the repo-name-keyed resume cursor advances correctly across two

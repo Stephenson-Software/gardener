@@ -1,5 +1,6 @@
 """argparse-based CLI: `gardener align`, `gardener tend`,
-`gardener allowlist`, and `gardener status`.
+`gardener allowlist`, `gardener garden`, `gardener overnight`,
+`gardener status`, `gardener tail-transcript`, and `gardener dashboard`.
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
@@ -70,6 +71,26 @@ CLEAN_TIMEOUT_SECONDS = 300
 # *standard* ignore rules, not the ones given explicitly with `-e`), which
 # is what makes this work without giving up the rest of the clean.
 PRESERVED_DEPENDENCY_DIRS = ("node_modules", ".venv", "venv", ".gradle")
+
+
+def repo_arg(value: str) -> str:
+    """argparse `type=` for every `--repo` that names a repo gardener will
+    act on (`align`, `tend`, `allowlist add`, `garden add`), so a typo is
+    rejected as a normal usage error at parse time rather than hours later
+    in an unattended `overnight` run — or, for the allow-list, never: an
+    entry that can't match is a repo the operator believes is
+    merge-authorized while `merge_eligible()` silently returns False.
+
+    Deliberately not applied to `allowlist remove` / `garden remove`:
+    removing an entry that is *already* malformed (hand-edited into the
+    JSON, or added before this validation existed) has to stay possible.
+    `clone_or_refresh_target_repo`'s own check stays as the backstop for
+    callers that never go through argparse — `cmd_overnight`'s synthetic
+    Namespace in `_dispatch_one_for_overnight`, and a hand-edited
+    `garden.json`."""
+    if not REPO_RE.match(value):
+        raise argparse.ArgumentTypeError(f"must look like owner/name, got: {value!r}")
+    return value
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
@@ -1057,7 +1078,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     align = sub.add_parser("align", help="Audit (and optionally fix) a target repo's alignment gaps")
-    align.add_argument("--repo", required=True, help="owner/name of the target GitHub repo")
+    align.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the target GitHub repo")
     group = align.add_mutually_exclusive_group()
     group.add_argument(
         "--implement", action="store_true",
@@ -1087,7 +1108,7 @@ def build_parser() -> argparse.ArgumentParser:
         "tend",
         help="Dispatch a target repo's own *-dev-loop skill (generating one first if needed)",
     )
-    tend.add_argument("--repo", required=True, help="owner/name of the target GitHub repo")
+    tend.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the target GitHub repo")
     tend.add_argument(
         "--allow-merge", action="store_true",
         help="Permit `gh pr merge` this run — still requires --repo be in the merge allow-list "
@@ -1113,7 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
     allowlist_list.set_defaults(func=cmd_allowlist)
 
     allowlist_add = allowlist_sub.add_parser("add", help="Add a repo to the allow-list")
-    allowlist_add.add_argument("--repo", required=True, help="owner/name of the repo to allow")
+    allowlist_add.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the repo to allow")
     allowlist_add.add_argument("--allowlist-path", dest="allowlist_path", type=Path, default=None, help=argparse.SUPPRESS)
     allowlist_add.set_defaults(func=cmd_allowlist)
 
@@ -1132,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
     garden_list.set_defaults(func=cmd_garden)
 
     garden_add = garden_sub.add_parser("add", help="Add a repo to the garden")
-    garden_add.add_argument("--repo", required=True, help="owner/name of the repo to tend overnight")
+    garden_add.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the repo to tend overnight")
     garden_add.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     garden_add.set_defaults(func=cmd_garden)
 

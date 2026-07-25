@@ -38,6 +38,7 @@ from gardener.cli import (
     fetch_open_issue_count,
     find_orphaned_pr,
     merge_eligible,
+    repo_arg,
 )
 from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, DispatchResult, Mode
 from gardener.notify import Level
@@ -333,6 +334,65 @@ class TestRepoRegex(unittest.TestCase):
     def test_rejects_flag_injection_attempts(self):
         for bad in ["--upload-pack=x/y", "/leading-slash", "owner/", "owner/--evil"]:
             self.assertIsNone(REPO_RE.match(bad), bad)
+
+
+class TestRepoArg(unittest.TestCase):
+    """`repo_arg` is the argparse `type=` wrapper around REPO_RE; it must
+    raise ArgumentTypeError (which argparse turns into a usage error)
+    rather than ValueError, and must return the value unchanged."""
+
+    def test_returns_a_valid_value_unchanged(self):
+        self.assertEqual(repo_arg("dmccoystephenson/gardener"), "dmccoystephenson/gardener")
+
+    def test_raises_argument_type_error_for_a_malformed_value(self):
+        for bad in ["just-a-name", "owner/", "--upload-pack=x/y", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                repo_arg(bad)
+
+
+class TestRepoValidationAtParseTime(unittest.TestCase):
+    """A typo'd --repo must be rejected as a usage error (exit 2) before
+    any lock/network/dispatch work — and before it can be written into the
+    garden or merge allow-list, where it would otherwise sit until an
+    unattended run reached it (or, for the allow-list, never match at
+    all)."""
+
+    def setUp(self):
+        self.parser = build_parser()
+
+    def _assert_usage_error(self, argv):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                self.parser.parse_args(argv)
+        self.assertEqual(ctx.exception.code, 2, argv)
+
+    def test_align_rejects_malformed_repo(self):
+        self._assert_usage_error(["align", "--repo", "gardener"])
+
+    def test_tend_rejects_malformed_repo(self):
+        self._assert_usage_error(["tend", "--repo", "gardener"])
+
+    def test_allowlist_add_rejects_malformed_repo(self):
+        self._assert_usage_error(["allowlist", "add", "--repo", "gardener"])
+
+    def test_garden_add_rejects_malformed_repo(self):
+        self._assert_usage_error(["garden", "add", "--repo", "gardener"])
+
+    def test_remove_subcommands_still_accept_a_malformed_repo(self):
+        # An entry hand-edited into the JSON (or added before this
+        # validation existed) has to stay removable.
+        for argv in (
+            ["allowlist", "remove", "--repo", "malformed-entry"],
+            ["garden", "remove", "--repo", "malformed-entry"],
+        ):
+            args = self.parser.parse_args(argv)
+            self.assertEqual(args.repo, "malformed-entry")
+
+    def test_status_repo_filter_is_not_validated(self):
+        # `status --repo` only filters already-recorded history; it never
+        # dispatches, so a malformed value is a no-match, not an error.
+        args = self.parser.parse_args(["status", "--repo", "malformed-entry"])
+        self.assertEqual(args.repo, "malformed-entry")
 
 
 class TestPromptTemplating(unittest.TestCase):
@@ -1408,6 +1468,38 @@ class TestCmdOvernight(unittest.TestCase):
         # a full cycle was consumed -> cursor wraps back to the start
         self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
         mock_default_notifier.return_value.notify.assert_called_once()
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_progress_lines_are_parseable_by_the_dashboard(self, mock_dispatch_tend, mock_default_notifier):
+        # The dashboard's BATCH_RE reads these exact lines out of the log,
+        # so the two are a producer/consumer contract — asserting against
+        # cmd_overnight's *real* stderr (not a hand-copied fixture) is what
+        # catches the two drifting apart, which is how the sequential
+        # `N/T` form went unparsed for every default-concurrency run.
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+        outcomes = {r: {} for r in ("owner/a", "owner/b", "owner/c")}
+
+        for concurrency, expected in ((1, [(1, 1, 3), (2, 2, 3), (3, 3, 3)]),
+                                      (2, [(1, 2, 3), (3, 3, 3)])):
+            with self.subTest(concurrency=concurrency):
+                self.calls.clear()
+                overnight.write_cursor(0, path=self.cursor_file)
+                mock_dispatch_tend.side_effect = self._fake_dispatch_tend(outcomes)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    cmd_overnight(self._args(hours=8.0, concurrency=concurrency))
+
+                batch_lines = [
+                    line for line in stderr.getvalue().splitlines()
+                    if "candidates this run" in line
+                ]
+                self.assertEqual(len(batch_lines), len(expected))
+                self.assertEqual(
+                    [dashboard.parse_batch_progress([line]) for line in batch_lines],
+                    expected,
+                )
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.time.monotonic")
