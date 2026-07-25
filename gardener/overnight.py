@@ -95,6 +95,13 @@ history) — so both non-round-robin strategies still guarantee every garden
 repo gets attempted at least once per cycle, the same fairness guarantee
 round-robin's rotation already provided, just keyed by name instead of
 position so a re-sort or a reshuffle can never point it at the wrong repo.
+
+**When the cursor is written** is `cli.py`'s `cmd_overnight` (see its
+`persist_cursor`), not this module's business — but it matters to
+everything above: both writers are called after *every batch*, so a run
+killed mid-garden keeps the progress it already made. Writing once at the
+end of the run instead is what made the whole resume mechanism a no-op for
+the runs that most needed it (issue #42).
 """
 from __future__ import annotations
 
@@ -182,17 +189,37 @@ def read_cursor(path: Optional[Path] = None) -> int:
     return idx if isinstance(idx, int) and idx >= 0 else 0
 
 
+def _write_cursor_file(path: Path, data: dict) -> None:
+    """Replace the cursor file atomically: write a sibling temp file, then
+    `os.replace` it into place (atomic within a filesystem, which a sibling
+    in the same directory guarantees).
+
+    A plain `write_text` truncates first and writes second, so a process
+    killed in between leaves a torn or empty file — which both readers
+    treat as "no cursor at all" (`_load_cursor_file`), i.e. silently
+    restarting the cycle. That window used to be hit at most once per run;
+    now that `cmd_overnight` persists after every batch (issue #42), it
+    would be open once per batch instead, on a device whose defining
+    trait is killing processes without warning. Trading one more small
+    file write for a cursor that is either the old value or the new one,
+    never a half-written one, is the whole point of writing per batch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data) + "\n")
+    os.replace(tmp, path)
+
+
 def write_cursor(index: int, path: Optional[Path] = None) -> None:
     """`round-robin`-only. Merges into the existing cursor file rather than
     overwriting it outright, so a previous `--strategy issue-count`/
     `random` run's own `attempted` field (see `write_attempted`) survives a
     later round-robin run untouched — each strategy only ever touches its
-    own key in this shared file."""
+    own key in this shared file. Written atomically — see
+    `_write_cursor_file`."""
     path = path or default_cursor_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = _load_cursor_file(path)
     data["next_index"] = index
-    path.write_text(json.dumps(data) + "\n")
+    _write_cursor_file(path, data)
 
 
 def read_attempted(path: Optional[Path] = None) -> list[str]:
@@ -213,12 +240,11 @@ def read_attempted(path: Optional[Path] = None) -> list[str]:
 def write_attempted(names: list[str], path: Optional[Path] = None) -> None:
     """`issue-count`/`random`-only. Merges into the existing cursor file the
     same way `write_cursor` does, so it never clobbers round-robin's own
-    `next_index` field."""
+    `next_index` field. Written atomically — see `_write_cursor_file`."""
     path = path or default_cursor_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = _load_cursor_file(path)
     data["attempted"] = names
-    path.write_text(json.dumps(data) + "\n")
+    _write_cursor_file(path, data)
 
 
 def batch_repos(order: list[str], concurrency: int) -> list[list[str]]:

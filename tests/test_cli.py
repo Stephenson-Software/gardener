@@ -1872,6 +1872,115 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
                 self.assertIn(repo, attempted)
 
 
+class TestCmdOvernightCursorSurvivesAKill(unittest.TestCase):
+    """The resume cursor must be current after every *batch*, not only after
+    the loop finishes — on this device a long run is more likely to be killed
+    mid-garden (Android kills background processes on a task swipe-away) than
+    to reach the end of its loop.
+
+    Regression coverage for a real incident (2026-07-25, issue #42): a run
+    tended six repos between 19:12 and 19:43, was killed, and the run that
+    autostart brought back at 19:56 logged "0 repo(s) already attempted this
+    cycle" against a cursor whose mtime was still 06:25 — none of the six had
+    ever been persisted, so the cycle restarted from zero.
+
+    A kill is simulated with a `BaseException` (what a real signal-driven
+    teardown looks like from inside the loop) that `_dispatch_one_for_overnight`'s
+    `except Exception` deliberately does not catch, so it propagates out of
+    `cmd_overnight` exactly as a kill would — the post-loop code never runs.
+    Every assertion here fails against the pre-fix write-once-at-the-end code."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+        for repo in ("owner/a", "owner/b", "owner/c", "owner/d"):
+            garden.add(repo, path=self.garden_file)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, strategy="round-robin", concurrency=1):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=concurrency, strategy=strategy, random_seed=1234,
+        )
+
+    def _dispatch_until_killed(self, kill_on: str):
+        """Tends normally until `kill_on` is dispatched, then dies the way a
+        killed process does — no cleanup, no post-loop cursor write."""
+        def fake(args):
+            if args.repo == kill_on:
+                raise KeyboardInterrupt("simulated task-swipe kill")
+            self.calls.append(args.repo)
+            run = state.Run(
+                repo=args.repo, mode="tend", outcome="tend",
+                timestamp=state.now_iso(), gap_summary="",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, run=run)
+        return fake
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_round_robin_cursor_keeps_repos_finished_before_a_kill(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._dispatch_until_killed("owner/c")
+        with redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            cmd_overnight(self._args())
+        self.assertEqual(self.calls, ["owner/a", "owner/b"])
+        # Points at owner/c — the two finished repos are not re-tended, and
+        # the one that was in flight when the kill landed still is.
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 2)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_name_keyed_cursor_keeps_repos_finished_before_a_kill(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._dispatch_until_killed("owner/c")
+        with redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            cmd_overnight(self._args(strategy="random"))
+        self.assertTrue(self.calls, "expected at least one repo before the kill")
+        attempted = overnight.read_attempted(path=self.cursor_file)
+        self.assertEqual(attempted, self.calls)
+        self.assertNotIn("owner/c", attempted)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_persistence_is_per_batch_not_mid_batch(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # Killed inside the *second* batch: the first batch's two repos are
+        # persisted, and the second batch's other repo — which may well have
+        # finished concurrently — is deliberately not, since a partially
+        # completed batch is re-attempted whole (re-tending is idempotent
+        # enough; silently skipping a repo is not).
+        mock_dispatch_tend.side_effect = self._dispatch_until_killed("owner/c")
+        with redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            cmd_overnight(self._args(concurrency=2))
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 2)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_a_kill_before_the_first_batch_completes_leaves_the_cursor_alone(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        overnight.write_cursor(1, path=self.cursor_file)
+        mock_dispatch_tend.side_effect = self._dispatch_until_killed("owner/b")
+        with redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            cmd_overnight(self._args())
+        # Started at owner/b and never finished it: nothing to record, and
+        # nothing lost either — the cursor stays exactly where it was.
+        self.assertEqual(self.calls, [])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
+
+
 class TestCmdOvernightStrategies(unittest.TestCase):
     """cmd_overnight's --strategy wiring: issue-count sorts by a mocked
     fetch_issue_counts (never invokes `gh`), random uses an injectable seed
