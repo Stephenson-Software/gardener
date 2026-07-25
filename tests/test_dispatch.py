@@ -16,6 +16,7 @@ from gardener.dispatch import (
     DispatchError,
     Mode,
     _build_invocation,
+    looks_like_auth_failure,
     run_claude,
     tend_mode_spec,
 )
@@ -263,6 +264,144 @@ class TestRunClaude(unittest.TestCase):
         # it doesn't know or care how the dispatch turns out.
         run_claude(Mode.REPORT, "prompt", Path("/tmp"), timeout=5)
         mock_watcher.assert_called_once()
+
+
+# The exact text observed on 2026-07-24 when twelve of fifteen overnight
+# repos failed in under a minute — see AUTH_FAILURE_MARKERS. Kept verbatim
+# here rather than paraphrased so these tests stay anchored to a real
+# failure rather than to the matcher's own wording.
+REAL_AUTH_FAILURE_TEXT = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+class TestLooksLikeAuthFailure(unittest.TestCase):
+    def test_matches_the_real_observed_failure_text(self):
+        self.assertTrue(looks_like_auth_failure(REAL_AUTH_FAILURE_TEXT, ""))
+
+    def test_matches_regardless_of_which_stream_carried_it(self):
+        self.assertTrue(looks_like_auth_failure("", REAL_AUTH_FAILURE_TEXT))
+
+    def test_match_is_case_insensitive(self):
+        self.assertTrue(looks_like_auth_failure(REAL_AUTH_FAILURE_TEXT.upper(), ""))
+
+    def test_ordinary_failure_text_is_not_an_auth_failure(self):
+        self.assertFalse(
+            looks_like_auth_failure("tests failed: 3 assertions in test_foo.py", "npm ERR!")
+        )
+
+
+class TestAuthFailureRetry(unittest.TestCase):
+    """`run_claude` retries an auth failure and nothing else. `sleep_fn` is
+    always injected here — these tests must never actually sleep."""
+
+    def setUp(self):
+        self.slept = []
+
+    def _auth_failure(self):
+        return _fake_completed(
+            {"result": REAL_AUTH_FAILURE_TEXT, "is_error": True, "total_cost_usd": 0.0},
+            returncode=1,
+        )
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_auth_failure_is_flagged_on_the_result(self, mock_run, _which):
+        mock_run.return_value = self._auth_failure()
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.auth_failed)
+        self.assertFalse(result.ok)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_retries_until_backoff_is_exhausted_then_gives_up(self, mock_run, _which):
+        mock_run.return_value = self._auth_failure()
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1, 2, 3), sleep_fn=self.slept.append,
+        )
+        # 3 backoff entries => 4 total attempts, sleeping between each pair.
+        self.assertEqual(mock_run.call_count, 4)
+        self.assertEqual(self.slept, [1, 2, 3])
+        self.assertTrue(result.auth_failed)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_stops_retrying_as_soon_as_auth_recovers(self, mock_run, _which):
+        mock_run.side_effect = [
+            self._auth_failure(),
+            self._auth_failure(),
+            _fake_completed({"result": "GARDENER_SUMMARY: done", "is_error": False}),
+        ]
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1, 2, 3), sleep_fn=self.slept.append,
+        )
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(self.slept, [1, 2])
+        self.assertTrue(result.ok)
+        self.assertFalse(result.auth_failed)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_ordinary_failure_is_never_retried(self, mock_run, _which):
+        # The important half of the policy: a tend cycle that genuinely
+        # failed has already mutated its branch, so a blind second run is
+        # exactly the wrong response — only auth failures are retried.
+        mock_run.return_value = _fake_completed(
+            {"result": "the build broke", "is_error": True}, returncode=1
+        )
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1, 2, 3), sleep_fn=self.slept.append,
+        )
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(self.slept, [])
+        self.assertFalse(result.auth_failed)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
+    def test_timeout_is_not_treated_as_an_auth_failure(self, mock_run, _which):
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"), timeout=5,
+            auth_backoff_seconds=(1, 2, 3), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.timed_out)
+        self.assertFalse(result.auth_failed)
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_successful_run_quoting_an_auth_string_is_not_an_auth_failure(self, mock_run, _which):
+        # A repo whose own code or docs mention these strings must not have
+        # its successful tend reclassified — hence the `not ok` guard.
+        mock_run.return_value = _fake_completed({
+            "result": f"Documented the '{REAL_AUTH_FAILURE_TEXT}' error path",
+            "is_error": False,
+        })
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1,), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.ok)
+        self.assertFalse(result.auth_failed)
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_auth_failure_detected_without_a_json_envelope(self, mock_run, _which):
+        # claude dying before it emits any JSON — the message is only on
+        # stderr in that case, which is still an auth failure.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=1, stdout="", stderr=REAL_AUTH_FAILURE_TEXT
+        )
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1,), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.auth_failed)
+        self.assertEqual(mock_run.call_count, 2)
 
 
 if __name__ == "__main__":

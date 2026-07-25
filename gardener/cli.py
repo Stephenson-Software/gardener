@@ -28,6 +28,7 @@ from typing import Optional
 
 from gardener import conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, state, transcript
 from gardener.dispatch import (
+    AUTH_RETRY_BACKOFF_SECONDS,
     CREATE_DEV_LOOP_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
     TEND_DEFAULT_TIMEOUT_SECONDS,
@@ -38,6 +39,37 @@ from gardener.dispatch import (
 )
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Per-command timeouts for the cache-clone refresh in
+# `clone_or_refresh_target_repo`. The fetch/checkout steps are
+# network/index-bound and short; `git clean` is bound by how fast this
+# device can unlink a large number of files, which is a different order of
+# magnitude — see PRESERVED_DEPENDENCY_DIRS below for the real failure that
+# separated these two.
+REFRESH_TIMEOUT_SECONDS = 60
+CLEAN_TIMEOUT_SECONDS = 300
+
+# Directories `git clean -fdx` is told to leave alone during a refresh.
+#
+# These are dependency caches: large, expensive to recreate, never part of
+# the repo's source, and — unlike a build output directory — not something
+# a stale copy of can meaningfully corrupt the next run's results. Build
+# outputs (`build/`, `target/`, `dist/`) are deliberately NOT listed; those
+# still get cleaned, since a stale one leaking into a later run is exactly
+# what the `-x` clean is here to prevent.
+#
+# Grounded in a real, repeating failure: Dans-Plugins/dansplugins-dot-com
+# failed every single overnight run with `Command '['git', 'clean',
+# '-fdx']' timed out after 60 seconds` — its cache clone carries a 190MB
+# `node_modules` (194MB of a 194MB checkout), and unlinking that many files
+# on this device's proot filesystem does not finish in 60s. Preserving it
+# fixes the timeout and, as a bonus, saves the dispatched run from
+# reinstalling the same dependencies on every single tend.
+#
+# `-e` patterns are still honored when `-x` is passed (`-x` discards the
+# *standard* ignore rules, not the ones given explicitly with `-e`), which
+# is what makes this work without giving up the rest of the clean.
+PRESERVED_DEPENDENCY_DIRS = ("node_modules", ".venv", "venv", ".gradle")
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
@@ -135,16 +167,22 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
                 f"cache dir {dest} exists but its origin doesn't match {repo} — refusing to reuse it"
             )
         default_branch = _default_branch_name(repo)
-        for cmd in (
-            ["git", "fetch", "--depth", "1", "origin", default_branch],
+        clean_cmd = ["git", "clean", "-fdx"]
+        for keep in PRESERVED_DEPENDENCY_DIRS:
+            clean_cmd += ["-e", keep]
+        for cmd, cmd_timeout in (
+            (["git", "fetch", "--depth", "1", "origin", default_branch], REFRESH_TIMEOUT_SECONDS),
             # -B (create-or-reset) rather than plain checkout: correctly
             # lands on a clean copy of the default branch regardless of
             # what was checked out before (a different branch, a detached
             # HEAD, or the default branch itself but stale/dirty).
-            ["git", "checkout", "-B", default_branch, f"origin/{default_branch}"],
-            ["git", "clean", "-fdx"],
+            (
+                ["git", "checkout", "-B", default_branch, f"origin/{default_branch}"],
+                REFRESH_TIMEOUT_SECONDS,
+            ),
+            (clean_cmd, CLEAN_TIMEOUT_SECONDS),
         ):
-            res = _run(cmd, cwd=dest, timeout=60)
+            res = _run(cmd, cwd=dest, timeout=cmd_timeout)
             if res.returncode != 0:
                 raise RuntimeError(f"refresh of {dest} failed at `{' '.join(cmd)}`: {res.stderr.strip()}")
     return dest
@@ -449,6 +487,9 @@ class TendResult:
     cost_usd: Optional[float] = None
     permission_denials: list = field(default_factory=list)
     timed_out: bool = False
+    # Propagated straight from `DispatchResult.auth_failed` — see its
+    # comment there and `cmd_overnight`, which stops the whole batch on it.
+    auth_failed: bool = False
 
 
 def _dispatch_tend(args: argparse.Namespace) -> TendResult:
@@ -648,6 +689,7 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
         cost_usd=result.cost_usd,
         permission_denials=result.permission_denials,
         timed_out=result.timed_out,
+        auth_failed=result.auth_failed,
     )
 
 
@@ -733,7 +775,23 @@ def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnigh
     except Exception as e:  # noqa: BLE001 - one repo's crash must not abort the batch
         print(f"gardener: overnight: {repo} raised an unexpected error: {e}", file=sys.stderr)
         return overnight.RepoOutcome(repo=repo, errored=True, gap_summary=str(e))
-    return overnight.classify_outcome(repo, result.run, result.result_text)
+    outcome = overnight.classify_outcome(repo, result.run, result.result_text)
+    outcome.auth_failed = result.auth_failed
+    return outcome
+
+
+def _first_auth_failure_index(outcomes: list) -> int:
+    """Position of the first auth-failed repo in `outcomes`, which is
+    maintained in the same order as this run's `order` list (batches are
+    dispatched in order and each batch's outcomes are re-sorted back into
+    `repo_batch` order — see `cmd_overnight`), so this doubles as the number
+    of repos the round-robin resume cursor may safely advance by. Returns
+    `len(outcomes)` if nothing auth-failed, i.e. "advance past all of them",
+    matching the non-abort path."""
+    for i, outcome in enumerate(outcomes):
+        if outcome.auth_failed:
+            return i
+    return len(outcomes)
 
 
 def cmd_overnight(args: argparse.Namespace) -> int:
@@ -840,6 +898,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     outcomes: list[overnight.RepoOutcome] = []
     start_time = time.monotonic()
     attempted = 0
+    aborted_on_auth = False
     for repo_batch in overnight.batch_repos(order, concurrency):
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
@@ -872,7 +931,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         if len(repo_batch) == 1:
             # No thread pool at all for the (default) concurrency=1 path —
             # byte-for-byte the same call sequence overnight has always made.
-            outcomes.append(_dispatch_one_for_overnight(repo_batch[0], args))
+            batch_outcomes = [_dispatch_one_for_overnight(repo_batch[0], args)]
         else:
             with ThreadPoolExecutor(max_workers=len(repo_batch)) as pool:
                 futures = {
@@ -882,14 +941,45 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                 results_by_repo = {futures[f]: f.result() for f in as_completed(futures)}
             # Preserve repo_batch's order in `outcomes`, not completion order,
             # so the batch summary's per-repo list stays deterministic.
-            outcomes.extend(results_by_repo[repo] for repo in repo_batch)
+            batch_outcomes = [results_by_repo[repo] for repo in repo_batch]
+        outcomes.extend(batch_outcomes)
         attempted += len(repo_batch)
 
+        # An auth failure is global to this device, not specific to the repo
+        # that hit it: every remaining repo in the garden is about to fail
+        # the same way, in seconds, for free. Stop the run instead of
+        # marching the whole garden through a broken credential — this is
+        # what turned a ~20-minute credential blip on 2026-07-24 into 12 of
+        # 15 repos being burned in under a minute, cursor advanced past all
+        # of them, with the garden then untended until the next night.
+        if any(o.auth_failed for o in batch_outcomes):
+            aborted_on_auth = True
+            print(
+                "gardener: overnight aborting — the dispatched run could not authenticate "
+                f"(after {len(AUTH_RETRY_BACKOFF_SECONDS)} retries). "
+                "Not advancing the resume cursor past the affected repo(s); re-run "
+                "`gardener overnight` once credentials work again (`claude` may just need "
+                "a fresh login) and it will pick up where this run stopped.",
+                file=sys.stderr,
+            )
+            break
+
     if strategy is overnight.Strategy.ROUND_ROBIN:
-        next_index = (start_index + attempted) % len(garden_list)
+        # On an auth abort, advance only as far as the LAST repo that got a
+        # real attempt before the first auth failure — a bare index can't
+        # express "skip the middle one", so anything at or after the first
+        # auth-failed repo is left to be re-attempted next run. With
+        # concurrency > 1 that can mean re-tending a repo later in the same
+        # batch that did succeed; re-tending is idempotent enough (it's just
+        # another cycle) and far cheaper than silently skipping a repo.
+        advanced = _first_auth_failure_index(outcomes) if aborted_on_auth else attempted
+        next_index = (start_index + advanced) % len(garden_list)
         overnight.write_cursor(next_index, path=cursor_path)
     else:
-        newly_attempted = [outcome.repo for outcome in outcomes]
+        # Here the cursor is a set of repo names rather than a position, so
+        # it can be precise: drop exactly the auth-failed repos and keep
+        # every genuinely-attempted one, whatever order they ran in.
+        newly_attempted = [outcome.repo for outcome in outcomes if not outcome.auth_failed]
         updated_attempted = overnight.next_attempted(attempted_before, cycle_reset, newly_attempted)
         overnight.write_attempted(updated_attempted, path=cursor_path)
 
@@ -897,6 +987,21 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     skipped = len(order) - attempted
     summary = overnight.build_batch_summary(outcomes, elapsed_total, skipped)
     print(f"gardener: overnight done — {summary.message}", file=sys.stderr)
+    if aborted_on_auth:
+        # Sent in addition to (not instead of) the batch summary below: the
+        # summary reports what this run did, which on an auth abort reads as
+        # a pile of ordinary per-repo errors and buries the one thing an
+        # operator actually has to act on.
+        try:
+            notify.default_notifier().notify(
+                "gardener overnight: ABORTED — could not authenticate",
+                f"{skipped} repo(s) left untended and the resume cursor was held back so they "
+                "aren't skipped. Check that `claude` is still logged in, then re-run "
+                "`gardener overnight`.",
+                notify.Level.ERROR,
+            )
+        except Exception as e:  # noqa: BLE001 - the alert must never fail the run it reports on
+            print(f"gardener: overnight abort notification failed (non-fatal): {e}", file=sys.stderr)
     try:
         notify.default_notifier().notify(summary.title, summary.message, summary.level)
     except Exception as e:  # noqa: BLE001 - the batch summary alert must never fail the run it reports on
