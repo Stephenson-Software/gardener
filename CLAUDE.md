@@ -141,8 +141,11 @@ record what you actually observed before changing the docstring's claims.
   `random` with an injected `--random-seed` for a deterministic shuffle,
   and both asserting the repo-name-keyed resume cursor advances correctly
   across two invocations without disturbing round-robin's own `next_index`
-  in the same cursor file) and `time.monotonic` mocked for the
-  budget-specific assertions.
+  in the same cursor file; plus its cursor durability under a simulated
+  kill — a `BaseException` from the mocked dispatch, so `cmd_overnight`'s
+  post-loop code never runs and only per-batch persistence can satisfy the
+  assertion) and `time.monotonic` mocked for the budget-specific
+  assertions.
   `test_dev_loop.py` covers slug derivation and prompt content,
   `test_merge_allowlist.py` covers the allow-list's JSON read/write, and
   `test_garden.py`/`test_overnight.py` cover the garden JSON list and

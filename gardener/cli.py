@@ -930,6 +930,49 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     start_time = time.monotonic()
     attempted = 0
     aborted_on_auth = False
+
+    def persist_cursor() -> None:
+        """Write the resume cursor for everything attempted so far.
+
+        Called after *every* batch, not once at the end of the run, because
+        on this device a long `overnight` run is more likely to be killed
+        mid-garden (Android kills every background process when UserLand is
+        swiped away — see `~/.claude/CLAUDE.md`) than to reach the end of
+        its loop. A cursor written only after the loop is a cursor that
+        exists mainly for the runs that didn't need it: the 2026-07-25 run
+        tended 6 repos, was killed, and the next run started the cycle over
+        from zero because none of those 6 had ever been persisted (issue
+        #42). Writing per batch is what makes README's "a run that gets
+        interrupted partway through the garden doesn't lose progress on the
+        repos it already finished" actually true.
+
+        Both branches are computed from the accumulated `outcomes`/
+        `attempted` rather than just this batch's, so this is idempotent —
+        calling it again after the loop rewrites the same values. The
+        auth-abort rule is unchanged and simply applies as of whatever has
+        been attempted at call time.
+        """
+        if strategy is overnight.Strategy.ROUND_ROBIN:
+            # On an auth abort, advance only as far as the LAST repo that got
+            # a real attempt before the first auth failure — a bare index
+            # can't express "skip the middle one", so anything at or after
+            # the first auth-failed repo is left to be re-attempted next run.
+            # With concurrency > 1 that can mean re-tending a repo later in
+            # the same batch that did succeed; re-tending is idempotent
+            # enough (it's just another cycle) and far cheaper than silently
+            # skipping a repo.
+            advanced = _first_auth_failure_index(outcomes) if aborted_on_auth else attempted
+            overnight.write_cursor((start_index + advanced) % len(garden_list), path=cursor_path)
+        else:
+            # Here the cursor is a set of repo names rather than a position,
+            # so it can be precise: drop exactly the auth-failed repos and
+            # keep every genuinely-attempted one, whatever order they ran in.
+            newly_attempted = [outcome.repo for outcome in outcomes if not outcome.auth_failed]
+            overnight.write_attempted(
+                overnight.next_attempted(attempted_before, cycle_reset, newly_attempted),
+                path=cursor_path,
+            )
+
     for repo_batch in overnight.batch_repos(order, concurrency):
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
@@ -975,6 +1018,14 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             batch_outcomes = [results_by_repo[repo] for repo in repo_batch]
         outcomes.extend(batch_outcomes)
         attempted += len(repo_batch)
+        aborted_on_auth = any(outcome.auth_failed for outcome in batch_outcomes)
+
+        # Persisted here, before the abort branch below acts on it, because
+        # `persist_cursor` reads `aborted_on_auth` to decide how far the
+        # cursor may advance — writing first and classifying after would
+        # advance it straight past the repos that just failed to
+        # authenticate, which is the exact 2026-07-24 failure #38 fixed.
+        persist_cursor()
 
         # An auth failure is global to this device, not specific to the repo
         # that hit it: every remaining repo in the garden is about to fail
@@ -983,8 +1034,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         # what turned a ~20-minute credential blip on 2026-07-24 into 12 of
         # 15 repos being burned in under a minute, cursor advanced past all
         # of them, with the garden then untended until the next night.
-        if any(o.auth_failed for o in batch_outcomes):
-            aborted_on_auth = True
+        if aborted_on_auth:
             print(
                 "gardener: overnight aborting — the dispatched run could not authenticate "
                 f"(after {len(AUTH_RETRY_BACKOFF_SECONDS)} retries). "
@@ -995,24 +1045,11 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             )
             break
 
-    if strategy is overnight.Strategy.ROUND_ROBIN:
-        # On an auth abort, advance only as far as the LAST repo that got a
-        # real attempt before the first auth failure — a bare index can't
-        # express "skip the middle one", so anything at or after the first
-        # auth-failed repo is left to be re-attempted next run. With
-        # concurrency > 1 that can mean re-tending a repo later in the same
-        # batch that did succeed; re-tending is idempotent enough (it's just
-        # another cycle) and far cheaper than silently skipping a repo.
-        advanced = _first_auth_failure_index(outcomes) if aborted_on_auth else attempted
-        next_index = (start_index + advanced) % len(garden_list)
-        overnight.write_cursor(next_index, path=cursor_path)
-    else:
-        # Here the cursor is a set of repo names rather than a position, so
-        # it can be precise: drop exactly the auth-failed repos and keep
-        # every genuinely-attempted one, whatever order they ran in.
-        newly_attempted = [outcome.repo for outcome in outcomes if not outcome.auth_failed]
-        updated_attempted = overnight.next_attempted(attempted_before, cycle_reset, newly_attempted)
-        overnight.write_attempted(updated_attempted, path=cursor_path)
+    # Rewrites what the last batch already persisted, except in the one case
+    # the loop never reached a batch at all (an empty garden order, or no
+    # budget headroom even for the first repo) — there the cursor still needs
+    # its no-op refresh to preserve the pre-per-batch-persistence behavior.
+    persist_cursor()
 
     elapsed_total = time.monotonic() - start_time
     skipped = len(order) - attempted

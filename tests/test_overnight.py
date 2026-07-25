@@ -8,6 +8,7 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from gardener import overnight, state
 from gardener.notify import Level
@@ -53,6 +54,25 @@ class TestCursor(unittest.TestCase):
         overnight.write_cursor(2, path=self.path)
         raw = json.loads(self.path.read_text())
         self.assertEqual(raw, {"next_index": 2})
+
+    def test_a_write_killed_before_it_lands_leaves_the_old_cursor_intact(self):
+        """The cursor is replaced atomically, so a process killed mid-write
+        leaves the previous value readable rather than a truncated file that
+        both readers would treat as "no cursor at all" — i.e. as a silent
+        restart of the cycle. Matters because `cmd_overnight` now writes
+        after every batch (issue #42), so this window would otherwise be
+        open once per batch on a device that kills processes without
+        warning."""
+        overnight.write_cursor(4, path=self.path)
+        with patch("gardener.overnight.os.replace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                overnight.write_cursor(9, path=self.path)
+        self.assertEqual(overnight.read_cursor(path=self.path), 4)
+
+    def test_no_temp_file_is_left_behind(self):
+        overnight.write_cursor(1, path=self.path)
+        siblings = sorted(p.name for p in self.path.parent.iterdir())
+        self.assertEqual(siblings, ["cursor.json"])
 
 
 class TestAttemptedCursor(unittest.TestCase):

@@ -354,6 +354,18 @@ to my garden while I sleep" entry point:
    between runs never clobbers the other strategy's own progress — round-
    robin's index and issue-count/random's attempted-name list simply sit
    side by side, each only ever read/written by its own strategy.
+   **The cursor is written after every batch, not once when the run
+   finishes** (`cmd_overnight`'s `persist_cursor`). On this device that's
+   the difference between a working resume and a decorative one: a long
+   run is more likely to be killed mid-garden than to reach the end of its
+   loop, and a cursor written only at the end is lost in exactly that case
+   — a run that tended six repos on 2026-07-25 was killed, and the next
+   run restarted the cycle from zero because none of the six had been
+   persisted ([issue #42](https://github.com/dmccoystephenson/gardener/issues/42)).
+   Persistence is per *batch*, so a batch interrupted partway is
+   re-attempted whole rather than having its finished repos recorded
+   individually — re-tending is idempotent enough, and this keeps the
+   round-robin index's "advance by N repos" meaning intact.
 7. **Notifications.** Each repo's own outcome is logged and alerted via the
    *existing* `state.record_run`/`_notify_run` machinery `_dispatch_tend`
    already uses (unchanged, and safe to call from more than one thread at
@@ -586,7 +598,13 @@ the progress made before the failure but never advances past the repo that
 hit it — asserted for both the positional round-robin cursor and the
 name-keyed strategy cursor — that a dedicated ERROR notification fires
 alongside the batch summary and a failing notifier doesn't crash the run,
-and that an *ordinary* per-repo error still does not abort the batch) — and,
+and that an *ordinary* per-repo error still does not abort the batch) and
+its cursor durability under a kill (a `BaseException` raised from the
+mocked dispatch, which `_dispatch_one_for_overnight`'s `except Exception`
+deliberately doesn't catch, so `cmd_overnight`'s post-loop code never runs
+— the closest a unit test gets to this device's real task-swipe kill, and
+what distinguishes per-batch persistence from the write-once-at-the-end
+version that lost a whole run's progress) — and,
 where the budget/headroom logic specifically is under test,
 `time.monotonic` mocked too, so timing assertions never depend on
 wall-clock jitter. `tests/test_cli.py` also covers the target-repo refresh's
