@@ -45,7 +45,10 @@ DEFAULT_PORT = 8765
 
 TENDING_RE = re.compile(r"^gardener: tending (\S+) \(allow_merge=")
 NOTIFY_RE = re.compile(r"^notify: sent to Discord: gardener (\S+): (?:MUTATION — |FAILED — )?(.+)$")
-BATCH_RE = re.compile(r"\((\d+)-(\d+)/(\d+) candidates this run")
+# Both shapes `cmd_overnight` emits: the `N-M/T` range form for a
+# concurrent batch, and the bare `N/T` form for the (default) sequential
+# `--concurrency 1` run, where the batch is a single repo.
+BATCH_RE = re.compile(r"\((\d+)(?:-(\d+))?/(\d+) candidates this run")
 
 
 def default_logs_dir(state_dir: Optional[Path] = None) -> Path:
@@ -136,10 +139,14 @@ def _safe_list(fn) -> list:
 
 
 def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
-    """(range_start, range_end, total) from the most recent 'N-M/T
-    candidates this run' line `cmd_overnight` prints, or None if this log
-    has no such line (e.g. a plain `tend --repo` dispatch, not
-    `overnight`)."""
+    """(range_start, range_end, total) from the most recent 'candidates
+    this run' line `cmd_overnight` prints, or None if this log has no such
+    line (e.g. a plain `tend --repo` dispatch, not `overnight`).
+
+    `cmd_overnight` prints two shapes: 'N-M/T' for a concurrent batch, and
+    a bare 'N/T' for the default `--concurrency 1` run, whose batch is one
+    repo. The latter is read as a batch of one (`end = start`), so the
+    common sequential case renders progress rather than nothing."""
     match = None
     for line in lines:
         m = BATCH_RE.search(line)
@@ -147,7 +154,9 @@ def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
             match = m
     if match is None:
         return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) is not None else start
+    return (start, end, int(match.group(3)))
 
 
 def build_status(
@@ -340,8 +349,13 @@ async function refresh() {
   `;
 
   const bp = data.batch_progress;
+  // A default (--concurrency 1) run reports a batch of one, where start
+  // and end are the same candidate — read as a range it says "3–3".
+  const bpLabel = !bp ? "" : bp.start === bp.end
+    ? `candidate ${bp.start}`
+    : `candidates ${bp.start}–${bp.end}`;
   document.getElementById("batch").innerHTML = bp
-    ? `<div class="sub">candidates ${bp.start}–${bp.end} of ${bp.total} this run</div>
+    ? `<div class="sub">${bpLabel} of ${bp.total} this run</div>
        <div class="progress-bar"><div style="width:${Math.min(100, 100 * bp.end / bp.total)}%"></div></div>`
     : `<div class="empty">no overnight batch in this log</div>`;
 
