@@ -833,14 +833,16 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     garden.py's module docstring) — being in the garden alone never
     authorizes a merge.
 
-    Dispatches in batches of `args.concurrency` repos (default 1, i.e.
-    today's exact sequential behavior) via `_dispatch_one_for_overnight`,
+    Dispatches in batches of `args.concurrency` repos (default
+    `overnight.DEFAULT_OVERNIGHT_CONCURRENCY`; pass 1 for strictly
+    sequential dispatch) via `_dispatch_one_for_overnight`,
     run concurrently within a batch on a `ThreadPoolExecutor` when
     `concurrency > 1` — see that function's docstring and `overnight.py`'s
     `batch_repos` for why this is safe now that `_dispatch_tend` returns a
     `TendResult` instead of `cmd_overnight` needing to capture stdout.
 
-    `args.strategy` (default `round-robin`, see `overnight.Strategy` and its
+    `args.strategy` (default `overnight.DEFAULT_OVERNIGHT_STRATEGY`, see
+    `overnight.Strategy` and its
     module docstring's "Repo-selection strategies and the resume cursor"
     section) picks this run's ordering function and, correspondingly, which
     half of the resume-cursor file it reads/writes: `round-robin` uses
@@ -878,7 +880,9 @@ def cmd_overnight(args: argparse.Namespace) -> int:
 
     budget_seconds = args.hours * 3600
     cursor_path = args.cursor_file or overnight.default_cursor_path()
-    strategy = overnight.Strategy(getattr(args, "strategy", overnight.Strategy.ROUND_ROBIN.value))
+    strategy = overnight.Strategy(
+        getattr(args, "strategy", None) or overnight.DEFAULT_OVERNIGHT_STRATEGY.value
+    )
 
     start_index: Optional[int] = None
     attempted_before: list[str] = []
@@ -915,7 +919,13 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    concurrency = max(1, getattr(args, "concurrency", 1) or 1)
+    # An absent attribute (a synthetic Namespace, not the real parser) falls
+    # back to the default; an explicit 0/negative is still clamped to 1
+    # rather than silently widening to the default.
+    requested_concurrency = getattr(args, "concurrency", None)
+    if requested_concurrency is None:
+        requested_concurrency = overnight.DEFAULT_OVERNIGHT_CONCURRENCY
+    concurrency = max(1, requested_concurrency)
     outcomes: list[overnight.RepoOutcome] = []
     start_time = time.monotonic()
     attempted = 0
@@ -950,7 +960,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         if len(repo_batch) == 1:
-            # No thread pool at all for the (default) concurrency=1 path —
+            # No thread pool at all for the concurrency=1 path —
             # byte-for-byte the same call sequence overnight has always made.
             batch_outcomes = [_dispatch_one_for_overnight(repo_batch[0], args)]
         else:
@@ -1172,23 +1182,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     overnight_parser.add_argument("--model", default=None, help="Model override passed through to each dispatched tend run")
     overnight_parser.add_argument(
-        "--concurrency", type=int, default=1,
-        help="How many repos to tend at once (default 1, i.e. today's sequential "
-             "behavior). Raising this dispatches that many `claude -p` sessions "
-             "simultaneously via separate OS processes/threads — mind this "
-             "device's real CPU/RAM limits before raising it for an unattended run.",
+        "--concurrency", type=int, default=overnight.DEFAULT_OVERNIGHT_CONCURRENCY,
+        help=f"How many repos to tend at once (default "
+             f"{overnight.DEFAULT_OVERNIGHT_CONCURRENCY}). Each one dispatches a "
+             "`claude -p` session simultaneously via separate OS "
+             "processes/threads — mind this device's real CPU/RAM limits before "
+             "raising it further for an unattended run; pass 1 for strictly "
+             "sequential dispatch.",
     )
     overnight_parser.add_argument(
         "--strategy", choices=[s.value for s in overnight.Strategy],
-        default=overnight.Strategy.ROUND_ROBIN.value,
-        help="Repo selection order for this run (default round-robin, preserving "
-             "prior behavior for existing cron/devsrv invocations). round-robin "
-             "rotates the alphabetically-sorted garden from where the last run left "
-             "off. issue-count sorts descending by each repo's live open-GitHub-issue "
-             "count (one `gh` call per garden repo). random reshuffles the garden "
-             "fresh every run. issue-count/random resume by repo name rather than "
-             "list position, since their ordering isn't stable across runs — see "
-             "README's Overnight section.",
+        default=overnight.DEFAULT_OVERNIGHT_STRATEGY.value,
+        help=f"Repo selection order for this run (default "
+             f"{overnight.DEFAULT_OVERNIGHT_STRATEGY.value}). random reshuffles the "
+             "garden fresh every run. round-robin rotates the alphabetically-sorted "
+             "garden from where the last run left off. issue-count sorts descending "
+             "by each repo's live open-GitHub-issue count (one `gh` call per garden "
+             "repo). issue-count/random resume by repo name rather than list "
+             "position, since their ordering isn't stable across runs — this keeps "
+             "the same every-repo-per-cycle guarantee round-robin has; see README's "
+             "Overnight section.",
     )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
