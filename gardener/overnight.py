@@ -128,6 +128,25 @@ class Strategy(str, Enum):
 # empty, how ever long that takes" if `--hours` is omitted.
 DEFAULT_OVERNIGHT_HOURS = 8.0
 
+# Two repos at a time. This device has no true process isolation and real,
+# shared CPU/RAM (see README's "no true always-on daemon guarantee"
+# caveat), so this is a deliberately modest step up from strictly
+# sequential rather than "as wide as the garden is long" — a batch is still
+# bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS either way (see
+# `batch_repos`), so the budget arithmetic is unaffected by this default.
+DEFAULT_OVERNIGHT_CONCURRENCY = 2
+
+# Reshuffle every run rather than always walking the garden in the same
+# alphabetical rotation. Both defaults changed together deliberately: with
+# `round-robin`, a repo's *position* in the sorted garden decided which
+# repos shared a concurrent batch and which got reached on a short night,
+# so the same neighbours were tended together every time. `random` costs
+# nothing in fairness — it resumes by repo name, not list position, so the
+# "every garden repo is attempted at least once per cycle" guarantee
+# round-robin's rotation provided still holds (see the resume-cursor
+# section of this module's docstring above).
+DEFAULT_OVERNIGHT_STRATEGY = Strategy.RANDOM
+
 
 def default_cursor_path() -> Path:
     override = os.environ.get("GARDENER_STATE_DIR")

@@ -194,9 +194,15 @@ class TestOvernightArgParsing(unittest.TestCase):
         args = self.parser.parse_args(["overnight"])
         self.assertFalse(hasattr(args, "repo"))
 
-    def test_strategy_defaults_to_round_robin(self):
+    def test_strategy_defaults_to_random(self):
         args = self.parser.parse_args(["overnight"])
-        self.assertEqual(args.strategy, overnight.Strategy.ROUND_ROBIN.value)
+        self.assertEqual(args.strategy, overnight.DEFAULT_OVERNIGHT_STRATEGY.value)
+        self.assertEqual(args.strategy, overnight.Strategy.RANDOM.value)
+
+    def test_concurrency_defaults_to_two(self):
+        args = self.parser.parse_args(["overnight"])
+        self.assertEqual(args.concurrency, overnight.DEFAULT_OVERNIGHT_CONCURRENCY)
+        self.assertEqual(args.concurrency, 2)
 
     def test_strategy_accepts_issue_count_and_random(self):
         for value in ("issue-count", "random"):
@@ -1623,10 +1629,11 @@ class TestCmdOvernight(unittest.TestCase):
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli._dispatch_tend")
     def test_concurrency_one_never_touches_a_thread_pool(self, mock_dispatch_tend, mock_default_notifier):
-        """Default concurrency=1 must take the exact pre-concurrency
-        sequential path (no ThreadPoolExecutor at all) — a regression here
-        would mean every existing cron invocation silently starts paying
-        thread-pool overhead it never asked for."""
+        """An explicit `--concurrency 1` must take the exact pre-concurrency
+        sequential path (no ThreadPoolExecutor at all) — this is no longer
+        the default (see `DEFAULT_OVERNIGHT_CONCURRENCY`), so it is now the
+        opt-out an operator picks deliberately, and it has to keep working
+        as the genuine zero-overhead sequential path it always was."""
         garden.add("owner/a", path=self.garden_file)
         mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a": {}})
         with patch("gardener.cli.ThreadPoolExecutor") as mock_pool, redirect_stderr(io.StringIO()):

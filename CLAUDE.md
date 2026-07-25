@@ -34,7 +34,9 @@ logic, `cli.py`'s `cmd_overnight` for the real orchestration) dispatches
 `tend --allow-merge` in-process across that list within a time budget,
 resuming across invocations via a small cursor file when the garden is
 bigger than one budget window. `--strategy round-robin|issue-count|random`
-(default `round-robin`, unchanged behavior) picks the attempt order —
+(default `random`, see `overnight.DEFAULT_OVERNIGHT_STRATEGY`) picks the
+attempt order, and `--concurrency` (default `2`, see
+`overnight.DEFAULT_OVERNIGHT_CONCURRENCY`) how many repos share a batch —
 `overnight.py`'s `Strategy` enum and its module docstring's "Repo-selection
 strategies and the resume cursor" section is the source of truth for how
 each one works and, critically, why the resume cursor is keyed differently
