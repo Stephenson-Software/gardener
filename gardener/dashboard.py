@@ -4,6 +4,12 @@ whichever `tend`/`overnight` log file was written to most recently) so a
 human doesn't have to poll `gardener status` or tail log files by hand to
 see what an unattended run is doing.
 
+The log file this reads is written by `run_log.py`, which tees a
+dispatching run's stderr narration into `<state>/logs/`. Both modules
+resolve that directory independently; `tests/test_run_log.py` asserts they
+agree, because when they didn't, every live panel here rendered empty
+forever without anything failing.
+
 Stdlib-only (`http.server`), matching gardener's own stdlib-only rule (see
 CLAUDE.md) — no Flask/FastAPI, no new dependency. Read-only: this module
 never writes anything gardener itself owns (state db, garden/allow-list
