@@ -139,8 +139,7 @@ class TestPromptBuilding(unittest.TestCase):
         prompt = dev_loop.build_tend_prompt(
             "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False
         )
-        self.assertIn("do not treat the", prompt)
-        self.assertIn("missing Review object", prompt)
+        self.assertIn("missing Review object as a blocked decision", prompt)
 
     def test_tend_prompt_overrides_hardcoded_working_directory(self):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
