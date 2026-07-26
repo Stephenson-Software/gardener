@@ -155,6 +155,13 @@ record what you actually observed before changing the docstring's claims.
   `random.Random`, never the module's global functions), and
   `resume_order`/`next_attempted` (the name-keyed cursor's cycle-completion
   and reset logic) — none of these invoke `claude`, `git`, or `gh` either.
+  `test_run_log.py` covers the stderr tee (both destinations written,
+  stderr restored even on a `BaseException`, unopenable log degrading to a
+  warning rather than failing the run), log pruning, and — most
+  importantly — the round trip: real `cli.py` progress lines written
+  through the tee and read back out by `dashboard.parse_in_progress`/
+  `parse_batch_progress`, so the writing and reading halves can't drift
+  apart again.
   `test_transcript.py` covers `encode_cwd` against the two real,
   empirically-confirmed examples in `transcript.py`'s module docstring
   (never invented ones — if `claude`'s actual encoding rule ever changes,
@@ -240,5 +247,6 @@ target-repo alignment rules, not just the ones it enforces on others.
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
 | `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
 | README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path, the exact `devsrv` invocation) and still states the "no true always-on daemon guarantee on this device" caveat plainly, not oversold |
+| `run_log.py` module docstring | The logs-dir path it writes to still matches the one `dashboard.py` reads from, and the `.log` filename suffix still matches `find_active_log`'s glob — `tests/test_run_log.py` guards both, so treat a failure there as the docs being wrong, not the test |
 | `transcript.py` module docstring | The transcript-path encoding rule (`encode_cwd`) still matches a real `claude -p` session's actual `~/.claude/projects/<encoded-cwd>/` directory naming — re-verify against a real dispatch (not assumption) before trusting the old notes if this ever seems off |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |

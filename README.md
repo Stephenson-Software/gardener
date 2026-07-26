@@ -128,8 +128,9 @@ gardener dashboard [--port N]
   `http://127.0.0.1:8765`, binds loopback-only — see `dashboard.py`'s
   module docstring, there is no authentication) with the same run history
   `gardener status` prints, plus the garden list, the merge allow-list, and
-  a live-updating tail of whichever `tend`/`overnight` log file was most
-  recently written to (auto-refreshes every 4s; "currently tending" is a
+  a live-updating tail of whichever `tend`/`overnight` run log was most
+  recently written to (see [Run logs](#run-logs) — a dispatching run writes
+  one itself; auto-refreshes every 4s; "currently tending" is a
   best-effort parse of that log's own progress lines, not a second source
   of truth — `gardener status`'s sqlite db remains the one authoritative
   outcome record). If `--port` is already bound (e.g. a previous
@@ -549,6 +550,34 @@ tail a live `tend` dispatch's transcript, now a permanent, tested part of
 gardener. Without `-f` it dumps whatever's in the file right now and exits
 (safe to run against a still-in-progress dispatch); with `-f` it keeps
 reading as the file grows, like `tail -f`, until interrupted.
+
+#### Run logs
+
+`align`, `tend`, and `overnight` also mirror their own stderr narration to
+a run log at `~/.local/state/gardener/logs/<command>-<YYYYmmdd-HHMMSS>.log`
+(`run_log.py`; the path is printed as the run's first line). This is what
+makes the dashboard's live panels work at all: those panels are built by
+re-reading gardener's `gardener: tending ...` / `overnight dispatching ...
+(N-M/T candidates this run ...)` / `notify: sent to Discord: ...` progress
+lines back out of "the active log", and before this existed no such file
+was ever written — so for any run not launched in a terminal someone was
+already watching (i.e. every unattended run, the entire case the dashboard
+exists for) "Tonight", "Currently tending", and "Live log" were
+permanently empty while "Recent runs" kept working off the SQLite history.
+
+It is a tee, not a redirect: stderr still goes to wherever it already went,
+so running a dispatch in a terminal looks exactly as it did before.
+Gardener writes this file itself rather than the dashboard learning where
+some external process supervisor happens to capture stderr — that would
+have been a smaller change, but it would make gardener's own live
+visibility depend on being launched by one specific outside tool. Nothing
+in gardener knows how its process was started.
+
+The newest `run_log.DEFAULT_KEEP` (30) logs are retained, pruned once per
+run; the run's own log is always the newest and so is never the file
+deleted. A log that can't be opened (read-only state dir, out of disk)
+prints one warning and the run continues without one — logging must never
+be able to fail a dispatch.
 
 ## Support
 
@@ -1115,9 +1144,15 @@ gardener/
     transcript.py    — live transcript-file discovery (encoding rule + bounded
                        poll, run from a background thread `dispatch.run_claude`
                        starts) and the `gardener tail-transcript` pretty-printer
+    run_log.py       — tees a dispatching run's stderr narration to
+                       <state>/logs/<command>-<stamp>.log, which is the file
+                       dashboard.py's live panels read back (see Run logs)
+    dashboard.py     — read-only stdlib http.server UI over the run history,
+                       garden/allow-list files, and the active run log
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests (state, cli parsing/templating/notify-severity,
-                       mocked dispatch, notify, garden, overnight, transcript)
+                       mocked dispatch, notify, garden, overnight, transcript,
+                       run_log, dashboard)
 ```
 
 ## Relationship to dms-conventions
