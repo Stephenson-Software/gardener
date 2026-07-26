@@ -127,7 +127,9 @@ gardener dashboard [--port N]
 - **`gardener dashboard [--port N]`** — serves a small web page (default
   `http://127.0.0.1:8765`, binds loopback-only — see `dashboard.py`'s
   module docstring, there is no authentication) with the same run history
-  `gardener status` prints, plus the garden list, the merge allow-list, and
+  `gardener status` prints, plus the [garden view](#the-garden-view) (the
+  garden list and the merge allow-list joined with each repo's stats, as a
+  table or as a plot of plants) and
   a live-updating tail of whichever `tend`/`overnight` run log was most
   recently written to (see [Run logs](#run-logs) — a dispatching run writes
   one itself; auto-refreshes every 4s; "currently tending" is a
@@ -587,6 +589,57 @@ deleted. A log that can't be opened (read-only state dir, out of disk)
 prints one warning and the run continues without one — logging must never
 be able to fail a dispatch.
 
+### The garden view
+
+The dashboard's garden panel used to be two panels: one listing the garden,
+one listing the merge allow-list, both as bare repo pills. Once both lists
+were opted in garden-wide that was the same ~32 repo names printed twice,
+and neither answered the question actually worth asking — *how is each repo
+doing?*
+
+They're now one panel, built by `dashboard.build_garden_rows()`: one row per
+repo opted in to either list, joined with that repo's all-time run history
+from `state.repo_stats()`. Merge-allow-list membership is a column
+(`can_merge`), not a second list. A repo on the allow-list but *not* in the
+garden still gets a row, flagged — that mismatch means something is
+permitted to merge that `overnight` will never dispatch, which is exactly
+the kind of thing a list of names printed twice was hiding.
+
+The panel renders those rows two ways, toggled in the page (the choice is
+remembered in `localStorage`):
+
+- **Table** — repo, health, tends, errors, last tended, cost, merge. Every
+  column header sorts; sorting Health ascending puts the repos that need
+  attention first.
+- **Plot** — each repo drawn as a plant, in SVG, generated in the page from
+  the same row. This is the "look at the garden" view rather than the "read
+  the garden" one:
+
+  | Plant | Data behind it |
+  |---|---|
+  | Stem height, leaf count | All-time successful tends (`successes`) |
+  | Leaf colour, how far the leaves droop | Days since `last_success` — thriving (<2d), steady (<5d), dry (<10d), wilting beyond that |
+  | Bare brown twig | Runs recorded but none of them succeeded |
+  | Seed in bare soil | In the garden, never dispatched |
+  | Blossom | On the merge allow-list, i.e. allowed to merge its own PRs |
+  | Brown leaf litter on the soil | `error` runs, up to six |
+  | Width of the soil mound | Dollars spent tending that repo |
+  | Terracotta pot instead of soil | Allow-listed but not in the garden |
+  | Pulsing glow | Being tended right now (from the same best-effort log parse the "Currently tending" panel uses) |
+
+  Each plant's lean, leaf jitter, grass tufts and flower colour are
+  decoration, deterministic per repo name (an FNV-1a hash seeding a small
+  LCG, never `Math.random()`), so a plant keeps its shape between refreshes
+  and only changes when its data does. The plot is re-rendered only when a
+  signature of the drawn values changes, so the 4 s poll doesn't restart the
+  in-flight glow animation every cycle.
+
+  Growth is drawn from the *whole* run history rather than the `run_limit`
+  window the Recent runs table uses — a plant's size means "how much tending
+  this repo has had", not "how recently it appeared in the log tail". That's
+  why `state.repo_stats()` exists as its own aggregate query instead of the
+  dashboard folding `list_runs()` in Python.
+
 ## Support
 
 ### Experiencing a bug?
@@ -622,7 +675,10 @@ build/test failures trip none of them, that the retry stops as soon as auth
 recovers and gives up once the backoff is exhausted, and that a usage limit
 is flagged blocked but never retried), always with `sleep_fn` injected so no
 test actually sleeps; `tests/test_state.py`
-uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
+uses a real sqlite3 file in a tmp dir (including `repo_stats`' all-time
+per-repo aggregates — that `created` counts as a success, that a later
+`error` never overwrites `last_success`, and that `last_outcome` breaks a
+same-second timestamp tie by row id); `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
@@ -694,7 +750,10 @@ line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
 `tool_result`, malformed JSON, and blank lines); `tests/test_dashboard.py`
 covers the dashboard's pure log-parsing and status-assembly functions —
 `find_active_log`, `tail_lines`, `parse_in_progress`,
-`parse_batch_progress`, `find_free_port`, and `build_status` (including its
+`parse_batch_progress`, `find_free_port`, `build_garden_rows` (the
+garden/allow-list/history join behind [the garden view](#the-garden-view),
+including the allow-listed-but-not-planted row the folded-together panel
+must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
 `overnight.py`, not just `state.py`'s own db path) — plus `run_server`'s
 loopback-only enforcement, without ever covering its `http.server` layer
@@ -1150,7 +1209,8 @@ gardener/
                        a real (in-process, optionally concurrent via
                        ThreadPoolExecutor) tend dispatch
     conventions.py   — clones/refreshes the local dms-conventions cache
-    state.py         — SQLite-backed run history
+    state.py         — SQLite-backed run history, plus repo_stats()'s
+                       all-time per-repo aggregates for the garden view
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     transcript.py    — live transcript-file discovery (encoding rule + bounded
                        poll, run from a background thread `dispatch.run_claude`
@@ -1159,7 +1219,9 @@ gardener/
                        <state>/logs/<command>-<stamp>.log, which is the file
                        dashboard.py's live panels read back (see Run logs)
     dashboard.py     — read-only stdlib http.server UI over the run history,
-                       garden/allow-list files, and the active run log
+                       garden/allow-list files, and the active run log;
+                       build_garden_rows() joins the first three into the
+                       garden view's table/plant-plot rows
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests (state, cli parsing/templating/notify-severity,
                        mocked dispatch, notify, garden, overnight, transcript,

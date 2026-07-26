@@ -273,6 +273,92 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["merge_allowlist"], [])
 
 
+class TestBuildGardenRows(unittest.TestCase):
+    """The joined garden/allow-list/history view the dashboard renders as
+    a table and as the plant plot. Pure — no db, no files."""
+
+    def _stats(self, repo, **kw):
+        base = dict(repo=repo, runs=0, successes=0, errors=0)
+        base.update(kw)
+        return state.RepoStats(**base)
+
+    def test_joins_both_opt_in_lists_with_run_history(self):
+        stats = {"owner/a": self._stats("owner/a", runs=5, successes=4, errors=1, cost_usd=1.234,
+                                        last_run="2026-07-20T00:00:00+00:00",
+                                        last_success="2026-07-19T00:00:00+00:00",
+                                        last_outcome="error")}
+        rows = dashboard.build_garden_rows(["owner/a"], ["owner/a"], stats, [])
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(row["in_garden"])
+        self.assertTrue(row["can_merge"])
+        self.assertFalse(row["in_flight"])
+        self.assertEqual((row["runs"], row["successes"], row["errors"]), (5, 4, 1))
+        self.assertEqual(row["last_success"], "2026-07-19T00:00:00+00:00")
+        self.assertEqual(row["last_outcome"], "error")
+        self.assertEqual(row["cost_usd"], 1.23)
+
+    def test_garden_repo_with_no_runs_yet_is_a_zeroed_row_not_a_missing_one(self):
+        # A just-added repo must still appear (as an unplanted seed in the
+        # plot) rather than vanishing until its first dispatch lands.
+        rows = dashboard.build_garden_rows(["owner/new"], [], {}, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["runs"], 0)
+        self.assertIsNone(rows[0]["last_run"])
+        self.assertEqual(rows[0]["cost_usd"], 0.0)
+
+    def test_allowlisted_repo_outside_the_garden_is_still_a_row(self):
+        # This is the one fact the old separate allow-list panel carried
+        # that the garden panel didn't; folding the panels together must
+        # not silently drop it.
+        rows = dashboard.build_garden_rows(["owner/a"], ["owner/b"], {}, [])
+        self.assertEqual([r["repo"] for r in rows], ["owner/a", "owner/b"])
+        self.assertEqual([r["in_garden"] for r in rows], [True, False])
+        self.assertEqual([r["can_merge"] for r in rows], [False, True])
+
+    def test_in_progress_repos_are_flagged(self):
+        rows = dashboard.build_garden_rows(["owner/a", "owner/b"], [], {}, ["owner/b"])
+        self.assertEqual({r["repo"]: r["in_flight"] for r in rows},
+                         {"owner/a": False, "owner/b": True})
+
+    def test_rows_are_sorted_by_repo_name(self):
+        rows = dashboard.build_garden_rows(["o/c", "o/a"], ["o/b"], {}, [])
+        self.assertEqual([r["repo"] for r in rows], ["o/a", "o/b", "o/c"])
+
+    def test_stats_for_a_repo_in_neither_list_are_ignored(self):
+        # A repo tended once by a direct `gardener tend --repo X` and never
+        # opted in isn't part of the garden and must not appear in it.
+        stats = {"owner/stranger": self._stats("owner/stranger", runs=1, successes=1)}
+        self.assertEqual(dashboard.build_garden_rows([], [], stats, []), [])
+
+
+class TestBuildStatusGardenRows(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_garden_rows_are_assembled_from_the_given_state_dir(self):
+        garden.add("owner/a", path=self.state_dir / "garden.json")
+        merge_allowlist.add("owner/a", path=self.state_dir / "merge_allowlist.json")
+        state.record_run(
+            state.Run(repo="owner/a", mode="tend", outcome="tend",
+                      timestamp="2026-07-19T00:00:00+00:00", cost_usd=2.0),
+            db_path=self.state_dir / "gardener.sqlite3",
+        )
+        rows = dashboard.build_status(state_dir=self.state_dir)["garden_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["repo"], "owner/a")
+        self.assertTrue(rows[0]["can_merge"])
+        self.assertEqual(rows[0]["successes"], 1)
+        self.assertEqual(rows[0]["cost_usd"], 2.0)
+
+    def test_empty_state_dir_produces_empty_garden_rows(self):
+        self.assertEqual(dashboard.build_status(state_dir=self.state_dir)["garden_rows"], [])
+
+
 class TestRunServerLoopbackEnforcement(unittest.TestCase):
     def test_non_loopback_host_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:

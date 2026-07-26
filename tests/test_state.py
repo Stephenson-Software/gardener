@@ -81,5 +81,77 @@ class TestState(unittest.TestCase):
         self.assertEqual(len(rows), 2)
 
 
+class TestRepoStats(unittest.TestCase):
+    """`repo_stats` is what the dashboard's garden plot draws a plant from,
+    so it aggregates the *whole* history, not a recent-N window."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _record(self, repo, outcome, timestamp, cost=None, duration=None, mode="tend"):
+        state.record_run(
+            state.Run(
+                repo=repo, mode=mode, outcome=outcome, timestamp=timestamp,
+                cost_usd=cost, duration_ms=duration,
+            ),
+            db_path=self.db_path,
+        )
+
+    def test_missing_db_returns_empty_mapping(self):
+        self.assertEqual(state.repo_stats(db_path=self.db_path), {})
+
+    def test_aggregates_per_repo_across_the_whole_history(self):
+        self._record("owner/a", "tend", "2026-07-01T00:00:00+00:00", cost=1.0, duration=1000)
+        self._record("owner/a", "error", "2026-07-02T00:00:00+00:00", cost=0.5, duration=500)
+        self._record("owner/a", "tend", "2026-07-03T00:00:00+00:00", cost=2.0, duration=2000)
+        self._record("owner/b", "created", "2026-07-04T00:00:00+00:00", mode="create-dev-loop")
+
+        stats = state.repo_stats(db_path=self.db_path)
+        self.assertEqual(set(stats), {"owner/a", "owner/b"})
+        a = stats["owner/a"]
+        self.assertEqual((a.runs, a.successes, a.errors), (3, 2, 1))
+        self.assertEqual(a.first_run, "2026-07-01T00:00:00+00:00")
+        self.assertEqual(a.last_run, "2026-07-03T00:00:00+00:00")
+        self.assertEqual(a.cost_usd, 3.5)
+        self.assertEqual(a.duration_ms, 3500)
+        # `created` is a success too — the create-dev-loop bootstrap
+        # dispatch did its job, so it must not count as a wilting repo.
+        self.assertEqual(stats["owner/b"].successes, 1)
+
+    def test_last_success_ignores_a_later_error(self):
+        # A repo tended successfully yesterday and erroring today is not
+        # untended — the plot's droop is keyed on last_success, so an
+        # error must not be allowed to masquerade as a fresh tend.
+        self._record("owner/a", "tend", "2026-07-01T00:00:00+00:00")
+        self._record("owner/a", "error", "2026-07-05T00:00:00+00:00")
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertEqual(stats.last_success, "2026-07-01T00:00:00+00:00")
+        self.assertEqual(stats.last_run, "2026-07-05T00:00:00+00:00")
+        self.assertEqual(stats.last_outcome, "error")
+
+    def test_never_successful_repo_has_no_last_success(self):
+        self._record("owner/a", "error", "2026-07-01T00:00:00+00:00")
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertIsNone(stats.last_success)
+        self.assertEqual(stats.successes, 0)
+
+    def test_last_outcome_uses_insertion_order_not_the_timestamp(self):
+        # Timestamps are second-resolution, so two repos dispatched
+        # concurrently can tie; `id` is what actually orders them.
+        self._record("owner/a", "tend", "2026-07-01T00:00:00+00:00")
+        self._record("owner/a", "error", "2026-07-01T00:00:00+00:00")
+        self.assertEqual(state.repo_stats(db_path=self.db_path)["owner/a"].last_outcome, "error")
+
+    def test_null_costs_sum_to_zero_rather_than_none(self):
+        self._record("owner/a", "tend", "2026-07-01T00:00:00+00:00", cost=None)
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertEqual(stats.cost_usd, 0.0)
+        self.assertEqual(stats.duration_ms, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
