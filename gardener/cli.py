@@ -35,6 +35,10 @@ from gardener.dispatch import (
     TEND_DEFAULT_TIMEOUT_SECONDS,
     DispatchError,
     Mode,
+    is_device_global_failure,
+    looks_like_auth_failure,
+    looks_like_network_failure,
+    looks_like_usage_limit,
     run_claude,
     tend_mode_spec,
 )
@@ -511,6 +515,9 @@ class TendResult:
     # Propagated straight from `DispatchResult.auth_failed` — see its
     # comment there and `cmd_overnight`, which stops the whole batch on it.
     auth_failed: bool = False
+    # Propagated straight from `DispatchResult.blocked` — the broader
+    # device-global signal `cmd_overnight` actually aborts on.
+    blocked: bool = False
 
 
 def _dispatch_tend(args: argparse.Namespace) -> TendResult:
@@ -711,6 +718,7 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
         permission_denials=result.permission_denials,
         timed_out=result.timed_out,
         auth_failed=result.auth_failed,
+        blocked=result.blocked,
     )
 
 
@@ -795,22 +803,77 @@ def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnigh
         result = _dispatch_tend(tend_args)
     except Exception as e:  # noqa: BLE001 - one repo's crash must not abort the batch
         print(f"gardener: overnight: {repo} raised an unexpected error: {e}", file=sys.stderr)
-        return overnight.RepoOutcome(repo=repo, errored=True, gap_summary=str(e))
+        # Classified from the exception text because this path is the *only*
+        # place a GitHub outage can surface: `_dispatch_tend` resolves the
+        # default branch and clones before it ever invokes `claude`, and both
+        # steps raise RuntimeError on failure (see `_default_branch`/clone).
+        # There is no DispatchResult here to carry a `blocked` flag, and
+        # leaving it False is exactly what let 17 recorded runs march the
+        # whole garden through an unreachable api.github.com.
+        return overnight.RepoOutcome(
+            repo=repo,
+            errored=True,
+            gap_summary=str(e),
+            blocked=is_device_global_failure(str(e)),
+        )
     outcome = overnight.classify_outcome(repo, result.run, result.result_text)
-    outcome.auth_failed = result.auth_failed
+    outcome.blocked = result.blocked
+    if not outcome.blocked and outcome.errored:
+        # A failure recorded as a normal errored run rather than raised —
+        # `_dispatch_tend` catches some setup failures itself and reports
+        # them through `state.Run.gap_summary`, which is then all we have to
+        # classify from.
+        outcome.blocked = is_device_global_failure(outcome.gap_summary)
     return outcome
 
 
-def _first_auth_failure_index(outcomes: list) -> int:
-    """Position of the first auth-failed repo in `outcomes`, which is
-    maintained in the same order as this run's `order` list (batches are
-    dispatched in order and each batch's outcomes are re-sorted back into
+def _blocking_reason(outcomes: list) -> tuple:
+    """`(what went wrong, what the operator should do)` for the first
+    blocked repo in `outcomes`, so the abort message and its notification
+    name the real cause instead of always saying "could not authenticate".
+
+    Worth the branching: these three demand genuinely different actions —
+    logging `claude` back in, waiting out a quota reset, and checking the
+    network are not interchangeable, and an operator told the wrong one
+    wastes the rest of the night acting on it. Falls back to generic
+    wording if a repo is flagged by a marker set that grows past these
+    three, rather than asserting a reason it can't actually support."""
+    text = next((o.gap_summary or "" for o in outcomes if o.blocked), "")
+    if looks_like_usage_limit(text, ""):
+        return (
+            "the usage/session limit is exhausted",
+            "Wait for the reset time named in the message above, then re-run "
+            "`gardener overnight` — credentials are fine, there is simply no quota left.",
+        )
+    if looks_like_network_failure(text, ""):
+        return (
+            "GitHub was unreachable",
+            "Check this device's connectivity and https://githubstatus.com, then re-run "
+            "`gardener overnight`.",
+        )
+    if looks_like_auth_failure(text, ""):
+        return (
+            f"the dispatched run could not authenticate "
+            f"(after {len(AUTH_RETRY_BACKOFF_SECONDS)} retries)",
+            "Re-run `gardener overnight` once credentials work again — `claude` may just "
+            "need a fresh login.",
+        )
+    return (
+        "a device-wide failure blocked the batch",
+        "Resolve the condition reported above, then re-run `gardener overnight`.",
+    )
+
+
+def _first_blocked_index(outcomes: list) -> int:
+    """Position of the first device-globally-blocked repo in `outcomes`,
+    which is maintained in the same order as this run's `order` list (batches
+    are dispatched in order and each batch's outcomes are re-sorted back into
     `repo_batch` order — see `cmd_overnight`), so this doubles as the number
     of repos the round-robin resume cursor may safely advance by. Returns
-    `len(outcomes)` if nothing auth-failed, i.e. "advance past all of them",
+    `len(outcomes)` if nothing was blocked, i.e. "advance past all of them",
     matching the non-abort path."""
     for i, outcome in enumerate(outcomes):
-        if outcome.auth_failed:
+        if outcome.blocked:
             return i
     return len(outcomes)
 
@@ -929,7 +992,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     outcomes: list[overnight.RepoOutcome] = []
     start_time = time.monotonic()
     attempted = 0
-    aborted_on_auth = False
+    aborted_on_block = False
 
     def persist_cursor() -> None:
         """Write the resume cursor for everything attempted so far.
@@ -949,25 +1012,25 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         Both branches are computed from the accumulated `outcomes`/
         `attempted` rather than just this batch's, so this is idempotent —
         calling it again after the loop rewrites the same values. The
-        auth-abort rule is unchanged and simply applies as of whatever has
-        been attempted at call time.
+        blocked-abort rule is unchanged and simply applies as of whatever
+        has been attempted at call time.
         """
         if strategy is overnight.Strategy.ROUND_ROBIN:
-            # On an auth abort, advance only as far as the LAST repo that got
-            # a real attempt before the first auth failure — a bare index
+            # On a blocked abort, advance only as far as the LAST repo that
+            # got a real attempt before the first blocked one — a bare index
             # can't express "skip the middle one", so anything at or after
-            # the first auth-failed repo is left to be re-attempted next run.
+            # the first blocked repo is left to be re-attempted next run.
             # With concurrency > 1 that can mean re-tending a repo later in
             # the same batch that did succeed; re-tending is idempotent
             # enough (it's just another cycle) and far cheaper than silently
             # skipping a repo.
-            advanced = _first_auth_failure_index(outcomes) if aborted_on_auth else attempted
+            advanced = _first_blocked_index(outcomes) if aborted_on_block else attempted
             overnight.write_cursor((start_index + advanced) % len(garden_list), path=cursor_path)
         else:
             # Here the cursor is a set of repo names rather than a position,
-            # so it can be precise: drop exactly the auth-failed repos and
-            # keep every genuinely-attempted one, whatever order they ran in.
-            newly_attempted = [outcome.repo for outcome in outcomes if not outcome.auth_failed]
+            # so it can be precise: drop exactly the blocked repos and keep
+            # every genuinely-attempted one, whatever order they ran in.
+            newly_attempted = [outcome.repo for outcome in outcomes if not outcome.blocked]
             overnight.write_attempted(
                 overnight.next_attempted(attempted_before, cycle_reset, newly_attempted),
                 path=cursor_path,
@@ -1018,29 +1081,32 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             batch_outcomes = [results_by_repo[repo] for repo in repo_batch]
         outcomes.extend(batch_outcomes)
         attempted += len(repo_batch)
-        aborted_on_auth = any(outcome.auth_failed for outcome in batch_outcomes)
+        aborted_on_block = any(outcome.blocked for outcome in batch_outcomes)
 
         # Persisted here, before the abort branch below acts on it, because
-        # `persist_cursor` reads `aborted_on_auth` to decide how far the
+        # `persist_cursor` reads `aborted_on_block` to decide how far the
         # cursor may advance — writing first and classifying after would
         # advance it straight past the repos that just failed to
         # authenticate, which is the exact 2026-07-24 failure #38 fixed.
         persist_cursor()
 
-        # An auth failure is global to this device, not specific to the repo
-        # that hit it: every remaining repo in the garden is about to fail
-        # the same way, in seconds, for free. Stop the run instead of
-        # marching the whole garden through a broken credential — this is
-        # what turned a ~20-minute credential blip on 2026-07-24 into 12 of
-        # 15 repos being burned in under a minute, cursor advanced past all
-        # of them, with the garden then untended until the next night.
-        if aborted_on_auth:
+        # A blocked failure is global to this device, not specific to the
+        # repo that hit it: every remaining repo in the garden is about to
+        # fail the same way, in seconds, for free. Stop the run instead of
+        # marching the whole garden through a condition none of them can
+        # survive. Each of the three classes has done exactly that here: a
+        # ~20-minute credential blip burned 12 of 15 repos on 2026-07-24; an
+        # exhausted usage window burned 20 of 32 in four minutes on
+        # 2026-07-25 and 15 more on 2026-07-20; an unreachable
+        # api.github.com burned 17 across 2026-07-21 and 2026-07-25 — every
+        # one with the cursor advanced past it, leaving the garden untended
+        # until the next night.
+        if aborted_on_block:
+            reason, recovery = _blocking_reason(batch_outcomes)
             print(
-                "gardener: overnight aborting — the dispatched run could not authenticate "
-                f"(after {len(AUTH_RETRY_BACKOFF_SECONDS)} retries). "
-                "Not advancing the resume cursor past the affected repo(s); re-run "
-                "`gardener overnight` once credentials work again (`claude` may just need "
-                "a fresh login) and it will pick up where this run stopped.",
+                f"gardener: overnight aborting — {reason}. "
+                "Not advancing the resume cursor past the affected repo(s), so they are "
+                f"re-attempted rather than skipped. {recovery}",
                 file=sys.stderr,
             )
             break
@@ -1055,17 +1121,17 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     skipped = len(order) - attempted
     summary = overnight.build_batch_summary(outcomes, elapsed_total, skipped)
     print(f"gardener: overnight done — {summary.message}", file=sys.stderr)
-    if aborted_on_auth:
+    if aborted_on_block:
         # Sent in addition to (not instead of) the batch summary below: the
-        # summary reports what this run did, which on an auth abort reads as
-        # a pile of ordinary per-repo errors and buries the one thing an
+        # summary reports what this run did, which on a blocked abort reads
+        # as a pile of ordinary per-repo errors and buries the one thing an
         # operator actually has to act on.
+        reason, recovery = _blocking_reason(outcomes)
         try:
             notify.default_notifier().notify(
-                "gardener overnight: ABORTED — could not authenticate",
+                f"gardener overnight: ABORTED — {reason}",
                 f"{skipped} repo(s) left untended and the resume cursor was held back so they "
-                "aren't skipped. Check that `claude` is still logged in, then re-run "
-                "`gardener overnight`.",
+                f"aren't skipped. {recovery}",
                 notify.Level.ERROR,
             )
         except Exception as e:  # noqa: BLE001 - the alert must never fail the run it reports on

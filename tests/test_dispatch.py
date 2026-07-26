@@ -16,7 +16,10 @@ from gardener.dispatch import (
     DispatchError,
     Mode,
     _build_invocation,
+    is_device_global_failure,
     looks_like_auth_failure,
+    looks_like_network_failure,
+    looks_like_usage_limit,
     run_claude,
     tend_mode_spec,
 )
@@ -289,6 +292,77 @@ class TestLooksLikeAuthFailure(unittest.TestCase):
         )
 
 
+# The exact texts observed in `gardener status` history for the other two
+# device-global classes, kept verbatim for the same reason as the auth one
+# above. The usage-limit string burned 20 of the garden's 32 repos in four
+# minutes on 2026-07-25 (and 15 more on 2026-07-20); the two GitHub strings
+# burned 17 across 2026-07-21 and 2026-07-25. None of them were classified
+# at the time, so the resume cursor advanced past every affected repo.
+REAL_USAGE_LIMIT_TEXT = "You've hit your session limit \u00b7 resets 12am (UTC)"
+REAL_NETWORK_TEXT = (
+    "could not determine default branch for owner/repo: error connecting to "
+    "api.github.com\ncheck your internet connection or https://githubstatus.com"
+)
+REAL_GRAPHQL_EOF_TEXT = (
+    'could not determine default branch for owner/repo: Post '
+    '"https://api.github.com/graphql": unexpected EOF'
+)
+
+
+class TestLooksLikeUsageLimit(unittest.TestCase):
+    def test_matches_the_real_observed_failure_text(self):
+        self.assertTrue(looks_like_usage_limit(REAL_USAGE_LIMIT_TEXT, ""))
+
+    def test_match_is_case_insensitive_and_stream_agnostic(self):
+        self.assertTrue(looks_like_usage_limit("", REAL_USAGE_LIMIT_TEXT.upper()))
+
+    def test_a_usage_limit_is_not_misread_as_an_auth_failure(self):
+        """The distinction has teeth: an auth failure is retried in-process,
+        a usage limit must not be (its reset is hours away)."""
+        self.assertFalse(looks_like_auth_failure(REAL_USAGE_LIMIT_TEXT, ""))
+
+    def test_ordinary_failure_text_is_not_a_usage_limit(self):
+        self.assertFalse(looks_like_usage_limit("tests failed: 3 assertions", ""))
+
+
+class TestLooksLikeNetworkFailure(unittest.TestCase):
+    def test_matches_the_real_connectivity_text(self):
+        self.assertTrue(looks_like_network_failure(REAL_NETWORK_TEXT, ""))
+
+    def test_matches_the_real_graphql_eof_text(self):
+        self.assertTrue(looks_like_network_failure(REAL_GRAPHQL_EOF_TEXT, ""))
+
+    def test_ordinary_failure_text_is_not_a_network_failure(self):
+        self.assertFalse(looks_like_network_failure("tests failed: 3 assertions", ""))
+
+
+class TestIsDeviceGlobalFailure(unittest.TestCase):
+    """The single predicate `cmd_overnight` aborts a batch on — it must
+    cover all three real classes, since missing any one of them costs a
+    whole overnight cycle."""
+
+    def test_covers_every_real_observed_failure(self):
+        for text in (
+            REAL_AUTH_FAILURE_TEXT,
+            REAL_USAGE_LIMIT_TEXT,
+            REAL_NETWORK_TEXT,
+            REAL_GRAPHQL_EOF_TEXT,
+        ):
+            with self.subTest(text=text[:40]):
+                self.assertTrue(is_device_global_failure(text))
+
+    def test_a_genuine_per_repo_failure_is_not_device_global(self):
+        """The costly false positive: if an ordinary repo failure tripped
+        this, one bad repo would abort the whole garden every night."""
+        for text in (
+            "tests failed: 3 assertions in test_foo.py",
+            "PR #12 opened; 2 issues filed",
+            "build failed: compilation error in Main.java",
+        ):
+            with self.subTest(text=text[:40]):
+                self.assertFalse(is_device_global_failure(text))
+
+
 class TestAuthFailureRetry(unittest.TestCase):
     """`run_claude` retries an auth failure and nothing else. `sleep_fn` is
     always injected here — these tests must never actually sleep."""
@@ -301,6 +375,51 @@ class TestAuthFailureRetry(unittest.TestCase):
             {"result": REAL_AUTH_FAILURE_TEXT, "is_error": True, "total_cost_usd": 0.0},
             returncode=1,
         )
+
+    def _usage_limit_failure(self):
+        return _fake_completed(
+            {"result": REAL_USAGE_LIMIT_TEXT, "is_error": True, "total_cost_usd": 0.0},
+            returncode=1,
+        )
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_usage_limit_is_flagged_blocked_but_never_retried(self, mock_run, _which):
+        """A usage window resets at a wall-clock hour that is routinely
+        hours out, so the in-process backoff cannot outlast it — retrying
+        would only burn the night's budget asleep. It must still be
+        `blocked`, which is what actually stops the batch."""
+        mock_run.return_value = self._usage_limit_failure()
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1, 2, 3), sleep_fn=self.slept.append,
+        )
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(self.slept, [])
+        self.assertTrue(result.blocked)
+        self.assertFalse(result.auth_failed)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_auth_failure_is_also_flagged_blocked(self, mock_run, _which):
+        mock_run.return_value = self._auth_failure()
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.blocked)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch.subprocess.run")
+    def test_an_ordinary_failure_is_not_blocked(self, mock_run, _which):
+        mock_run.return_value = _fake_completed(
+            {"result": "tests failed: 3 assertions", "is_error": True}, returncode=1,
+        )
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(), sleep_fn=self.slept.append,
+        )
+        self.assertFalse(result.blocked)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
     @patch("gardener.dispatch.subprocess.run")
