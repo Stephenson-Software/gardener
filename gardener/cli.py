@@ -27,7 +27,10 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from gardener import conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, state, transcript
+from gardener import (
+    conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock,
+    run_log, state, transcript,
+)
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
     CREATE_DEV_LOOP_TIMEOUT_SECONDS,
@@ -1215,7 +1218,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse a cached target-repo checkout as-is instead of fetching latest",
     )
     align.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
-    align.set_defaults(func=cmd_align)
+    # `log_name` marks a subcommand as one whose stderr narration is worth
+    # persisting to a run log — see `main`. Only the dispatching commands
+    # set it; `status`/`dashboard`/`allowlist`/`garden` print a result and
+    # exit, and would just litter the logs dir with near-empty files.
+    align.set_defaults(func=cmd_align, log_name="align")
 
     tend = sub.add_parser(
         "tend",
@@ -1237,7 +1244,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse a cached target-repo checkout as-is instead of fetching latest",
     )
     tend.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
-    tend.set_defaults(func=cmd_tend)
+    tend.set_defaults(func=cmd_tend, log_name="tend")
 
     allowlist = sub.add_parser("allowlist", help="Manage the tend --allow-merge repo allow-list")
     allowlist_sub = allowlist.add_subparsers(dest="allowlist_action", required=True)
@@ -1310,7 +1317,7 @@ def build_parser() -> argparse.ArgumentParser:
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--random-seed", type=int, default=None, help=argparse.SUPPRESS)
-    overnight_parser.set_defaults(func=cmd_overnight)
+    overnight_parser.set_defaults(func=cmd_overnight, log_name="overnight")
 
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
@@ -1354,4 +1361,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    log_name = getattr(args, "log_name", None)
+    if log_name is None:
+        return args.func(args)
+    # Wrapping here rather than inside each command function means every
+    # line a dispatching run prints is captured, including the ones printed
+    # before/after the command's own body (argparse errors have already
+    # exited by this point, so nothing is lost by starting the log here).
+    with run_log.tee_stderr(log_name) as path:
+        if path is not None:
+            print(f"gardener: run log: {path}", file=sys.stderr)
+        return args.func(args)
