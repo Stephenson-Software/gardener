@@ -398,19 +398,27 @@ what.
 The actual invocation:
 
 ```bash
-devsrv start gardener-overnight --autostart -- gardener overnight --hours 8
+devsrv start gardener-overnight --autostart -- gardener overnight --hours 6
 devsrv status gardener-overnight   # confirm it's running
 devsrv logs gardener-overnight -f  # watch progress live
 ```
+
+`--hours 6` here is a deliberate local choice, not the default: gardener's
+own default is `8.0` (`overnight.DEFAULT_OVERNIGHT_HOURS`, see the time
+budget section above). The registered service is the source of truth for
+what this device actually runs — check it with `devsrv status
+gardener-overnight` rather than trusting this snippet if the two ever
+disagree.
 
 `--autostart` means: if Android kills every background process (confirmed
 directly to happen on a task swipe-away), this specific run will NOT
 silently resume mid-budget on its own — the `claude` subprocess it was
 waiting on is gone too. What `--autostart` actually buys you is that the
 *next* interactive shell you open on this device re-runs `devsrv
-autostart-all`, which restarts `gardener overnight --hours 8` fresh (a new
-8-hour budget from that point, not a continuation of the old one) if it
-isn't already running. Combined with the resume cursor above, a run that
+autostart-all`, which restarts the registered command fresh — a new full
+budget from that point, whatever `--hours` it was registered with, not a
+continuation of the interrupted run's remaining time — if it isn't already
+running. Combined with the resume cursor above, a run that
 gets interrupted partway through the garden doesn't lose progress on the
 repos it already finished — the next invocation (autostart-triggered or
 manually re-run) picks up from the next untended repo, not the top of the
@@ -1027,7 +1035,10 @@ Confirmed afterward via `gh pr list`: PR #55 (`create-dev-loop`) and PR #6
 real progress on two separate repos across two separate invocations without
 ever mutating either target's default branch, exactly as designed. The
 `devsrv` wiring documented above was also verified for real: `devsrv start
-<name> --autostart -- gardener overnight --hours 8` (tested against both
+<name> --autostart -- gardener overnight --hours 8` (the budget the service
+was registered with at the time of that test; it has since been
+re-registered with `--hours 6` — the wiring is what was being verified
+here, not the number) (tested against both
 the exact real command — confirmed its stderr output lands correctly in
 `devsrv logs`, though a run against an empty garden exits before devsrv's
 brief startup poll window closes, which devsrv reports as "failed to
