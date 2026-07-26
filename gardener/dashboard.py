@@ -234,16 +234,24 @@ PAGE_HTML = """<!doctype html>
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-text-size-adjust: 100%; overflow-wrap: break-word;
   }
   header {
     padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
-    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+    display: flex; align-items: baseline; gap: 0.25rem 1rem; flex-wrap: wrap;
+    /* Sticky so the "updated ..." heartbeat stays on screen while scrolling
+       a long log on a phone — on a 4 s poll it's the main signal that the
+       page is still live, and it's useless scrolled off the top. */
+    position: sticky; top: 0; z-index: 1; background: var(--bg);
   }
   header h1 { font-size: 1.1rem; margin: 0; }
   header .sub { color: var(--muted); font-size: 0.85rem; }
   main {
     padding: 1.5rem; display: grid; gap: 1.25rem;
-    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    /* `min(360px, 100%)`, not a bare 360px: on a viewport narrower than
+       360px + padding the bare form makes the track wider than the grid
+       and the whole body scrolls sideways. */
+    grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
     max-width: 1400px; margin: 0 auto;
   }
   .panel {
@@ -255,8 +263,10 @@ PAGE_HTML = """<!doctype html>
     color: var(--muted); margin: 0 0 0.75rem;
   }
   .wide { grid-column: 1 / -1; }
-  .stats { display: flex; gap: 1.5rem; flex-wrap: wrap; }
-  .stat .n { font-size: 1.6rem; font-weight: 600; }
+  /* A grid rather than a flex row: four stats wrapped by flex leave a
+     ragged last line on a phone, where an even 2x2 reads as one block. */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr)); gap: 0.75rem 1.25rem; }
+  .stat .n { font-size: 1.6rem; font-weight: 600; line-height: 1.2; }
   .stat .l { color: var(--muted); font-size: 0.78rem; }
   .pill {
     display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px;
@@ -272,7 +282,7 @@ PAGE_HTML = """<!doctype html>
   .outcome-tend, .outcome-created { color: var(--accent); }
   pre#log {
     font-family: var(--mono); font-size: 0.78rem; white-space: pre-wrap;
-    word-break: break-word; max-height: 480px; overflow-y: auto; margin: 0;
+    word-break: break-word; max-height: min(480px, 60vh); overflow-y: auto; margin: 0;
     line-height: 1.45;
   }
   .empty { color: var(--muted); font-style: italic; }
@@ -280,6 +290,44 @@ PAGE_HTML = """<!doctype html>
     height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 0.4rem;
   }
   .progress-bar > div { height: 100%; background: var(--accent); }
+
+  /* Phone layout. The runs table is the one thing that genuinely can't
+     shrink: six columns, one of which is a free-text summary sentence.
+     Rather than leave it as a sideways-scrolling strip inside `.panel`
+     (readable only a column at a time), each row becomes a card — repo on
+     its own line, the short scalar fields as one muted meta line beneath,
+     summary last. `td::before` supplies the labels the hidden `thead` was
+     carrying, so no cell loses its meaning. */
+  @media (max-width: 720px) {
+    header { padding: 0.75rem 1rem; }
+    main { padding: 1rem; gap: 1rem; }
+    .panel { padding: 0.9rem 1rem; border-radius: 12px; }
+    table thead { display: none; }
+    table, table tbody, table tr, table td { display: block; width: 100%; }
+    table tr {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem;
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 0.6rem 0.75rem; margin-bottom: 0.6rem;
+    }
+    table tr:last-child { margin-bottom: 0; }
+    table td { border-bottom: none; padding: 0.1rem 0; }
+    td::before {
+      content: attr(data-label); color: var(--muted);
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: .04em;
+      margin-right: 0.3rem;
+    }
+    td.repo {
+      order: 1; flex: 1 0 100%; white-space: normal; word-break: break-all;
+      font-size: 0.85rem; font-weight: 600;
+    }
+    td.repo::before { content: none; }
+    td.time, td.mode, td.outcome, td.cost { order: 2; flex: 0 0 auto; font-size: 0.78rem; }
+    td.time::before, td.cost::before { content: none; }
+    td.summary { order: 3; flex: 1 0 100%; margin-top: 0.35rem; font-size: 0.85rem; }
+    td.summary::before { content: none; }
+    /* The empty-state row is a single full-width cell, not a card. */
+    tr.is-empty { display: block; border: none; padding: 0; }
+  }
 </style>
 </head>
 <body>
@@ -374,16 +422,18 @@ async function refresh() {
     ? data.merge_allowlist.map(r => `<span class="pill">${esc(r)}</span>`).join("")
     : `<span class="empty">empty — nothing can auto-merge</span>`;
 
+  // The data-label attributes are what the narrow-viewport card layout
+  // renders via td::before once the thead is hidden — see the stylesheet.
   document.getElementById("runs").innerHTML = data.runs.map(r => `
     <tr>
-      <td>${shortTime(r.timestamp)}</td>
-      <td class="repo">${esc(r.repo)}</td>
-      <td>${esc(r.mode)}</td>
-      <td class="outcome-${esc(r.outcome)}">${esc(r.outcome)}</td>
-      <td>${fmtCost(r.cost_usd)}</td>
-      <td class="summary">${esc(r.summary)}</td>
+      <td class="time" data-label="Time">${shortTime(r.timestamp)}</td>
+      <td class="repo" data-label="Repo">${esc(r.repo)}</td>
+      <td class="mode" data-label="Mode">${esc(r.mode)}</td>
+      <td class="outcome outcome-${esc(r.outcome)}" data-label="Outcome">${esc(r.outcome)}</td>
+      <td class="cost" data-label="Cost">${fmtCost(r.cost_usd)}</td>
+      <td class="summary" data-label="Summary">${esc(r.summary)}</td>
     </tr>
-  `).join("") || `<tr><td colspan="6" class="empty">no runs recorded yet</td></tr>`;
+  `).join("") || `<tr class="is-empty"><td colspan="6" class="empty">no runs recorded yet</td></tr>`;
 
   document.getElementById("log-path").textContent = data.active_log ? "(" + data.active_log + ")" : "";
   const logEl = document.getElementById("log");
