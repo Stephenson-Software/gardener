@@ -312,6 +312,37 @@ AUTH_FAILURE_MARKERS = (
 # night's budget sitting in a sleep loop.
 AUTH_RETRY_BACKOFF_SECONDS = (30, 120, 300)
 
+# The subscription's usage/session window being exhausted. Distinct from an
+# auth failure despite failing the same way (fast, free, every repo alike):
+# credentials are *valid*, there is simply no quota until a wall-clock reset.
+#
+# Grounded in real recorded runs, not invented: `gardener status` history
+# holds 35 failures carrying "You've hit your session limit · resets 12am
+# (UTC)" — 20 of them on 2026-07-25 22:34-22:38, which burned 20 of the
+# garden's 32 repos in four minutes, and 15 more on 2026-07-20. Because
+# nothing classified them, the resume cursor advanced past every one and
+# that cycle's tending was silently lost.
+USAGE_LIMIT_MARKERS = (
+    "session limit",
+    "usage limit",
+    "rate limit reached",
+)
+
+# GitHub/network unreachability. This class is different in kind from the
+# two above: it strikes in `cli.py`'s clone/default-branch step, *before*
+# `claude` is ever invoked, so it never produces a DispatchResult at all and
+# is classified from the raised error's text instead (see
+# `_dispatch_one_for_overnight`). Also grounded in recorded history: 17
+# failures across 2026-07-21 and 2026-07-25 with "error connecting to
+# api.github.com" or a GraphQL "unexpected EOF".
+NETWORK_FAILURE_MARKERS = (
+    "error connecting to api.github.com",
+    "check your internet connection",
+    "unexpected eof",
+    "could not resolve host",
+    "connection refused",
+)
+
 
 def looks_like_auth_failure(result_text: str, stderr: str) -> bool:
     """Whether a *failed* dispatch failed for auth reasons. Callers must
@@ -319,8 +350,48 @@ def looks_like_auth_failure(result_text: str, stderr: str) -> bool:
     output could legitimately quote one of these strings (a repo whose code
     or docs mention `invalid api key`, say) and must never be reclassified
     as an auth failure because of it."""
+    return _matches(AUTH_FAILURE_MARKERS, result_text, stderr)
+
+
+def looks_like_usage_limit(result_text: str, stderr: str) -> bool:
+    """Whether a *failed* dispatch failed because the usage/session window
+    is exhausted. Same "only consult this for an already-failed run" rule as
+    `looks_like_auth_failure` — a repo that merely *discusses* rate limiting
+    must never be reclassified because its summary said so."""
+    return _matches(USAGE_LIMIT_MARKERS, result_text, stderr)
+
+
+def looks_like_network_failure(result_text: str, stderr: str) -> bool:
+    """Whether a failure was GitHub/network unreachability. Same
+    already-failed precondition as the two above."""
+    return _matches(NETWORK_FAILURE_MARKERS, result_text, stderr)
+
+
+def is_device_global_failure(result_text: str, stderr: str = "") -> bool:
+    """Whether a failure says something about *this device* rather than
+    about the repo being tended — i.e. every remaining repo in the batch is
+    about to fail the same way, in seconds, for free.
+
+    This is the single predicate `cmd_overnight` aborts a batch on. It
+    deliberately unifies three classes that present differently but demand
+    the identical response (stop, and do not advance the resume cursor past
+    the repos that never got a real attempt): broken credentials, an
+    exhausted usage window, and an unreachable GitHub.
+
+    Keep the underlying marker tuples broad (substring, not anchored): none
+    of these wordings is a stable contract, and a missed match costs a whole
+    overnight cycle while a false positive costs one deferred repo.
+    """
+    return (
+        looks_like_auth_failure(result_text, stderr)
+        or looks_like_usage_limit(result_text, stderr)
+        or looks_like_network_failure(result_text, stderr)
+    )
+
+
+def _matches(markers: tuple, result_text: str, stderr: str) -> bool:
     haystack = f"{result_text}\n{stderr}".lower()
-    return any(marker in haystack for marker in AUTH_FAILURE_MARKERS)
+    return any(marker in haystack for marker in markers)
 
 
 class Mode(str, Enum):
@@ -524,7 +595,14 @@ class DispatchResult:
     # this batch is about to fail identically" from "this repo's tend cycle
     # went wrong", which callers must handle very differently — see
     # `cli.py`'s `cmd_overnight`.
+    #
+    # Narrower than `blocked` below, and kept separate from it on purpose:
+    # this one alone decides whether `run_claude` *retries*.
     auth_failed: bool = False
+    # True for any device-global failure — auth, exhausted usage window, or
+    # unreachable GitHub (see `is_device_global_failure`). This is what
+    # `cmd_overnight` aborts a batch and withholds the resume cursor on.
+    blocked: bool = False
 
 
 def _build_invocation(
@@ -600,6 +678,16 @@ def run_claude(
     halfway has already mutated its branch and would need triage, not a
     blind second run. `auth_backoff_seconds`/`sleep_fn` are injectable so
     tests never actually sleep.
+
+    Note the retry is keyed on `auth_failed`, NOT the broader `blocked`.
+    The other two device-global classes are deliberately excluded: an
+    exhausted usage window resets at a wall-clock time that is routinely
+    hours away (the observed message names an explicit reset hour), so
+    ~7.5 minutes of backoff cannot outlast it and would only burn budget
+    sleeping; and a GitHub outage strikes before dispatch, where there is
+    no DispatchResult to retry. For both, the protection that actually
+    matters is `cmd_overnight` aborting the batch with the resume cursor
+    withheld, so the next invocation re-attempts them for real.
     """
     attempts = len(auth_backoff_seconds) + 1
     for attempt in range(attempts):
@@ -697,6 +785,7 @@ def _run_claude_once(
             permission_denials=[],
             is_error=True,
             auth_failed=looks_like_auth_failure(stdout, proc.stderr or ""),
+            blocked=is_device_global_failure(stdout, proc.stderr or ""),
         )
 
     is_error = bool(parsed.get("is_error"))
@@ -715,4 +804,5 @@ def _run_claude_once(
         is_error=is_error,
         # Guarded on `not ok` deliberately — see `looks_like_auth_failure`.
         auth_failed=(not ok) and looks_like_auth_failure(result_text, proc.stderr or ""),
+        blocked=(not ok) and is_device_global_failure(result_text, proc.stderr or ""),
     )

@@ -40,7 +40,13 @@ from gardener.cli import (
     merge_eligible,
     repo_arg,
 )
-from gardener.dispatch import TEND_DEFAULT_TIMEOUT_SECONDS, DispatchResult, Mode
+from gardener.dispatch import (
+    TEND_DEFAULT_TIMEOUT_SECONDS,
+    DispatchResult,
+    Mode,
+    is_device_global_failure,
+    looks_like_auth_failure,
+)
 from gardener.notify import Level
 
 
@@ -1418,6 +1424,7 @@ class TestCmdOvernight(unittest.TestCase):
                 exit_code=1 if errored else 0, ok=not errored,
                 result_text=spec.get("stdout", ""), run=run,
                 auth_failed=bool(spec.get("auth_failed")),
+                blocked=bool(spec.get("auth_failed") or spec.get("blocked")),
             )
         return fake
 
@@ -1749,7 +1756,10 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
             concurrency=concurrency, strategy=strategy, random_seed=None,
         )
 
-    def _fake_dispatch_tend(self, auth_failures: set):
+    def _fake_dispatch_tend(self, auth_failures: set, gap_summary: str = "Failed to authenticate: OAuth session expired"):
+        """`gap_summary` is parameterized so the same harness can drive any
+        of the three device-global classes — the abort path keys off
+        `blocked`, which the real dispatch layer sets for all of them."""
         def fake(args):
             self.calls.append(args.repo)
             failed = args.repo in auth_failures
@@ -1757,11 +1767,13 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
                 repo=args.repo, mode="tend",
                 outcome="error" if failed else "tend",
                 timestamp=state.now_iso(),
-                gap_summary="Failed to authenticate: OAuth session expired" if failed else "",
+                gap_summary=gap_summary if failed else "",
             )
             state.record_run(run, db_path=args.state_db)
             return TendResult(
-                exit_code=1 if failed else 0, ok=not failed, run=run, auth_failed=failed,
+                exit_code=1 if failed else 0, ok=not failed, run=run,
+                auth_failed=failed and looks_like_auth_failure(gap_summary, ""),
+                blocked=failed and is_device_global_failure(gap_summary),
             )
         return fake
 
@@ -1802,6 +1814,82 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
             cmd_overnight(self._args())
         self.assertEqual(self.calls, ["owner/a", "owner/b"])
         self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_usage_limit_stops_the_run_and_holds_the_cursor(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        """The 2026-07-25 22:34 failure, replayed: an exhausted usage window
+        used to read as an ordinary per-repo error, so the batch marched on
+        and the cursor advanced past 20 repos that never got a real
+        attempt."""
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend(
+            {"owner/a"}, gap_summary="You've hit your session limit \u00b7 resets 12am (UTC)",
+        )
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        self.assertEqual(self.calls, ["owner/a"])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_usage_limit_notification_names_the_quota_not_the_credentials(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        """Recovery differs per class — waiting out a quota and re-logging in
+        are not interchangeable, so the alert must not say "authenticate"."""
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend(
+            {"owner/a"}, gap_summary="You've hit your session limit \u00b7 resets 12am (UTC)",
+        )
+        mock_notifier = mock_default_notifier.return_value
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        title, message, level = mock_notifier.notify.call_args_list[0].args
+        self.assertEqual(level, Level.ERROR)
+        self.assertIn("limit", title.lower())
+        self.assertNotIn("authenticate", title.lower())
+        self.assertIn("quota", message.lower())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_github_outage_before_dispatch_stops_the_run_and_holds_the_cursor(
+        self, mock_clone, mock_default_notifier
+    ):
+        """The path that produced 17 recorded failures. A GitHub outage hits
+        while resolving the default branch / cloning — before `claude` is
+        ever invoked — so it raises rather than returning a DispatchResult,
+        and is classified from the exception text instead."""
+        mock_clone.side_effect = RuntimeError(
+            "could not determine default branch for owner/a: error connecting to "
+            "api.github.com\ncheck your internet connection or https://githubstatus.com"
+        )
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        # Cursor held at 0: owner/a never got a real attempt, so the next
+        # invocation must re-attempt it rather than skip it.
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
+        titles = [c.args[0].lower() for c in mock_default_notifier.return_value.notify.call_args_list]
+        abort = [t for t in titles if "aborted" in t]
+        self.assertEqual(len(abort), 1, f"expected one abort alert, got titles: {titles}")
+        self.assertIn("github", abort[0])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_an_ordinary_repo_failure_still_advances_the_cursor(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        """The guard against over-triggering: a repo whose tend genuinely
+        failed must NOT abort the garden or hold the cursor, or one broken
+        repo would stall every subsequent night."""
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend(
+            {"owner/a"}, gap_summary="build failed: compilation error in Main.java",
+        )
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        # Every repo still got its turn, and the cursor completed the cycle.
+        self.assertEqual(self.calls, ["owner/a", "owner/b", "owner/c"])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 0)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli._dispatch_tend")
