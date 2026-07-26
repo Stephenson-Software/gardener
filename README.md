@@ -419,34 +419,54 @@ advances past *completed* repos) — but that re-dispatch now recognizes and
 continues any PR the interrupted session already opened rather than
 starting a duplicate; see "Orphaned work recovery" above.
 
-### Auth failures abort the run instead of consuming the garden
+### Device-wide failures abort the run instead of consuming the garden
 
-A `claude` authentication failure is the one dispatch outcome that says
-nothing about the repo being tended: it's global to the device, it fails in
-seconds rather than minutes, and every remaining repo in the garden is
-about to fail exactly the same way. `overnight` therefore treats it
-differently from an ordinary per-repo error:
+Three dispatch outcomes say nothing about the repo being tended: broken
+credentials, an exhausted usage/session window, and an unreachable GitHub.
+All three are global to the device, all three fail in seconds rather than
+minutes, and after any of them every remaining repo in the garden is about
+to fail in exactly the same way. `overnight` therefore treats them
+differently from an ordinary per-repo error — `dispatch.is_device_global_failure`
+is the single predicate that recognizes all three:
 
-1. The dispatch itself is **retried** a small number of times with backoff
+1. An **auth** failure is **retried** a small number of times with backoff
    (`dispatch.py`'s `AUTH_RETRY_BACKOFF_SECONDS`, currently 30s/120s/300s),
    which is enough to ride out a token-refresh blip. Only auth failures are
    retried — a tend cycle that genuinely failed has already mutated its
-   branch and needs triage, not a blind second run.
-2. If it still can't authenticate, the whole run **stops**, and the resume
-   cursor is **not advanced past the affected repo** — so the next
-   invocation retries it rather than skipping it. Repos that tended
-   successfully earlier in the run still count as done.
+   branch and needs triage, not a blind second run. A **usage limit** is
+   deliberately *not* retried: it resets at a wall-clock hour routinely
+   hours away, so the backoff cannot outlast it and would only burn the
+   night's budget asleep. A **GitHub outage** strikes before dispatch (while
+   resolving the default branch or cloning), so there is no dispatch to
+   retry at all — it is classified from the raised error's text instead.
+2. Whichever it was, the run then **stops**, and the resume cursor is **not
+   advanced past the affected repo(s)** — so the next invocation re-attempts
+   them rather than skipping them. Repos that tended successfully earlier in
+   the run still count as done.
 3. A dedicated ERROR notification fires alongside the usual batch summary,
    since the summary alone reads as a pile of ordinary per-repo errors and
-   buries the one thing that actually needs a human (logging `claude` back
-   in).
+   buries the one thing that actually needs a human. It **names the specific
+   class**, because the recoveries are not interchangeable: log `claude`
+   back in, wait out a quota reset, or check connectivity.
 
-This is calibrated against a real failure, not a hypothetical one: on
-2026-07-24, twelve of fifteen garden repos failed within about a minute of
-each other with `Failed to authenticate: OAuth session expired and could
-not be refreshed`, each costing $0.00 and lasting 2-5 seconds. The cursor
-advanced past all twelve, so they stayed untended for the night even though
-auth recovered on its own roughly twenty minutes later.
+Note what this deliberately does *not* do: an ordinary repo failure (a
+broken build, a failing test suite) never aborts the garden or holds the
+cursor. One unhealthy repo stalling every subsequent night would be a worse
+failure than the one this protects against.
+
+Calibrated against real failures, not hypothetical ones — all three classes
+have already consumed a cycle, and 64 of the 220 runs in one recorded
+history were device-wide failures that the pre-existing logic charged to the
+repos they hit:
+
+| Date | Class | Cost |
+|---|---|---|
+| 2026-07-24 | auth (`Failed to authenticate: OAuth session expired and could not be refreshed`) | 12 of 15 repos in ~1 minute, each $0.00 and 2-5s; auth recovered on its own ~20 minutes later |
+| 2026-07-20, 2026-07-25 | usage limit (`You've hit your session limit · resets 12am (UTC)`) | 35 repos, 20 of them in a four-minute window |
+| 2026-07-21, 2026-07-25 | GitHub unreachable (`error connecting to api.github.com`, GraphQL `unexpected EOF`) | 17 repos |
+
+In every case the cursor advanced past the affected repos, so they stayed
+untended for the night through no fault of their own.
 
 ### Dependency caches survive the target-repo refresh
 
@@ -557,11 +577,14 @@ Windows (PowerShell):
 
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude` — including the
-auth-failure retry policy (`looks_like_auth_failure`'s matching, that the
-retry stops as soon as auth recovers and gives up once the backoff is
-exhausted, and that ordinary failures, timeouts, and successful runs
-quoting an auth-error string are never retried or misclassified), always
-with `sleep_fn` injected so no test actually sleeps; `tests/test_state.py`
+device-wide failure classification and retry policy (each of
+`looks_like_auth_failure`/`looks_like_usage_limit`/`looks_like_network_failure`
+matched against the *verbatim* text of a real recorded failure rather than
+paraphrased, that `is_device_global_failure` covers all three while ordinary
+build/test failures trip none of them, that the retry stops as soon as auth
+recovers and gives up once the backoff is exhausted, and that a usage limit
+is flagged blocked but never retried), always with `sleep_fn` injected so no
+test actually sleeps; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir; `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
@@ -592,13 +615,15 @@ dashboard reads them with) and its
 `random` with an injected `--random-seed` for a deterministic shuffle, both
 asserting the repo-name-keyed resume cursor advances correctly across two
 invocations without disturbing round-robin's own `next_index` in the same
-cursor file) and its auth-abort behavior (that an auth failure stops the
-run rather than dispatching the rest of the garden, that the cursor keeps
-the progress made before the failure but never advances past the repo that
-hit it — asserted for both the positional round-robin cursor and the
-name-keyed strategy cursor — that a dedicated ERROR notification fires
-alongside the batch summary and a failing notifier doesn't crash the run,
-and that an *ordinary* per-repo error still does not abort the batch) and
+cursor file) and its device-wide abort behavior (that an auth failure, a
+usage limit, and a pre-dispatch GitHub outage each stop the run rather than
+dispatching the rest of the garden, that the cursor keeps the progress made
+before the failure but never advances past the repo that hit it — asserted
+for both the positional round-robin cursor and the name-keyed strategy
+cursor — that a dedicated ERROR notification fires alongside the batch
+summary naming the specific class rather than always saying "authenticate",
+that a failing notifier doesn't crash the run, and that an *ordinary*
+per-repo error still does not abort the batch or hold the cursor) and
 its cursor durability under a kill (a `BaseException` raised from the
 mocked dispatch, which `_dispatch_one_for_overnight`'s `except Exception`
 deliberately doesn't catch, so `cmd_overnight`'s post-loop code never runs

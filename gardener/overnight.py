@@ -413,12 +413,17 @@ class RepoOutcome:
     pr_merged: bool = False
     decision_needed: bool = False
     gap_summary: str = ""
-    # Set by `cli.py`'s `_dispatch_one_for_overnight` from the dispatch's
-    # own `auth_failed` signal rather than inferred from `gap_summary` text
-    # here — this is a fact the dispatch layer already established (see
-    # `dispatch.looks_like_auth_failure`), not something to re-derive by
+    # Set by `cli.py`'s `_dispatch_one_for_overnight` from the dispatch
+    # layer's own signal rather than inferred from `gap_summary` text here —
+    # this is a fact that layer already established (see
+    # `dispatch.is_device_global_failure`), not something to re-derive by
     # pattern-matching a summary string a second time.
-    auth_failed: bool = False
+    #
+    # True when the failure was about *this device*, not this repo: broken
+    # credentials, an exhausted usage window, or an unreachable GitHub. Such
+    # a repo never got a real attempt, so the resume cursor must not advance
+    # past it — that is the whole reason this flag is carried up here.
+    blocked: bool = False
 
 
 def classify_outcome(repo: str, run: Optional[state.Run], result_text: str) -> RepoOutcome:
