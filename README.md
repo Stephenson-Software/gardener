@@ -829,10 +829,13 @@ docstring; the short version:
   requirement, which is exactly the human gate this model preserves — and
   because `gh api *` is a wildcard over the whole GitHub API, including
   merges and repo settings. The trade is a review without anchored inline
-  comments; `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` covers it by telling
-  the dispatched run up front to post via `gh pr comment` with each inline
+  comments; `dev_loop.py`'s `build_tend_prompt` covers it by telling the
+  dispatched run up front to post via `gh pr comment` with each inline
   finding folded in as a `path:line` note, rather than letting every run
-  rediscover the denial.
+  rediscover the denial. It lives in that per-dispatch block rather than
+  the `HEADLESS_SAFETY_PREAMBLE` both prompts share because `create-dev-loop`
+  mode isn't granted `gh pr comment` either — a shared preamble must never
+  name a command only one mode can actually run.
 
 ### Merge allow-list mechanics
 

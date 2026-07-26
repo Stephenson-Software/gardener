@@ -225,11 +225,15 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
      grants `Bash(gh api user *)` and nothing broader for exactly this
      reason.
    The cost of the omission is a degraded review (no anchored inline
-   comments, not a real Review object), which is paid in
-   `HEADLESS_SAFETY_PREAMBLE` instead: it tells the dispatched run up front
+   comments, not a real Review object), which is paid in the prompt
+   instead: `build_tend_prompt`'s per-dispatch block tells the run up front
    to post its review via `gh pr comment` with inline findings folded in as
    `path:line` notes, so the working path is the documented one rather than
-   something each run rediscovers after two denials.
+   something each run rediscovers after two denials. That instruction is
+   deliberately NOT in the shared `HEADLESS_SAFETY_PREAMBLE`:
+   `MODE_SPECS[Mode.CREATE_DEV_LOOP]` does not grant `Bash(gh pr comment *)`,
+   so a preamble naming it would hand a create-dev-loop run the same
+   denied-command problem this point exists to remove from `tend`.
 
 ## Merge allow-list (`tend --allow-merge`)
 
@@ -480,7 +484,7 @@ TEND_BASE_ALLOWED_TOOLS: tuple[str, ...] = (
     # self-review — `Bash(gh pr review *)` and `Bash(gh api *)` are
     # deliberately absent (self-approval via `gh pr review --approve`, and a
     # whole-API wildcard, respectively). Don't add either as a convenience;
-    # see module docstring point 9 and dev_loop.py's HEADLESS_SAFETY_PREAMBLE,
+    # see module docstring point 9 and dev_loop.py's `build_tend_prompt`,
     # which tells the run to use this pattern instead.
     "Bash(gh pr comment *)",
     "Bash(gh pr close *)",
