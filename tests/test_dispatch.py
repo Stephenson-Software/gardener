@@ -145,6 +145,19 @@ class TestTendModeSpec(unittest.TestCase):
     def test_merge_pattern_never_leaks_into_base_list(self):
         self.assertNotIn(MERGE_ALLOWED_TOOL, TEND_BASE_ALLOWED_TOOLS)
 
+    def test_self_approval_and_whole_api_patterns_stay_absent(self):
+        # See issue #40 and module docstring point 9. `gh pr review *` also
+        # spells `gh pr review --approve` (a session approving its own PR,
+        # potentially satisfying a branch-protection gate); `gh api *` is a
+        # wildcard over the entire GitHub API. Both are tempting "fixes" for
+        # the review-posting gap and both must stay out — the preamble
+        # points the run at `gh pr comment` instead, which IS granted.
+        for eligible in (True, False):
+            for pattern in tend_mode_spec(eligible).allowed_tools:
+                self.assertFalse(pattern.startswith("Bash(gh pr review"), pattern)
+                self.assertFalse(pattern.startswith("Bash(gh api"), pattern)
+        self.assertIn("Bash(gh pr comment *)", TEND_BASE_ALLOWED_TOOLS)
+
     def test_no_askuserquestion_agent_or_schedulewakeup_in_tools(self):
         for eligible in (True, False):
             spec = tend_mode_spec(eligible)

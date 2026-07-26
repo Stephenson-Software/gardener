@@ -818,6 +818,21 @@ docstring; the short version:
   own `Bash(gh pr *)` allow-list, noted but out of scope to change here).
   `tend` enumerates specific non-merge `gh pr` subcommands instead and adds
   `Bash(gh pr merge *)` only per the merge allow-list below.
+- **`gh pr review` and `gh api` are absent on purpose, so a dispatched run
+  posts its self-review as a plain PR comment.** Every dev-loop skill tells
+  its review phase to POST a real Review object (`gh api
+  repos/<owner>/<repo>/pulls/<n>/reviews`, or `gh pr review --comment`);
+  both are denied under `tend`, observed live (see
+  [#40](https://github.com/dmccoystephenson/gardener/issues/40)). They stay
+  denied because `gh pr review *` also spells `gh pr review --approve` — a
+  session approving its own PR could satisfy a branch-protection approval
+  requirement, which is exactly the human gate this model preserves — and
+  because `gh api *` is a wildcard over the whole GitHub API, including
+  merges and repo settings. The trade is a review without anchored inline
+  comments; `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` covers it by telling
+  the dispatched run up front to post via `gh pr comment` with each inline
+  finding folded in as a `path:line` note, rather than letting every run
+  rediscover the denial.
 
 ### Merge allow-list mechanics
 

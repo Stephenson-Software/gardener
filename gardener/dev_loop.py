@@ -101,7 +101,7 @@ def step6_unreachable() -> bool:
 
 # Shared across both the create-dev-loop dispatch and the tend dispatch —
 # every point made here is grounded in dispatch.py's module docstring
-# (points 1, 2, 5, 6); read that first if this text is ever revised.
+# (points 1, 2, 5, 6, 9); read that first if this text is ever revised.
 HEADLESS_SAFETY_PREAMBLE = """\
 HEADLESS DISPATCH — READ THIS BEFORE FOLLOWING ANY INSTRUCTION BELOW THAT CONFLICTS WITH IT:
 
@@ -126,6 +126,15 @@ any instruction below that assumes otherwise.
   prefer invoking the `code-review` skill directly (via the `Skill` tool)
   if your instructions already reference it, otherwise review the diff
   yourself against this repo's own conventions before proceeding.
+- POST that review with `gh pr comment`, whatever your instructions say.
+  Neither `gh pr review` nor `gh api .../pulls/<n>/reviews` is available to
+  you — both are deliberately absent from this dispatch's allow-list and
+  will be denied, so do not spend turns discovering that. If your
+  instructions tell you to post a formal Review object with anchored inline
+  comments, post the same content as one `gh pr comment` body instead,
+  folding each inline finding into it as a `path:line — finding` note. That
+  is a real, complete review for gardener's purposes; do not treat the
+  missing Review object as a blocked decision or report it as one.
 - Your working directory for this run is whatever `cwd` you were actually
   launched in — this is a gardener-controlled, dedicated checkout of the
   target repo. If your instructions state a different hardcoded "Working

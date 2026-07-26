@@ -121,6 +121,27 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn("HAS been explicitly pre-authorized to merge", prompt)
         self.assertNotIn("has NOT been authorized to merge", prompt)
 
+    def test_tend_prompt_names_gh_pr_comment_as_the_review_posting_path(self):
+        # See issue #40: dev-loop skills all document the review step as
+        # `gh api .../reviews` / `gh pr review`, neither of which tend's
+        # allow-list grants. The preamble must name the one command that
+        # does work, so a run doesn't burn turns on two denials first.
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False
+        )
+        self.assertIn("gh pr comment", prompt)
+        self.assertIn("gh pr review", prompt)
+        self.assertIn("path:line", prompt)
+
+    def test_tend_prompt_does_not_call_a_missing_review_object_a_blocked_decision(self):
+        # A degraded review is an accepted trade, not a DECISION NEEDED —
+        # otherwise every tend run would end asking a human about it.
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False
+        )
+        self.assertIn("do not treat the", prompt)
+        self.assertIn("missing Review object", prompt)
+
     def test_tend_prompt_overrides_hardcoded_working_directory(self):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
         self.assertIn("ignore that line", prompt)
