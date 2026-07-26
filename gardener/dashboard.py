@@ -32,6 +32,20 @@ suppressed (no webhook configured) will keep showing as "in progress"
 until the log moves on, even though gardener itself already finished with
 it. Treat the in-progress list as "what the log suggests is still
 running," not gardener's authoritative record of it.
+
+## The garden view
+
+The garden and the merge allow-list used to be two panels of bare repo
+pills. With both lists opted-in garden-wide they were the same ~32 names
+printed twice, and neither said anything about how a repo was actually
+doing. `build_garden_rows` joins them with `state.repo_stats()` into one
+row per repo instead, rendered two ways by the page: a table, and a plot
+that draws each repo as a plant. Every property of a plant — height,
+leaf droop, blossom, leaf litter, mound width — is a column of that row,
+listed in the page's own legend; none of it is invented. Growth is drawn
+from *all-time* stats, not the `run_limit` window the Recent runs table
+uses, so a plant's size means "how much tending this repo has had," not
+"how recently it appeared in the log tail."
 """
 from __future__ import annotations
 
@@ -165,6 +179,56 @@ def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
     return (start, end, int(match.group(3)))
 
 
+def build_garden_rows(
+    garden_repos: list[str],
+    allowed_repos: list[str],
+    stats: dict[str, state.RepoStats],
+    in_progress: list[str],
+) -> list[dict]:
+    """One row per repo the operator has opted in anywhere, joining the
+    two opt-in lists with that repo's run history.
+
+    Replaces what used to be two separate dashboard panels listing the
+    garden and the merge allow-list as bare pills. Those were ~32
+    near-identical repo names printed twice, which read as duplication and
+    still left the actually interesting question — *how is each repo
+    doing* — unanswered. Merge-allow-list membership is a column here
+    (`can_merge`) rather than a second list.
+
+    A repo on the allow-list but not in the garden is still a row
+    (`in_garden: False`): dropping it would lose the one fact the old
+    allow-list panel carried that the garden panel didn't, and the
+    mismatch is worth seeing — it means something is permitted to merge
+    that `overnight` will never dispatch.
+
+    Rows are sorted by repo name, matching `gardener garden list` — a
+    stable order matters more than a clever one here, because the plot
+    view draws a plant per row and re-renders every 4 s poll."""
+    repos = sorted(set(garden_repos) | set(allowed_repos))
+    allowed = set(allowed_repos)
+    in_flight = set(in_progress)
+    garden_set = set(garden_repos)
+    rows = []
+    for repo in repos:
+        s = stats.get(repo)
+        rows.append(
+            {
+                "repo": repo,
+                "in_garden": repo in garden_set,
+                "can_merge": repo in allowed,
+                "in_flight": repo in in_flight,
+                "runs": s.runs if s else 0,
+                "successes": s.successes if s else 0,
+                "errors": s.errors if s else 0,
+                "last_run": s.last_run if s else None,
+                "last_success": s.last_success if s else None,
+                "last_outcome": s.last_outcome if s else None,
+                "cost_usd": round(s.cost_usd, 2) if s else 0.0,
+            }
+        )
+    return rows
+
+
 def build_status(
     state_dir: Optional[Path] = None,
     run_limit: int = 40,
@@ -182,6 +246,14 @@ def build_status(
 
     recent_cost = sum(r.cost_usd for r in runs if r.cost_usd)
     recent_error_count = sum(1 for r in runs if r.outcome == "error")
+
+    garden_repos = _safe_list(lambda: garden.list_garden(path=base / "garden.json"))
+    allowed_repos = _safe_list(
+        lambda: merge_allowlist.list_allowed(path=base / "merge_allowlist.json")
+    )
+    garden_rows = build_garden_rows(
+        garden_repos, allowed_repos, state.repo_stats(db_path=db_path), in_progress
+    )
 
     return {
         "generated_at": state.now_iso(),
@@ -209,10 +281,13 @@ def build_status(
             "recent_cost_usd": round(recent_cost, 2),
             "recent_error_count": recent_error_count,
         },
-        "garden": _safe_list(lambda: garden.list_garden(path=base / "garden.json")),
-        "merge_allowlist": _safe_list(
-            lambda: merge_allowlist.list_allowed(path=base / "merge_allowlist.json")
-        ),
+        # `garden`/`merge_allowlist` stay in the payload as the raw lists
+        # they always were — `garden_rows` is the joined view the UI
+        # renders, but the flat lists are what a `curl /api/status | jq`
+        # check of "is repo X opted in" is easiest to read.
+        "garden": garden_repos,
+        "merge_allowlist": allowed_repos,
+        "garden_rows": garden_rows,
         "overnight_next_index": overnight.read_cursor(path=base / "overnight_cursor.json"),
     }
 
@@ -229,11 +304,14 @@ PAGE_HTML = """<!doctype html>
     --bg: #14171a; --panel: #1c2023; --text: #e7ece8; --muted: #9aa39c;
     --border: #2c3236; --accent: #5fbf85; --warn: #e3a35a; --err: #ef6a63;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /* Garden-plot palette — soil, terracotta, seed, leaf litter. */
+    --soil: #3b3129; --pot: #96603f; --seed: #b28f5c; --fallen: #6d4c33;
   }
   @media (prefers-color-scheme: light) {
     :root {
       --bg: #f5f6f4; --panel: #ffffff; --text: #1b1f1c; --muted: #5b645d;
       --border: #dfe3de; --accent: #2f7a4f; --warn: #b3661a; --err: #b3261e;
+      --soil: #7a6450; --pot: #b56f47; --seed: #8b6a3c; --fallen: #8a6448;
     }
   }
   * { box-sizing: border-box; }
@@ -297,6 +375,68 @@ PAGE_HTML = """<!doctype html>
   }
   .progress-bar > div { height: 100%; background: var(--accent); }
 
+  /* ---- Garden panel (plot + table) ---- */
+  .toolbar {
+    display: flex; align-items: center; gap: 0.5rem 0.9rem;
+    flex-wrap: wrap; margin-bottom: 0.9rem;
+  }
+  .tabs { display: flex; gap: 0.35rem; }
+  .tab {
+    font: inherit; font-size: 0.8rem; cursor: pointer;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.8rem;
+  }
+  .tab[aria-selected="true"] { color: var(--accent); border-color: var(--accent); }
+  /* auto-fill (not auto-fit) so a garden of three plants stays three
+     small plants at the left rather than three stretched across 1400px. */
+  .plot {
+    display: grid; gap: 0.25rem;
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  }
+  /* Sky above, an earth band under the soil mound. Applied per cell
+     rather than to the whole plot, because the plot wraps onto several
+     rows and a single container gradient would put the horizon through
+     the middle of the second row of plants. The stops line up with
+     SOIL_Y in the SVG, whose aspect ratio is fixed. */
+  .plant {
+    text-align: center; padding: 0.2rem 0.1rem 0.35rem; border-radius: 10px;
+    border: 1px solid transparent;
+    background:
+      linear-gradient(to bottom,
+        transparent 0%, transparent 62%,
+        color-mix(in srgb, var(--soil) 22%, transparent) 78%,
+        color-mix(in srgb, var(--soil) 30%, transparent) 88%,
+        transparent 92%);
+  }
+  .plant.potted { border-style: dashed; border-color: var(--border); }
+  .plant svg { display: block; width: 100%; height: auto; }
+  .plant .nm {
+    font-size: 0.68rem; line-height: 1.25; overflow-wrap: anywhere;
+    margin-top: 0.1rem;
+  }
+  .plant .meta { font-size: 0.62rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .plant.live { border-color: var(--accent); }
+  .plant.live .nm { color: var(--accent); }
+  /* The glow halo is the only animated thing on the page; refresh()
+     re-renders the plot only when the data actually changed, so this
+     animation isn't restarted from zero on every 4 s poll. */
+  @keyframes breathe { 0%, 100% { opacity: 0.15; } 50% { opacity: 0.5; } }
+  .plant.live .glow { animation: breathe 2.4s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .plant.live .glow { animation: none; opacity: 0.3; } }
+  .legend { margin-top: 0.9rem; font-size: 0.78rem; color: var(--muted); }
+  .legend summary { cursor: pointer; }
+  .legend ul { margin: 0.5rem 0 0; padding-left: 1.1rem; }
+  .legend li { margin-bottom: 0.15rem; }
+  .legend b { color: var(--text); font-weight: 600; }
+  .garden-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+  .garden-table th[data-sort]:hover { color: var(--text); }
+  .garden-table td.num, .garden-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .dot {
+    display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%;
+    margin-right: 0.35rem; vertical-align: baseline;
+  }
+  .muted { color: var(--muted); }
+
   /* Phone layout. The runs table is the one thing that genuinely can't
      shrink: six columns, one of which is a free-text summary sentence.
      Rather than leave it as a sideways-scrolling strip inside `.panel`
@@ -333,6 +473,13 @@ PAGE_HTML = """<!doctype html>
     td.summary::before { content: none; }
     /* The empty-state row is a single full-width cell, not a card. */
     tr.is-empty { display: block; border: none; padding: 0; }
+    /* Same card treatment for the garden table: repo on its own line,
+       the six short scalar cells flowing beneath it as one meta line. */
+    .garden-table td { order: 2; flex: 0 0 auto; width: auto; font-size: 0.78rem; }
+    .garden-table td.repo { order: 1; flex: 1 0 100%; }
+    /* Plants get a little bigger on a phone — a 3-4 column plot at
+       ~100px reads as a garden; eight 84px columns read as clip art. */
+    .plot { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
   }
 </style>
 </head>
@@ -351,13 +498,44 @@ PAGE_HTML = """<!doctype html>
     <h2>Currently tending</h2>
     <div id="in-progress" class="empty">nothing in flight</div>
   </div>
-  <div class="panel">
+  <div class="panel wide garden-panel">
     <h2 id="garden-heading">Garden</h2>
-    <div id="garden"></div>
-  </div>
-  <div class="panel">
-    <h2>Merge allow-list</h2>
-    <div id="allowlist"></div>
+    <div class="toolbar">
+      <div class="tabs" role="tablist">
+        <button class="tab" id="tab-plot" role="tab" aria-selected="true">🌿 Plot</button>
+        <button class="tab" id="tab-table" role="tab" aria-selected="false">▤ Table</button>
+      </div>
+      <span class="sub" id="garden-summary"></span>
+    </div>
+    <div id="plot-view">
+      <div class="plot" id="plot"></div>
+      <details class="legend">
+        <summary>How a plant is drawn</summary>
+        <ul>
+          <li><b>Height &amp; leaves</b> — successful tends, all-time</li>
+          <li><b>Colour &amp; droop</b> — days since the last successful tend</li>
+          <li><b>Blossom</b> — on the merge allow-list, so a tend may merge its own PR</li>
+          <li><b>Fallen brown leaves</b> — recorded errors</li>
+          <li><b>Soil mound</b> — dollars spent tending it</li>
+          <li><b>Terracotta pot</b> — allow-listed but not in the garden, so <code>overnight</code> never plants it</li>
+          <li><b>Glow</b> — being tended right now</li>
+        </ul>
+      </details>
+    </div>
+    <div id="table-view" hidden>
+      <table class="garden-table">
+        <thead><tr>
+          <th data-sort="repo">Repo</th>
+          <th data-sort="health">Health</th>
+          <th data-sort="successes" class="num">Tends</th>
+          <th data-sort="errors" class="num">Errors</th>
+          <th data-sort="last_success">Last tended</th>
+          <th data-sort="cost_usd" class="num">Cost</th>
+          <th data-sort="can_merge">Merge</th>
+        </tr></thead>
+        <tbody id="garden-rows"></tbody>
+      </table>
+    </div>
   </div>
   <div class="panel wide">
     <h2>Recent runs</h2>
@@ -382,6 +560,276 @@ function shortTime(ts) {
   try { return new Date(ts).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
   catch { return ts; }
 }
+
+/* ---------------------------------------------------------------------
+   The garden: one row per opted-in repo, drawn two ways.
+
+   Every visual property below is a real number out of gardener's own run
+   history — nothing here is decoration for its own sake. The mapping is
+   spelled out in the page's own legend, so what you see can always be
+   traced back to a column. See build_garden_rows() for the row shape.
+   --------------------------------------------------------------------- */
+const SOIL_Y = 112, BASE_X = 50;
+
+const HEALTH = {
+  thriving:   {label: "thriving",   leaf: "#4caf6d", stem: "#3d7f52", droop: 0.00},
+  steady:     {label: "steady",     leaf: "#5aa860", stem: "#437a46", droop: 0.15},
+  dry:        {label: "dry",        leaf: "#a8a54e", stem: "#7c7a3c", droop: 0.45},
+  wilting:    {label: "wilting",    leaf: "#a8763f", stem: "#7d5a33", droop: 0.85},
+  struggling: {label: "struggling", leaf: "#9c6a55", stem: "#6f4c3c", droop: 0.70},
+  unplanted:  {label: "not tended", leaf: "#7d8a80", stem: "#6d7a71", droop: 0.00},
+};
+// Worst first, so sorting the Health column ascending surfaces the repos
+// that need attention rather than the ones that don't.
+const HEALTH_ORDER = ["unplanted", "struggling", "wilting", "dry", "steady", "thriving"];
+
+function healthOf(row) {
+  if (!row.runs) return "unplanted";
+  if (!row.last_success) return "struggling";
+  const d = daysSince(row.last_success);
+  if (d < 2) return "thriving";
+  if (d < 5) return "steady";
+  if (d < 10) return "dry";
+  return "wilting";
+}
+
+function daysSince(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? null : (Date.now() - t) / 86400000;
+}
+function fmtAge(d) {
+  if (d == null) return "never";
+  if (d < 1 / 24) return "just now";
+  if (d < 1) return Math.round(d * 24) + "h ago";
+  return Math.round(d) + "d ago";
+}
+
+// Deterministic per-repo jitter. Every plant gets its own lean, leaf
+// lengths and petal rotation so the plot doesn't look stamped out — but
+// seeded from the repo name, never Math.random(), so a plant keeps the
+// same shape across re-renders and only changes when its data does.
+function hashName(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function rngFrom(seed) {
+  let s = seed || 1;
+  return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+function n1(v) { return v.toFixed(1); }
+
+// A leaf as two mirrored quadratic curves from its attachment point out
+// to its tip — a lens shape, wider in the middle.
+function leafPath(x, y, dx, dy) {
+  const tx = x + dx, ty = y + dy;
+  const len = Math.hypot(dx, dy) || 1;
+  const w = len * 0.3;
+  const nx = -dy / len * w, ny = dx / len * w;
+  const mx = x + dx / 2, my = y + dy / 2;
+  return `M${n1(x)},${n1(y)} Q${n1(mx + nx)},${n1(my + ny)} ${n1(tx)},${n1(ty)}`
+       + ` Q${n1(mx - nx)},${n1(my - ny)} ${n1(x)},${n1(y)}Z`;
+}
+
+// Point at parameter t on the quadratic the stem is drawn with, so
+// leaves attach to the stem instead of floating beside it.
+function onStem(t, cx, cy, tx, ty) {
+  const u = 1 - t;
+  return [u * u * BASE_X + 2 * u * t * cx + t * t * tx,
+          u * u * SOIL_Y + 2 * u * t * cy + t * t * ty];
+}
+
+function plantSvg(row, maxCost) {
+  const rnd = rngFrom(hashName(row.repo));
+  const key = healthOf(row);
+  const h = HEALTH[key];
+  const parts = [];
+
+  if (row.in_flight) {
+    parts.push(`<circle class="glow" cx="50" cy="86" r="34" fill="var(--accent)" opacity="0.18"/>`);
+  }
+
+  // Ground: a mound of soil whose width is the dollars this repo has
+  // cost, or a pot when it is allow-listed but not actually planted.
+  const spend = maxCost > 0 ? Math.min(1, row.cost_usd / maxCost) : 0;
+  if (row.in_garden) {
+    const rx = 15 + 17 * spend;
+    parts.push(`<ellipse cx="50" cy="${SOIL_Y + 4}" rx="${n1(rx)}" ry="5.5" fill="var(--soil)"/>`);
+  } else {
+    parts.push(`<path d="M36,${SOIL_Y} L64,${SOIL_Y} L60,${SOIL_Y + 15} L40,${SOIL_Y + 15}Z" fill="var(--pot)"/>`
+             + `<rect x="34" y="${SOIL_Y - 5}" width="32" height="6" rx="2" fill="var(--pot)"/>`);
+  }
+
+  if (row.runs === 0) {
+    // Never dispatched: a seed in the ground, nothing above it yet.
+    parts.push(`<ellipse cx="50" cy="${SOIL_Y + 2}" rx="3.4" ry="2.6" fill="var(--seed)"/>`);
+  } else {
+    const maturity = Math.min(row.successes, 16) / 16;
+    const height = 16 + maturity * 16 * 4.3;
+    const lean = (rnd() - 0.5) * 18;
+    // Droop bends the tip over, but only so far: scaled by the full droop
+    // a struggling repo's short stem ends up lying flat on the soil,
+    // which reads as debris rather than as a plant in trouble.
+    const topX = BASE_X + lean * (0.55 + h.droop * 0.35);
+    const topY = SOIL_Y - height * (1 - h.droop * 0.18);
+    const cx = BASE_X + lean * 0.35, cy = SOIL_Y - height * 0.55;
+    const thick = 1.3 + Math.min(row.successes, 12) * 0.13;
+    parts.push(`<path d="M50,${SOIL_Y} Q${n1(cx)},${n1(cy)} ${n1(topX)},${n1(topY)}"`
+             + ` fill="none" stroke="${h.stem}" stroke-width="${n1(thick)}" stroke-linecap="round"/>`);
+
+    const pairs = Math.min(1 + Math.floor(row.successes / 2), 6);
+    for (let i = 0; i < pairs; i++) {
+      const t = (i + 1) / (pairs + 0.7) + (rnd() - 0.5) * 0.06;
+      const [px, py] = onStem(t, cx, cy, topX, topY);
+      const side = i % 2 === 0 ? -1 : 1;
+      // Leaves lift toward the light when the repo is freshly tended and
+      // hang down as it goes untended — that is the whole droop signal.
+      const angle = 0.62 - h.droop * 1.5 + (rnd() - 0.5) * 0.3;
+      const len = 9 + Math.min(row.successes, 10) * 0.85 + rnd() * 3;
+      parts.push(`<path d="${leafPath(px, py, side * len * Math.cos(angle), -len * Math.sin(angle))}"`
+               + ` fill="${h.leaf}" opacity="${n1(0.78 + rnd() * 0.22)}"/>`);
+    }
+
+    // A blossom means this repo is on the merge allow-list: it is
+    // allowed to bear fruit on its own, i.e. merge its own PRs. Which
+    // flower it is, is decoration — deterministic per repo so the garden
+    // isn't 32 identical stamps, but it carries no meaning of its own.
+    if (row.can_merge && row.successes > 0) {
+      const blooms = ["#e77fa7", "#e88f6c", "#c88ad8", "#8fb8e0", "#eec55f"];
+      const tint = h.droop > 0.5 ? "#c9a06a" : blooms[Math.floor(rnd() * blooms.length)];
+      const petals = 5 + Math.floor(rnd() * 2);
+      // Petal size follows the plant: a full-size flower on a one-tend
+      // sprout reads as top-heavy clip art rather than a young plant.
+      const pr = 1.9 + maturity * 1.4;
+      const spin = rnd() * 6.28;
+      for (let k = 0; k < petals; k++) {
+        const a = spin + k * (6.2832 / petals);
+        parts.push(`<circle cx="${n1(topX + Math.cos(a) * pr * 1.15)}" cy="${n1(topY + Math.sin(a) * pr * 1.15)}"`
+                 + ` r="${n1(pr)}" fill="${tint}" opacity="0.92"/>`);
+      }
+      parts.push(`<circle cx="${n1(topX)}" cy="${n1(topY)}" r="${n1(pr * 0.66)}" fill="#f0c356"/>`);
+    }
+
+    // Grass at the foot of an established plant. Decoration, like the
+    // lean and the leaf jitter — it makes a bed of plants look planted
+    // rather than pasted, and encodes nothing.
+    if (row.in_garden && row.successes > 2) {
+      for (let i = 0; i < 3; i++) {
+        const gx = 50 + (rnd() - 0.5) * 30, gh = 4 + rnd() * 5;
+        parts.push(`<path d="M${n1(gx)},${n1(SOIL_Y + 2)} Q${n1(gx + (rnd() - 0.5) * 4)},${n1(SOIL_Y + 2 - gh * 0.6)} `
+                 + `${n1(gx + (rnd() - 0.5) * 8)},${n1(SOIL_Y + 2 - gh)}" fill="none" stroke="${h.leaf}"`
+                 + ` stroke-width="0.9" opacity="0.5" stroke-linecap="round"/>`);
+      }
+    }
+  }
+
+  // Errors that this repo actually recorded, as leaf litter on the soil.
+  for (let i = 0; i < Math.min(row.errors, 6); i++) {
+    const lx = 26 + rnd() * 48, ly = SOIL_Y + 1 + rnd() * 6;
+    parts.push(`<ellipse cx="${n1(lx)}" cy="${n1(ly)}" rx="3.4" ry="1.5" fill="var(--fallen)"`
+             + ` transform="rotate(${n1((rnd() - 0.5) * 60)} ${n1(lx)} ${n1(ly)})"/>`);
+  }
+
+  return `<svg viewBox="0 0 100 130" aria-hidden="true">${parts.join("")}</svg>`;
+}
+
+let gardenSort = {key: "repo", dir: 1};
+let gardenRows = [];
+let lastPlotSig = null;
+
+function sortedGardenRows() {
+  const k = gardenSort.key;
+  const val = r =>
+    k === "repo" ? r.repo.toLowerCase()
+    : k === "health" ? HEALTH_ORDER.indexOf(healthOf(r))
+    : k === "last_success" ? (r.last_success ? Date.parse(r.last_success) : 0)
+    : k === "can_merge" ? (r.can_merge ? 1 : 0)
+    : r[k];
+  return gardenRows.slice().sort((a, b) => {
+    const x = val(a), y = val(b);
+    if (x < y) return -1 * gardenSort.dir;
+    if (x > y) return 1 * gardenSort.dir;
+    return a.repo.localeCompare(b.repo);
+  });
+}
+
+function renderGardenTable() {
+  const rows = sortedGardenRows();
+  document.getElementById("garden-rows").innerHTML = rows.map(r => {
+    const h = HEALTH[healthOf(r)];
+    const age = fmtAge(daysSince(r.last_success));
+    return `<tr>
+      <td class="repo" data-label="Repo">${esc(r.repo)}${r.in_garden ? "" : ` <span class="muted">(not planted)</span>`}</td>
+      <td data-label="Health"><span class="dot" style="background:${h.leaf}"></span>${r.in_flight ? `<span class="pill live">tending now</span>` : h.label}</td>
+      <td class="num" data-label="Tends">${r.successes}</td>
+      <td class="num ${r.errors ? "outcome-error" : "muted"}" data-label="Errors">${r.errors}</td>
+      <td data-label="Last tended">${age}</td>
+      <td class="num" data-label="Cost">${fmtCost(r.cost_usd)}</td>
+      <td data-label="Merge">${r.can_merge ? "✓ allowed" : `<span class="muted">—</span>`}</td>
+    </tr>`;
+  }).join("") || `<tr class="is-empty"><td colspan="7" class="empty">nothing opted in — <code>gardener garden add --repo owner/name</code></td></tr>`;
+}
+
+function renderGarden(rows) {
+  gardenRows = rows || [];
+  document.getElementById("garden-heading").textContent = `Garden (${gardenRows.length})`;
+
+  const counts = {};
+  for (const r of gardenRows) { const k = healthOf(r); counts[k] = (counts[k] || 0) + 1; }
+  const needsWater = (counts.dry || 0) + (counts.wilting || 0) + (counts.struggling || 0);
+  const mergeable = gardenRows.filter(r => r.can_merge).length;
+  const unplanted = gardenRows.filter(r => !r.in_garden).length;
+  document.getElementById("garden-summary").textContent = gardenRows.length
+    ? `${counts.thriving || 0} thriving · ${needsWater} needing water · ${mergeable} may merge`
+      + (unplanted ? ` · ${unplanted} allow-listed but not planted` : "")
+    : "";
+
+  // Re-render the plot only when something it draws actually changed —
+  // otherwise the 4 s poll would restart the in-flight glow animation
+  // from zero every time, and rebuild 32 SVGs for nothing.
+  const sig = JSON.stringify(gardenRows.map(r =>
+    [r.repo, r.successes, r.errors, r.cost_usd, r.can_merge, r.in_garden, r.in_flight, healthOf(r)]));
+  if (sig !== lastPlotSig) {
+    lastPlotSig = sig;
+    const maxCost = gardenRows.reduce((m, r) => Math.max(m, r.cost_usd), 0);
+    document.getElementById("plot").innerHTML = gardenRows.map(r => {
+      const h = HEALTH[healthOf(r)];
+      const age = fmtAge(daysSince(r.last_success));
+      const cls = ["plant", r.in_flight ? "live" : "", r.in_garden ? "" : "potted"].filter(Boolean).join(" ");
+      const title = `${r.repo} — ${h.label}, ${r.successes} tend(s), ${r.errors} error(s), `
+        + `last tended ${age}, ${fmtCost(r.cost_usd)}${r.can_merge ? ", may merge" : ""}`;
+      return `<div class="${cls}" title="${esc(title)}">
+        ${plantSvg(r, maxCost)}
+        <div class="nm">${esc(r.repo.split("/").pop())}</div>
+        <div class="meta">${r.successes}✓${r.errors ? " " + r.errors + "✗" : ""} · ${esc(age)}</div>
+      </div>`;
+    }).join("") || `<div class="empty">nothing planted yet</div>`;
+  }
+
+  renderGardenTable();
+}
+
+function showGardenView(view) {
+  const isPlot = view !== "table";
+  document.getElementById("plot-view").hidden = !isPlot;
+  document.getElementById("table-view").hidden = isPlot;
+  document.getElementById("tab-plot").setAttribute("aria-selected", String(isPlot));
+  document.getElementById("tab-table").setAttribute("aria-selected", String(!isPlot));
+  try { localStorage.setItem("gardenView", isPlot ? "plot" : "table"); } catch (e) {}
+}
+
+document.getElementById("tab-plot").addEventListener("click", () => showGardenView("plot"));
+document.getElementById("tab-table").addEventListener("click", () => showGardenView("table"));
+for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    gardenSort = {key, dir: gardenSort.key === key ? -gardenSort.dir : 1};
+    renderGardenTable();
+  });
+}
+try { showGardenView(localStorage.getItem("gardenView") || "plot"); } catch (e) { showGardenView("plot"); }
 
 async function refresh() {
   let data;
@@ -419,14 +867,7 @@ async function refresh() {
     : `<span class="empty">nothing in flight</span>`;
   ip.className = "";
 
-  document.getElementById("garden-heading").textContent = `Garden (${data.garden.length})`;
-  document.getElementById("garden").innerHTML = data.garden.length
-    ? data.garden.map(r => `<span class="pill">${esc(r)}</span>`).join("")
-    : `<span class="empty">empty</span>`;
-
-  document.getElementById("allowlist").innerHTML = data.merge_allowlist.length
-    ? data.merge_allowlist.map(r => `<span class="pill">${esc(r)}</span>`).join("")
-    : `<span class="empty">empty — nothing can auto-merge</span>`;
+  renderGarden(data.garden_rows);
 
   // The data-label attributes are what the narrow-viewport card layout
   // renders via td::before once the thead is hidden — see the stylesheet.

@@ -46,6 +46,35 @@ def default_db_path() -> Path:
     return default_state_dir() / "gardener.sqlite3"
 
 
+#: Outcomes `cli.py` records for a dispatch that actually did its job —
+#: everything else (currently only `error`) counts against a repo. Kept as
+#: a set rather than `outcome != "error"` so a future outcome has to be
+#: classified deliberately instead of silently counting as a success.
+SUCCESS_OUTCOMES = frozenset({"tend", "created", "report"})
+
+
+@dataclass
+class RepoStats:
+    """All-time aggregate of one repo's run history.
+
+    Deliberately whole-history, not the `list_runs(limit=N)` window the
+    dashboard's Recent runs table uses: this is what "how well established
+    is this plant" is drawn from, and a repo tended steadily for a week
+    shouldn't look like a seedling just because it's outside the last 40
+    rows."""
+
+    repo: str
+    runs: int
+    successes: int
+    errors: int
+    first_run: Optional[str] = None
+    last_run: Optional[str] = None
+    last_success: Optional[str] = None
+    last_outcome: Optional[str] = None
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+
+
 @dataclass
 class Run:
     repo: str
@@ -133,6 +162,67 @@ def list_runs(
         )
         for r in rows
     ]
+
+
+def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
+    """All-time per-repo aggregates, keyed by `owner/repo`.
+
+    One GROUP BY over the whole `runs` table plus one lookup of each
+    repo's newest row — cheap enough for the dashboard's 4 s poll (the db
+    is a few hundred rows and grows by one per dispatch), and far cheaper
+    than pulling every run into Python to fold there.
+
+    Repos with no recorded run at all are simply absent from the result;
+    it's the caller's job to decide what an untended garden member looks
+    like, since only the caller knows the garden list."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return {}
+    placeholders = ",".join("?" for _ in SUCCESS_OUTCOMES)
+    successes = sorted(SUCCESS_OUTCOMES)
+    with closing(_connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT repo,
+                   COUNT(*) AS runs,
+                   SUM(CASE WHEN outcome IN ({placeholders}) THEN 1 ELSE 0 END) AS successes,
+                   SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS errors,
+                   MIN(timestamp) AS first_run,
+                   MAX(timestamp) AS last_run,
+                   MAX(CASE WHEN outcome IN ({placeholders}) THEN timestamp END) AS last_success,
+                   COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                   COALESCE(SUM(duration_ms), 0) AS duration_ms
+            FROM runs
+            GROUP BY repo
+            """,
+            (*successes, *successes),
+        ).fetchall()
+        # The newest row per repo, for its outcome. `MAX(id)` rather than
+        # `MAX(timestamp)`: timestamps are second-resolution, so two runs
+        # of a concurrent batch recorded in the same second would tie,
+        # while the autoincrement id never does.
+        latest = {
+            r["repo"]: r["outcome"]
+            for r in conn.execute(
+                "SELECT repo, outcome FROM runs WHERE id IN (SELECT MAX(id) FROM runs GROUP BY repo)"
+            ).fetchall()
+        }
+    return {
+        r["repo"]: RepoStats(
+            repo=r["repo"],
+            runs=r["runs"],
+            successes=r["successes"],
+            errors=r["errors"],
+            first_run=r["first_run"],
+            last_run=r["last_run"],
+            last_success=r["last_success"],
+            last_outcome=latest.get(r["repo"]),
+            cost_usd=round(r["cost_usd"], 4),
+            duration_ms=int(r["duration_ms"]),
+        )
+        for r in rows
+    }
 
 
 def now_iso() -> str:
