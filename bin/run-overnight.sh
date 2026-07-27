@@ -19,24 +19,24 @@
 # gardener bug. Exporting PATH explicitly here, rather than depending on
 # .bashrc sourcing, means this script no longer depends on how it's
 # invoked.
+# `gardener overnight` now writes and prunes its own run log internally
+# (gardener/run_log.py, added since this script was first written) --
+# every line this used to capture via its own `>>"$LOG_FILE" 2>&1` wrapper
+# is already mirrored to `~/.local/state/gardener/logs/overnight-<ts>.log`
+# by gardener itself, including the dashboard-required naming/format the
+# old manual redirect only approximated. Keeping this script's OWN
+# redirection alongside that produced doubled log lines whenever both
+# happened to compute the same filename in the same second (confirmed
+# directly: a real overnight run's log had every line duplicated) and, even
+# when the filenames didn't collide, always a second full copy of the same
+# content in a different file for no reason. So: run gardener directly and
+# let it own its own log entirely; this script's only remaining job is
+# fixing the PATH problem below.
 set -uo pipefail
 
 export PATH="/root/.local/bin:$PATH"
 
 GARDENER_BIN="/root/.venvs/gardener/bin/gardener"
-LOG_DIR="/root/.local/state/gardener/logs"
-LOG_FILE="$LOG_DIR/overnight-$(date +%Y%m%d-%H%M%S).log"
 HOURS="${GARDENER_OVERNIGHT_HOURS:-8}"
 
-mkdir -p "$LOG_DIR"
-
-{
-  echo "=== gardener overnight starting: $(date -Is) (budget ${HOURS}h) ==="
-  "$GARDENER_BIN" overnight --hours "$HOURS"
-  echo "=== gardener overnight finished: $(date -Is) (exit $?) ==="
-} >>"$LOG_FILE" 2>&1
-
-# Keep the last 30 days of logs, no more.
-find "$LOG_DIR" -name 'overnight-*.log' -mtime +30 -delete
-
-ln -sf "$LOG_FILE" "$LOG_DIR/latest.log"
+"$GARDENER_BIN" overnight --hours "$HOURS"
