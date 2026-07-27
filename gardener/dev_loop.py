@@ -6,13 +6,14 @@
 
 A skill is a single markdown file at `~/local-skills/<slug>-dev-loop/
 <slug>-dev-loop.md`, symlinked to `~/.claude/commands/<slug>-dev-loop.md` —
-this is a documented convention from a private skills-conventions repo of
-the author's own (the placement table under "Skill needs its own issue
-tracker"), and was confirmed live: `claude -p "/acsf-dev-loop"`, dispatched
-with `cwd` set to a completely unrelated repo's checkout, loaded the full
-skill text anyway — slash-command skills resolve from `~/.claude/commands/`
-globally, independent of the invoking process's `cwd`. No separate
-"install" step exists beyond that symlink existing.
+the layout `create-dev-loop`
+(https://github.com/dmccoystephenson/create-dev-loop) writes in its Steps 3
+and 5, which is why gardener looks for a skill in exactly those two places.
+Confirmed live: `claude -p "/<slug>-dev-loop"`, dispatched with `cwd` set
+to a completely unrelated repo's checkout, loaded the full skill text
+anyway — slash-command skills resolve from `~/.claude/commands/` globally,
+independent of the invoking process's `cwd`. No separate "install" step
+exists beyond that symlink existing.
 
 That same test also showed the skill text's own hardcoded `**Working
 directory:** /some/path` line does NOT get silently obeyed — the model
@@ -45,8 +46,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Mirrors the "Skill needs its own issue tracker" row of the author's own
-# skills-conventions doc's placement table (a private repo).
+# The two locations create-dev-loop
+# (https://github.com/dmccoystephenson/create-dev-loop) writes a generated
+# skill to — its Step 3 (the skill file) and Step 5 (the slash-command
+# symlink). gardener reads both, so if create-dev-loop's placement ever
+# changes, these change with it.
 LOCAL_SKILLS_DIR = Path.home() / "local-skills"
 COMMANDS_DIR = Path.home() / ".claude" / "commands"
 
@@ -56,7 +60,7 @@ _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 def slugify_repo_name(repo: str) -> str:
     """`owner/Some_Repo.Name` -> `some-repo-name`, matching the naming
     already used by every existing `<slug>-dev-loop` skill/repo observed
-    (e.g. `Simple-Calculator-GUI-Using-SDL` -> `simple-calculator-gui-using-sdl-dev-loop`)."""
+    (e.g. `Calculator-GUI-Using-SDL` -> `calculator-gui-using-sdl-dev-loop`)."""
     name = repo.split("/", 1)[-1]
     slug = _SLUG_STRIP_RE.sub("-", name.lower()).strip("-")
     if not slug:

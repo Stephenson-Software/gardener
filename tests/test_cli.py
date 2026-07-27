@@ -1,6 +1,11 @@
 """Argument parsing, mutual-exclusivity of --implement/--file-issue, and
 prompt templating — the deterministic parts of cli.py that don't require
-actually invoking `claude` or `gh`."""
+actually invoking `claude` or `gh`.
+
+`align`'s conventions repo has no built-in default (see conventions.py), so
+every test that exercises it passes `CONVENTIONS_URL` explicitly rather
+than depending on `$GARDENER_CONVENTIONS_URL` being set in the environment
+running the suite."""
 import argparse
 import io
 import json
@@ -49,6 +54,8 @@ from gardener.dispatch import (
     looks_like_auth_failure,
 )
 from gardener.notify import Level
+
+CONVENTIONS_URL = "https://example.invalid/conventions.git"
 
 
 class TestArgParsing(unittest.TestCase):
@@ -416,28 +423,33 @@ class TestPromptTemplating(unittest.TestCase):
             target.mkdir()
             conv.mkdir()
             prompt = build_prompt(
-                Mode.REPORT, "owner/name", target, conv, "main"
+                Mode.REPORT, "owner/name", target, conv, "main", CONVENTIONS_URL
             )
         self.assertNotIn("$repo", prompt)
         self.assertNotIn("$target_cwd", prompt)
         self.assertNotIn("$conventions_dir", prompt)
+        self.assertNotIn("$conventions_url", prompt)
         self.assertNotIn("$mode_instructions", prompt)
         self.assertIn("owner/name", prompt)
+        # The conventions repo is operator-configured with no built-in
+        # default, so the dispatched run has to be told which one it is
+        # auditing against — a hardcoded URL in the template would be wrong.
+        self.assertIn(CONVENTIONS_URL, prompt)
         self.assertIn("GARDENER_SUMMARY", prompt)
 
     def test_report_mode_prompt_says_no_write_tools(self):
         with tempfile.TemporaryDirectory() as td:
-            prompt = build_prompt(Mode.REPORT, "owner/name", Path(td), Path(td), "main")
+            prompt = build_prompt(Mode.REPORT, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("do NOT have file-write or shell", prompt)
 
     def test_implement_mode_prompt_mentions_pr(self):
         with tempfile.TemporaryDirectory() as td:
-            prompt = build_prompt(Mode.IMPLEMENT, "owner/name", Path(td), Path(td), "main")
+            prompt = build_prompt(Mode.IMPLEMENT, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("gh pr create", prompt)
 
     def test_file_issue_mode_prompt_forbids_multiple_issues(self):
         with tempfile.TemporaryDirectory() as td:
-            prompt = build_prompt(Mode.FILE_ISSUE, "owner/name", Path(td), Path(td), "main")
+            prompt = build_prompt(Mode.FILE_ISSUE, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("Do not open more than one issue", prompt)
 
 
@@ -770,12 +782,27 @@ class TestCmdAlign(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def _args(self, repo="owner/name", implement=False, file_issue=False):
+    def _args(self, repo="owner/name", implement=False, file_issue=False,
+              conventions_repo=CONVENTIONS_URL):
         return argparse.Namespace(
             repo=repo, implement=implement, file_issue=file_issue, model=None,
             timeout=1800, no_refresh_conventions=False, no_refresh_target=False,
-            state_db=self.state_db,
+            conventions_repo=conventions_repo, state_db=self.state_db,
         )
+
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_unconfigured_conventions_repo_exits_before_dispatching(self, mock_conv):
+        """An unconfigured conventions repo is a setup error, not a run
+        failure: cmd_align must bail with exit 2 without cloning anything
+        or recording a run."""
+        with patch.dict("os.environ", {}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+                exit_code = cmd_align(self._args(conventions_repo=None))
+
+        self.assertEqual(exit_code, 2)
+        mock_conv.assert_not_called()
+        self.assertIn("GARDENER_CONVENTIONS_URL", stderr.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")

@@ -17,12 +17,14 @@ contributors).
   mode) must never become reachable, for any mode, under any flag
   combination; see `CLAUDE.md`'s "Conventions" section and `dispatch.py`'s
   module docstring for why this is a hard rule, not a style preference.
-- **A note on running this yourself:** `align` clones a private
-  conventions repo (`dms-conventions`), and `tend` bootstraps a target
-  repo's dev-loop skill via another private repo (`create-dev-loop`) —
-  see the callout near the top of `README.md`. You can read, test, and
-  modify gardener's own code without either, but exercising `align`/`tend`
-  end to end against a real target repo requires your own equivalents.
+- **A note on running this yourself:** `align` needs a conventions repo you
+  supply — gardener ships no default. See
+  [README.md's "Conventions repo"](README.md#conventions-repo) for the
+  required layout; stub files are enough to exercise the code path. `tend`
+  needs no setup beyond the `claude` and `gh` CLIs — it bootstraps a target
+  repo's dev-loop skill via
+  [`create-dev-loop`](https://github.com/dmccoystephenson/create-dev-loop)
+  if one doesn't already exist. gardener's own tests need neither.
 
 ## Project conventions
 
