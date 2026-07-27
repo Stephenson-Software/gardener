@@ -6,8 +6,8 @@
 
 A skill is a single markdown file at `~/local-skills/<slug>-dev-loop/
 <slug>-dev-loop.md`, symlinked to `~/.claude/commands/<slug>-dev-loop.md` —
-this is documented convention (`dmccoystephenson/a-private-repo-4`'
-`CONVENTIONS.md`, the placement table under "Skill needs its own issue
+this is a documented convention from a private skills-conventions repo of
+the author's own (the placement table under "Skill needs its own issue
 tracker"), and was confirmed live: `claude -p "/acsf-dev-loop"`, dispatched
 with `cwd` set to a completely unrelated repo's checkout, loaded the full
 skill text anyway — slash-command skills resolve from `~/.claude/commands/`
@@ -31,8 +31,8 @@ and to disregard the skill's own stated one.
 gardener: gardener's target-repo cache directories are named
 `<owner>__<repo>` (see `cli.py`'s `default_repos_cache_dir`), not `<repo>`,
 so a naive basename-of-cwd slug would produce e.g.
-`dmccoystephenson__a-private-repo-3-dev-loop` instead of the
-established `a-private-repo-3-dev-loop` naming every existing skill
+`dmccoystephenson__example-repo-dev-loop` instead of the
+established `example-repo-dev-loop` naming every existing skill
 in this ecosystem uses. `build_create_dev_loop_prompt()` below computes the
 correct slug itself (from the repo's actual name, the part after the `/`)
 and tells the dispatched run to use that exact string rather than deriving
@@ -45,8 +45,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Mirrors the "Skill needs its own issue tracker" row of
-# dmccoystephenson/a-private-repo-4' CONVENTIONS.md placement table.
+# Mirrors the "Skill needs its own issue tracker" row of the author's own
+# skills-conventions doc's placement table (a private repo).
 LOCAL_SKILLS_DIR = Path.home() / "local-skills"
 COMMANDS_DIR = Path.home() / ".claude" / "commands"
 

@@ -2,8 +2,8 @@
 someone without them actively running `gardener status` or watching
 terminal output.
 
-Mirrors `Stephenson-Software/a-private-repo`'s `monitoring/notify-discord.sh`
-convention (title/description/color Discord embed via a webhook URL,
+Mirrors a Discord-alerting convention used elsewhere in this ecosystem
+(title/description/color Discord embed via a webhook URL,
 silent no-op if unconfigured, never fails its caller) but in stdlib
 Python, matching gardener's own stdlib-only rule (see gardener/CLAUDE.md).
 
@@ -76,11 +76,12 @@ class CompositeNotifier(Notifier):
 
 
 # Discord embed colors (decimal RGB). SUCCESS/ERROR match the exact values
-# `Stephenson-Software/a-private-repo`'s monitoring scripts already use
-# (health-monitor.sh's recovery/failure alerts); WARNING matches that same
-# repo's cert-check.sh "expiring soon" alert color. INFO has no a-private-repo
-# precedent (a-private-repo's alerts are binary healthy/unhealthy) — Discord's own
-# "blurple" was picked as a neutral, non-alarming default for it.
+# an existing monitoring convention elsewhere in this ecosystem already
+# uses (a health-monitor script's recovery/failure alerts); WARNING
+# matches that same convention's cert-check "expiring soon" alert color.
+# INFO has no precedent there (those alerts are binary healthy/unhealthy)
+# — Discord's own "blurple" was picked as a neutral, non-alarming default
+# for it.
 DISCORD_COLORS: dict[Level, int] = {
     Level.INFO: 3447003,
     Level.SUCCESS: 3066993,
@@ -100,9 +101,9 @@ def default_webhook_config_path() -> Path:
     """A gitignored, `.env`-style file next to gardener's sqlite state
     (`$GARDENER_STATE_DIR/notify.env`, same override gardener already uses
     for its run-history db) — for a persistent/cron context where setting
-    an env var every invocation isn't practical, mirroring a-private-repo's own
-    `.monitor.env` on-box convention. gardener never creates this file
-    itself, only reads it."""
+    an env var every invocation isn't practical, mirroring a similar
+    `.monitor.env` on-box convention used elsewhere. gardener never
+    creates this file itself, only reads it."""
     return _default_state_dir() / "notify.env"
 
 
@@ -146,8 +147,9 @@ def load_webhook_url(config_path: Optional[Path] = None) -> Optional[str]:
 class DiscordNotifier(Notifier):
     """Posts a Discord embed via a webhook URL. stdlib `urllib.request`
     only — no `requests` dependency, matching gardener's stdlib-only
-    convention. Mirrors a-private-repo's `notify-discord.sh`: silent no-op if no
-    webhook is configured, and never raises even if the POST itself fails
+    convention. Mirrors the same alerting convention referenced above:
+    silent no-op if no webhook is configured, and never raises even if
+    the POST itself fails
     (bad webhook, network error, Discord outage, ...) — see the `Notifier`
     base class docstring for why that contract matters here specifically:
     an alert about a gardener run must never be able to break that run."""

@@ -12,10 +12,10 @@ hand, or two overlapping `overnight` runs) from targeting a repo another
 process is already mid-dispatch on. Two processes cloning/checking out/
 `git clean -fdx`-ing the same working tree concurrently is exactly the
 failure mode that has corrupted `.git/objects` in this ecosystem before —
-see `~/a-private-repo-2/CLAUDE.md`'s documented `git worktree add`/`remove`
-corruption incident. That was a different mechanism (concurrent worktree
-add/remove), but the lesson is the same: concurrent git operations against
-one shared directory are not safe to assume away.
+a documented `git worktree add`/`remove` corruption incident from a
+separate local project. That was a different mechanism (concurrent
+worktree add/remove), but the lesson is the same: concurrent git
+operations against one shared directory are not safe to assume away.
 
 Uses `fcntl.flock` (stdlib, matching gardener's stdlib-only rule — see
 gardener/CLAUDE.md) on a per-repo lock file, non-blocking. Non-blocking is

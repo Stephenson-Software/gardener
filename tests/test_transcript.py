@@ -29,9 +29,9 @@ class TestEncodeCwd(unittest.TestCase):
         )
         self.assertEqual(transcript.encode_cwd(cwd), expected)
 
-    def test_matches_the_real_a-private-repo_tend_dispatch(self):
-        cwd = "/home/userland/.cache/gardener/repos/Stephenson-Software__a-private-repo"
-        expected = "-home-userland--cache-gardener-repos-Stephenson-Software--a-private-repo"
+    def test_matches_a_real_tend_dispatch(self):
+        cwd = "/home/userland/.cache/gardener/repos/example-org__example-repo"
+        expected = "-home-userland--cache-gardener-repos-example-org--example-repo"
         self.assertEqual(transcript.encode_cwd(cwd), expected)
 
     def test_accepts_a_path_object_not_just_a_string(self):

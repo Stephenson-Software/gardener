@@ -5,7 +5,7 @@ result.
 
 ## Sync vs. background dispatch
 
-a-private-repo-2's dashboard (`~/a-private-repo-2/dashboard/server.py`) dispatches with
+Another local dashboard's server dispatches with
 `claude --bg` because it's answering an HTTP request that can't hang open —
 the browser gets a pid back immediately and polls `claude agents`/session
 transcripts for progress.
@@ -59,8 +59,8 @@ gardener's own commit history / README for the transcript):
 `bypassPermissions` (or any equivalent "skip all checks" mode) is never
 constructed here, for any mode, under any flag combination — enforced by
 `_build_invocation` raising if it's ever reached, not just by omission.
-This mirrors a-private-repo-2's dashboard, which hard-rejects it server-side
-rather than merely defaulting away from it.
+This mirrors the same dashboard's posture, which hard-rejects it
+server-side rather than merely defaulting away from it.
 
 `--strict-mcp-config` (with no `--mcp-config` given) is passed for every
 mode so a dispatched run never inherits whatever MCP servers happen to be
@@ -151,7 +151,7 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
    `TEND_DEFAULT_TIMEOUT_SECONDS` as a hard backstop either way.
 7. **`Skill` needs a per-skill-name `--allowedTools` entry, the same way
    `Bash` needs a per-command pattern.** Discovered live during the first
-   real end-to-end `tend` dispatch (`dmccoystephenson/a-private-repo-3`,
+   real end-to-end `tend` dispatch (a low-stakes personal repo,
    2026-07-18): the run tried `Skill: code-review` (exactly what the
    preamble tells it to prefer for its inline review step) and was denied
    — a bare `"Skill"` in `--tools` was not enough on its own.
@@ -163,16 +163,17 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
    `cwd`/`--add-dir` — and a missing `--add-dir` on a mode that needs one is
    a real dead end, not a graceful degradation.** Discovered live from two
    real transcripts of the same `gardener overnight` run
-   (`dmccoystephenson/a-private-repo-dev-loop` and `dmccoystephenson/gardener`,
+   (another private repo and `dmccoystephenson/gardener`,
    both dispatching `create-dev-loop`, 2026-07-18): `create-dev-loop`'s
    dispatch had `--tools` and `--allowedTools` for `Write`/`Bash(mkdir *)`/
    `Bash(ln *)`/`Bash(ls *)` (see `MODE_SPECS[Mode.CREATE_DEV_LOOP]` below)
    but `cli.py`'s `cmd_tend` never passed it any `add_dirs` for
    `~/local-skills/` or `~/.claude/commands/` (unlike `align`'s
-   `add_dirs=[conv.path]`). The a-private-repo run succeeded anyway because no
-   skill file existed yet, so `Write` (sandbox-exempt per point 3) created
-   it fresh, and one `Bash(ln -sf ...)` call happened to be the only other
-   filesystem touch needed. The gardener run hit a genuinely different
+   `add_dirs=[conv.path]`). That other repo's run succeeded anyway because
+   no skill file existed yet, so `Write` (sandbox-exempt per point 3)
+   created it fresh, and one `Bash(ln -sf ...)` call happened to be the
+   only other filesystem touch needed. The gardener run hit a genuinely
+   different
    repo state — a stale, partially-completed skill file already sitting at
    `~/local-skills/gardener-dev-loop/gardener-dev-loop.md` from an earlier
    failed attempt — and `Write` correctly refused to blindly overwrite a
@@ -249,8 +250,8 @@ from gardener.transcript import start_transcript_watcher
 CLAUDE_BIN = "claude"
 
 # Every permission mode `claude --help` currently lists, MINUS
-# bypassPermissions. This is the same floor a-private-repo-2's dashboard enforces
-# (see server.py's CLAUDE_PERMISSION_MODES) — kept as an explicit allow-list
+# bypassPermissions. This is the same floor that dashboard enforces
+# (see its own CLAUDE_PERMISSION_MODES) — kept as an explicit allow-list
 # here too, rather than "just don't pass bypassPermissions", so a future
 # edit that threads a mode through from a new flag can't accidentally widen
 # this without also editing the set that makes it valid.
@@ -432,7 +433,7 @@ TEND_BASE_ALLOWED_TOOLS: tuple[str, ...] = (
     # bare "Skill" in --tools without "Skill(code-review)" here was denied
     # ("Execute skill: code-review" -> tool_use_id denied, toolDenialKind
     # "user-rejected") during the first real end-to-end tend dispatch
-    # (dmccoystephenson/a-private-repo-3, 2026-07-18). Re-tested in
+    # (a low-stakes personal repo, 2026-07-18). Re-tested in
     # isolation with the pattern added below and confirmed permitted.
     # code-review is the one skill tend's preamble tells a dispatched run
     # to prefer for its inline review step (see dev_loop.py) — it reviews
