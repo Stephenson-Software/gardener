@@ -51,7 +51,11 @@ still gets attempted regardless of completion order, another asserts
 feeds `cmd_overnight`'s real captured stderr through
 `dashboard.parse_batch_progress` so the two log shapes it emits — `N/T`
 sequential and `N-M/T` concurrent — can't drift away from the regex the
-dashboard reads them with) and its
+dashboard reads them with), the same drift guard applied to
+`_dispatch_tend`'s own progress markers (the *real* function's captured
+stderr fed through the *real* `dashboard.parse_in_progress`, down each of
+its four return paths plus a `KeyboardInterrupt`, with the notifier silent
+so the no-webhook case is what's actually asserted), and its
 `--strategy` selection (`issue-count` with `fetch_issue_counts` mocked,
 `random` with an injected `--random-seed` for a deterministic shuffle, both
 asserting the repo-name-keyed resume cursor advances correctly across two
@@ -97,13 +101,20 @@ nothing ever sleeps for a real second), and the pretty-printer's
 line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
 `tool_result`, malformed JSON, and blank lines); `tests/test_dashboard.py`
 covers the dashboard's pure log-parsing and status-assembly functions —
-`find_active_log`, `tail_lines`, `parse_in_progress`,
+`find_active_log`, `find_active_logs` (the recency window and its exact
+boundary under an injected clock, its newest-log fallback, and that the
+window outlasts a silent `tend` dispatch), `tail_lines`,
+`parse_in_progress` (including the `finished tending` marker clearing a
+repo with no notify line present at all, and a repo restarted after
+finishing reading as in flight again),
 `parse_batch_progress`, `find_free_port`, `build_garden_rows` (the
 garden/allow-list/history join behind [the garden view](DASHBOARD.md),
 including the allow-listed-but-not-planted row the folded-together panel
 must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
-`overnight.py`, not just `state.py`'s own db path) — plus `run_server`'s
+`overnight.py`, not just `state.py`'s own db path, and that a newer
+manual-`tend` log does not hide the concurrent `overnight` run's in-flight
+repos or batch bar) — plus `run_server`'s
 loopback-only enforcement, without ever covering its `http.server` layer
 directly (mirroring how `test_dispatch.py` mocks rather than invokes the
 real `claude` subprocess call); `tests/test_repo_lock.py` covers

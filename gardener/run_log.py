@@ -6,8 +6,8 @@ Why this exists: every progress line gardener prints — `gardener: tending
 <repo> (allow_merge=...)`, `overnight dispatching ... (N-M/T candidates
 this run ...)`, `notify: sent to Discord: ...` — goes to stderr and
 nowhere else. Whoever launched the process sees them; nothing else can.
-`dashboard.py` was written to read exactly these lines back out of "the
-active log file" (see its `find_active_log`/`parse_in_progress`), but no
+`dashboard.py` was written to read exactly these lines back out of the
+active log files (see its `find_active_logs`/`parse_in_progress`), but no
 such file was ever written: gardener's own state dir had no `logs/`
 directory in it, so the dashboard's live panels ("Tonight", "Currently
 tending", "Live log") were permanently empty for a run launched any way
@@ -85,7 +85,13 @@ def default_logs_dir(state_dir: Optional[Path] = None) -> Path:
 
 def log_file_name(command: str, started_at: datetime) -> str:
     """`<command>-<YYYYmmdd-HHMMSS>.log` — the `.log` suffix is load-bearing:
-    `dashboard.find_active_log` globs for exactly that."""
+    `dashboard.find_active_log`/`find_active_logs` glob for exactly that.
+
+    Per-invocation, so two dispatching runs at once (a manual `tend`
+    alongside the devsrv-managed `overnight` one) each narrate into their
+    own file rather than interleaving into a shared one. The dashboard
+    reads every such file that's still being written to — see its
+    `find_active_logs`."""
     return f"{command}-{started_at.strftime('%Y%m%d-%H%M%S')}.log"
 
 
