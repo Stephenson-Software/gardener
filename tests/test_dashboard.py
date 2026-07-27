@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gardener import dashboard, garden, merge_allowlist, overnight, state
+from gardener import dashboard, dispatch, garden, merge_allowlist, overnight, state
 
 
 class TestFindActiveLog(unittest.TestCase):
@@ -46,6 +46,92 @@ class TestFindActiveLog(unittest.TestCase):
         os.utime(older, (now - 100, now - 100))
         os.utime(newer, (now, now))
         self.assertEqual(dashboard.find_active_log(self.logs_dir), newer)
+
+
+class TestFindActiveLogs(unittest.TestCase):
+    """Two gardener processes at once is supported (see repo_lock.py), so
+    the live panels read every log still being written to — before issue
+    #50 a one-repo manual `tend` became the newest log and silently
+    replaced the whole page's view of the overnight run beside it."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.logs_dir = Path(self._tmpdir.name) / "logs"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _log(self, name, age_seconds=0.0):
+        import os
+        import time
+
+        self.logs_dir.mkdir(exist_ok=True)
+        path = self.logs_dir / name
+        path.write_text("x")
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_missing_dir_is_empty(self):
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [])
+
+    def test_empty_dir_is_empty(self):
+        self.logs_dir.mkdir()
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [])
+
+    def test_returns_every_fresh_log_most_recent_first(self):
+        older = self._log("overnight-1.log", age_seconds=60)
+        newer = self._log("tend-1.log", age_seconds=1)
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [newer, older])
+
+    def test_excludes_logs_older_than_the_window(self):
+        fresh = self._log("tend-1.log", age_seconds=1)
+        self._log("overnight-old.log", age_seconds=dashboard.ACTIVE_LOG_WINDOW_SECONDS + 60)
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [fresh])
+
+    def test_falls_back_to_the_newest_log_when_nothing_is_fresh(self):
+        # A finished run's narration is still the most relevant thing to
+        # show until a newer run starts — the page must not go blank just
+        # because the last line aged out.
+        stale_older = self._log("overnight-1.log", age_seconds=100_000)
+        stale_newer = self._log("overnight-2.log", age_seconds=90_000)
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [stale_newer])
+        self.assertNotIn(stale_older, dashboard.find_active_logs(self.logs_dir))
+
+    def test_non_log_files_are_ignored(self):
+        self.logs_dir.mkdir()
+        (self.logs_dir / "notes.txt").write_text("hi")
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [])
+
+    def test_the_window_boundary_is_exact_with_an_injected_clock(self):
+        # `now` is injectable so the boundary can be asserted without
+        # depending on the filesystem's mtime resolution, in the same
+        # spirit as transcript.py's injected time_fn/sleep_fn.
+        import os
+
+        self.logs_dir.mkdir()
+        path = self.logs_dir / "tend-1.log"
+        path.write_text("x")
+        os.utime(path, (1_000_000, 1_000_000))
+
+        inside = 1_000_000 + dashboard.ACTIVE_LOG_WINDOW_SECONDS
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside), [path])
+        # One second past the window it is no longer *fresh* — but it is
+        # still the newest log, so the fallback keeps the page populated.
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside + 1), [path])
+        # With a fresher log present, the stale one is genuinely dropped.
+        newer = self.logs_dir / "overnight-1.log"
+        newer.write_text("x")
+        os.utime(newer, (inside, inside))
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside + 1), [newer])
+
+    def test_window_is_long_enough_for_a_silent_tend_dispatch(self):
+        # A tend can sit inside one `claude` subprocess for the entire
+        # dispatch timeout without gardener printing anything, so a window
+        # shorter than that would drop a genuinely-running batch.
+        self.assertGreater(
+            dashboard.ACTIVE_LOG_WINDOW_SECONDS, dispatch.TEND_DEFAULT_TIMEOUT_SECONDS
+        )
 
 
 class TestTailLines(unittest.TestCase):
@@ -89,7 +175,26 @@ class TestParseInProgress(unittest.TestCase):
         lines = ["gardener: tending owner/repo (allow_merge=True)"]
         self.assertEqual(dashboard.parse_in_progress(lines), ["owner/repo"])
 
+    def test_finished_tending_marks_terminal_with_no_notify_line_at_all(self):
+        # The issue #51 case: no webhook configured, so notify.py's
+        # NullNotifier prints nothing — the repo must still clear.
+        lines = [
+            "gardener: tending owner/repo (allow_merge=True)",
+            "gardener: finished tending owner/repo",
+        ]
+        self.assertEqual(dashboard.parse_in_progress(lines), [])
+
+    def test_finished_tending_only_clears_the_repo_it_names(self):
+        lines = [
+            "gardener: tending owner/a (allow_merge=True)",
+            "gardener: tending owner/b (allow_merge=True)",
+            "gardener: finished tending owner/b",
+        ]
+        self.assertEqual(dashboard.parse_in_progress(lines), ["owner/a"])
+
     def test_tend_mode_notify_marks_terminal(self):
+        # Retained as the fallback for logs written before the
+        # `finished tending` marker existed — not the primary signal.
         lines = [
             "gardener: tending owner/repo (allow_merge=True)",
             "notify: sent to Discord: gardener tend: MUTATION — owner/repo",
@@ -137,6 +242,25 @@ class TestParseInProgress(unittest.TestCase):
             "gardener: tending owner/repo (allow_merge=True)",
         ]
         self.assertEqual(dashboard.parse_in_progress(lines), ["owner/repo"])
+
+    def test_a_repo_restarted_after_finishing_reads_as_in_flight_again(self):
+        # Two invocations started in the same second append to the same
+        # log file (see run_log.tee_stderr), so the last marker for a repo
+        # has to win rather than any terminal line anywhere winning.
+        lines = [
+            "gardener: tending owner/repo (allow_merge=True)",
+            "gardener: finished tending owner/repo",
+            "gardener: tending owner/repo (allow_merge=True)",
+        ]
+        self.assertEqual(dashboard.parse_in_progress(lines), ["owner/repo"])
+
+    def test_a_terminal_line_for_a_repo_never_started_in_this_tail_is_ignored(self):
+        # The tail window can cut off a repo's `tending` line while keeping
+        # its `finished` one — that repo simply isn't on the page, and must
+        # not be resurrected into the list by its own terminal marker.
+        self.assertEqual(
+            dashboard.parse_in_progress(["gardener: finished tending owner/repo"]), []
+        )
 
 
 class TestParseBatchProgress(unittest.TestCase):
@@ -211,6 +335,7 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["merge_allowlist"], [])
         self.assertEqual(result["in_progress"], [])
         self.assertIsNone(result["active_log"])
+        self.assertEqual(result["active_logs"], [])
         self.assertIsNone(result["batch_progress"])
         self.assertEqual(result["overnight_next_index"], 0)
 
@@ -258,8 +383,57 @@ class TestBuildStatus(unittest.TestCase):
 
         result = dashboard.build_status(state_dir=self.state_dir)
         self.assertEqual(result["active_log"], str(log_path))
+        self.assertEqual(result["active_logs"], [str(log_path)])
         self.assertEqual(result["in_progress"], ["owner/b"])
         self.assertEqual(result["batch_progress"], {"start": 1, "end": 2, "total": 9})
+
+    def test_a_newer_manual_tend_log_does_not_hide_the_overnight_run(self):
+        # Issue #50, observed live on 2026-07-26: starting a manual
+        # `gardener tend` mid-batch made its log the newest, and the whole
+        # page switched to it — the overnight run's in-flight repos and
+        # batch bar vanished with nothing saying a second run existed.
+        import os
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        overnight_log = logs_dir / "overnight-1.log"
+        overnight_log.write_text(
+            "gardener: overnight dispatching tend for owner/a, owner/b "
+            "(1-2/9 candidates this run, concurrency=2)...\n"
+            "gardener: tending owner/a (allow_merge=True)\n"
+            "gardener: tending owner/b (allow_merge=True)\n"
+            "gardener: finished tending owner/a\n"
+        )
+        tend_log = logs_dir / "tend-1.log"
+        tend_log.write_text("gardener: tending owner/manual (allow_merge=False)\n")
+        now = time.time()
+        os.utime(overnight_log, (now - 60, now - 60))
+        os.utime(tend_log, (now, now))
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        # The tail still shows one file — the newest — but both runs'
+        # in-flight repos are on the page, and the overnight batch bar
+        # survives even though the newest log has no batch line of its own.
+        self.assertEqual(result["active_log"], str(tend_log))
+        self.assertEqual(result["active_logs"], [str(tend_log), str(overnight_log)])
+        self.assertEqual(result["in_progress"], ["owner/manual", "owner/b"])
+        self.assertEqual(result["batch_progress"], {"start": 1, "end": 2, "total": 9})
+
+    def test_a_repo_in_flight_in_two_logs_is_listed_once(self):
+        import os
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        for name in ("overnight-1.log", "tend-1.log"):
+            path = logs_dir / name
+            path.write_text("gardener: tending owner/a (allow_merge=True)\n")
+            now = time.time()
+            os.utime(path, (now, now))
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["in_progress"], ["owner/a"])
 
     def test_corrupt_garden_json_returns_empty_list_not_exception(self):
         # A mid-write or user-corrupted garden.json must not crash the dashboard.

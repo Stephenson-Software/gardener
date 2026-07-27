@@ -528,9 +528,30 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
     Split out from `cmd_tend` (a thin CLI wrapper around this) so a caller
     that wants the dispatched result — namely `cmd_overnight`, which may
     call this from a worker thread when `--concurrency` > 1 — gets it as a
-    plain return value, not by intercepting stdout."""
-    print(f"gardener: tending {args.repo} (allow_merge={args.allow_merge})", file=sys.stderr)
+    plain return value, not by intercepting stdout.
 
+    Brackets the work with a matched pair of repo-naming stderr lines —
+    `gardener: tending <repo> ...` on the way in and `gardener: finished
+    tending <repo>` on the way out — which is what `dashboard.py`'s
+    `parse_in_progress` reads to decide what is still in flight. The
+    closing line is in a `finally` on purpose: `_run_tend_dispatch` has
+    four separate return paths (setup exception, repo already locked,
+    failed create-dev-loop bootstrap, normal completion) and the dashboard
+    used to have no marker at all for the first three, so it inferred
+    completion from `notify.py`'s Discord-success line instead — which an
+    operator with no webhook configured never prints, leaving every repo
+    the log ever started stuck in "Currently tending" forever (issue #51).
+    Both lines name the repo so a `--concurrency 2` log, where two
+    dispatches interleave, stays attributable to a human reading it too."""
+    print(f"gardener: tending {args.repo} (allow_merge={args.allow_merge})", file=sys.stderr)
+    try:
+        return _run_tend_dispatch(args)
+    finally:
+        print(f"gardener: finished tending {args.repo}", file=sys.stderr)
+
+
+def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
+    """`_dispatch_tend`'s body — see it for why the two are separate."""
     try:
         with repo_lock.repo_lock(args.repo):
             target_dir = clone_or_refresh_target_repo(

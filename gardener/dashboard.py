@@ -1,10 +1,10 @@
 """`gardener dashboard` — a small local, read-only web UI over gardener's
 own state (sqlite run history, the garden/merge-allowlist JSON files, and
-whichever `tend`/`overnight` log file was written to most recently) so a
-human doesn't have to poll `gardener status` or tail log files by hand to
-see what an unattended run is doing.
+every `tend`/`overnight` log file still being written to) so a human
+doesn't have to poll `gardener status` or tail log files by hand to see
+what an unattended run is doing.
 
-The log file this reads is written by `run_log.py`, which tees a
+The log files this reads are written by `run_log.py`, which tees each
 dispatching run's stderr narration into `<state>/logs/`. Both modules
 resolve that directory independently; `tests/test_run_log.py` asserts they
 agree, because when they didn't, every live panel here rendered empty
@@ -24,14 +24,33 @@ completed dispatch) is gardener's one real outcome record — this module
 never invents a second one. The one thing the db can't show is "what's
 dispatched *right now*, before it's finished and been recorded" — for
 that, `parse_in_progress`/`parse_batch_progress` regex-parse the active
-log file's own `gardener: tending <repo> (allow_merge=...)` and `notify:
-sent to Discord: gardener <mode>: ...` lines (exactly what `cli.py`'s
-`_dispatch_tend`/`_notify_run` print — see their docstrings), which is
-inherently best-effort: a repo whose Discord notify failed or was
-suppressed (no webhook configured) will keep showing as "in progress"
-until the log moves on, even though gardener itself already finished with
-it. Treat the in-progress list as "what the log suggests is still
-running," not gardener's authoritative record of it.
+logs' own `gardener: tending <repo> (allow_merge=...)` / `gardener:
+finished tending <repo>` lines (exactly what `cli.py`'s `_dispatch_tend`
+prints, as a matched pair, on every one of its return paths — see its
+docstring), which is still best-effort: a run killed outright between the
+two lines leaves its repo showing as in progress until the log ages out
+of the active window. Treat the in-progress list as "what the log
+suggests is still running," not gardener's authoritative record of it.
+
+`notify.py`'s `notify: sent to Discord: gardener <mode>: ...` line is
+also accepted as terminal, but only as a fallback for logs written before
+the `finished tending` line existed — it must never be the *only* way a
+repo clears, because `NullNotifier` (the documented no-webhook-configured
+case) prints nothing at all, which is what left every repo pinned in
+"Currently tending" for the whole life of a log (issue #51).
+
+## More than one run can be live at once
+
+`repo_lock.py` exists precisely because a manual `gardener tend` alongside
+the devsrv-managed `overnight` run is a supported configuration, and each
+dispatching invocation gets its own `<command>-<stamp>.log`. So the live
+panels read *every* log written to within `ACTIVE_LOG_WINDOW_SECONDS`
+(`find_active_logs`), not just the single newest one — otherwise starting
+a one-repo manual tend silently swapped the whole page over to it and the
+overnight run it was running alongside vanished with no indication (issue
+#50). The log *tail* panel still shows one file, since interleaving two
+raw narrations would be unreadable, but the payload names the others so
+the page can say how many it isn't showing.
 
 ## The garden view
 
@@ -54,16 +73,27 @@ import json
 import re
 import socket
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
-from gardener import garden, merge_allowlist, overnight, state
+from gardener import dispatch, garden, merge_allowlist, overnight, state
 
 LOGS_DIR_NAME = "logs"
 DEFAULT_PORT = 8765
 
+# How stale a log may be and still count as one of the runs currently in
+# flight. Derived from the real dispatch timeout rather than picked: a
+# single `tend` can sit inside one `claude` subprocess for the whole of
+# `TEND_DEFAULT_TIMEOUT_SECONDS` without gardener printing a single line,
+# so anything shorter would drop a genuinely-running overnight batch off
+# the page mid-dispatch. The margin covers the clone/refresh and
+# record/notify work either side of that subprocess.
+ACTIVE_LOG_WINDOW_SECONDS = dispatch.TEND_DEFAULT_TIMEOUT_SECONDS + 300
+
 TENDING_RE = re.compile(r"^gardener: tending (\S+) \(allow_merge=")
+FINISHED_RE = re.compile(r"^gardener: finished tending (\S+)$")
 NOTIFY_RE = re.compile(r"^notify: sent to Discord: gardener (\S+): (?:MUTATION — |FAILED — )?(.+)$")
 # Both shapes `cmd_overnight` emits: the `N-M/T` range form for a
 # concurrent batch, and the bare `N/T` form for the (default) sequential
@@ -88,6 +118,45 @@ def find_active_log(logs_dir: Path) -> Optional[Path]:
     if not logs:
         return None
     return max(logs, key=lambda p: p.stat().st_mtime)
+
+
+def find_active_logs(
+    logs_dir: Path,
+    window_seconds: float = ACTIVE_LOG_WINDOW_SECONDS,
+    now: Optional[float] = None,
+) -> list[Path]:
+    """Every log the live panels should be built from, most recently
+    modified first.
+
+    That is every `*.log` written to within `window_seconds` — plural
+    because two gardener processes at once is supported, not a misuse (see
+    the module docstring). When nothing is that fresh it falls back to
+    `find_active_log`'s single newest log, so a finished run's narration
+    still renders instead of the page going blank the moment its last line
+    ages out.
+
+    Deliberately uncapped: `build_status` reads every log this returns on
+    every 4 s poll, but silently dropping one is the exact failure this
+    replaces, and `run_log.DEFAULT_KEEP` already bounds the directory at
+    30 files — of which only concurrently-dispatching ones can be inside
+    the window at all."""
+    if not logs_dir.exists():
+        return []
+    cutoff = (now if now is not None else time.time()) - window_seconds
+    dated = []
+    for path in logs_dir.glob("*.log"):
+        try:
+            if path.is_file():
+                dated.append((path.stat().st_mtime, path))
+        except OSError:
+            # Pruned by `run_log.prune_old_logs` between the glob and the
+            # stat — not an error, just one fewer log to render.
+            continue
+    fresh = sorted((d for d in dated if d[0] >= cutoff), key=lambda d: d[0], reverse=True)
+    if fresh:
+        return [path for _mtime, path in fresh]
+    newest = find_active_log(logs_dir)
+    return [newest] if newest else []
 
 
 def tail_lines(path: Path, n: int = 400) -> list[str]:
@@ -125,25 +194,45 @@ def tail_lines(path: Path, n: int = 400) -> list[str]:
 
 
 def parse_in_progress(lines: list[str]) -> list[str]:
-    """Repos with a `gardener: tending X` line in this log that have no
-    terminal notification yet — `tend`-mode notify (success or failure) or
-    a *failed* `create-dev-loop` notify (a create-dev-loop success is not
-    terminal; the real tend dispatch still has to run and report). See
-    module docstring for why this is best-effort, not authoritative."""
-    started: list[str] = []
-    terminal: set[str] = set()
+    """Repos with a `gardener: tending X` line in this log and no matching
+    `gardener: finished tending X` line after it.
+
+    A `tend`-mode notify line (success or failure), or a *failed*
+    `create-dev-loop` notify, is accepted as terminal too — but only so
+    logs written before the `finished tending` line existed still clear;
+    `cli.py`'s `_dispatch_tend` now emits that line on every return path,
+    including the ones no notify ever covered. A *successful*
+    create-dev-loop notify is deliberately not terminal: the real tend
+    dispatch still has to run and report. See the module docstring for why
+    this is best-effort, not authoritative.
+
+    Read in line order rather than as two sets, so the *last* marker for a
+    repo wins: two invocations started in the same second share one log
+    file (`run_log.tee_stderr` appends rather than truncates for exactly
+    that case), and a repo that finished and was then started again must
+    read as in flight, not as finished."""
+    order: list[str] = []
+    in_flight: dict[str, bool] = {}
     for line in lines:
         m = TENDING_RE.match(line)
         if m:
-            if m.group(1) not in started:
-                started.append(m.group(1))
+            if m.group(1) not in in_flight:
+                order.append(m.group(1))
+            in_flight[m.group(1)] = True
+            continue
+        m = FINISHED_RE.match(line)
+        if m:
+            if m.group(1) in in_flight:
+                in_flight[m.group(1)] = False
             continue
         m = NOTIFY_RE.match(line)
         if m:
             mode, repo = m.group(1), m.group(2)
-            if mode == "tend" or (mode == "create-dev-loop" and "FAILED — " in line):
-                terminal.add(repo)
-    return [r for r in started if r not in terminal]
+            if repo in in_flight and (
+                mode == "tend" or (mode == "create-dev-loop" and "FAILED — " in line)
+            ):
+                in_flight[repo] = False
+    return [repo for repo in order if in_flight[repo]]
 
 
 def _safe_list(fn) -> list:
@@ -239,10 +328,27 @@ def build_status(
     logs_dir = default_logs_dir(base)
 
     runs = state.list_runs(db_path=db_path, limit=run_limit)
-    active_log = find_active_log(logs_dir)
-    log_lines = tail_lines(active_log, log_tail_lines) if active_log else []
-    in_progress = parse_in_progress(log_lines) if active_log else []
-    batch = parse_batch_progress(log_lines) if active_log else None
+    # Every live log, not just the newest — a manual `tend` started
+    # alongside the overnight run used to hide it completely (issue #50).
+    active_logs = find_active_logs(logs_dir)
+    lines_by_log = {path: tail_lines(path, log_tail_lines) for path in active_logs}
+    active_log = active_logs[0] if active_logs else None
+    log_lines = lines_by_log.get(active_log, [])
+
+    in_progress: list[str] = []
+    for path in active_logs:
+        for repo in parse_in_progress(lines_by_log[path]):
+            if repo not in in_progress:
+                in_progress.append(repo)
+    # The freshest log that actually has a batch line, so an `overnight`
+    # run's progress bar survives a `tend --repo` log being written more
+    # recently — a plain tend has no batch line of its own to replace it
+    # with, and blanking the bar would read as "the batch ended".
+    batch = None
+    for path in active_logs:
+        batch = parse_batch_progress(lines_by_log[path])
+        if batch is not None:
+            break
 
     recent_cost = sum(r.cost_usd for r in runs if r.cost_usd)
     recent_error_count = sum(1 for r in runs if r.outcome == "error")
@@ -257,7 +363,12 @@ def build_status(
 
     return {
         "generated_at": state.now_iso(),
+        # `active_log` is the one whose raw narration `log_tail` shows;
+        # `active_logs` is every log the in-flight/batch panels were built
+        # from, so the page can say how many runs it is *not* tailing
+        # rather than silently showing one of several.
         "active_log": str(active_log) if active_log else None,
+        "active_logs": [str(p) for p in active_logs],
         "log_tail": log_lines[-200:],
         "in_progress": in_progress,
         "batch_progress": (
@@ -882,7 +993,14 @@ async function refresh() {
     </tr>
   `).join("") || `<tr class="is-empty"><td colspan="6" class="empty">no runs recorded yet</td></tr>`;
 
-  document.getElementById("log-path").textContent = data.active_log ? "(" + data.active_log + ")" : "";
+  // Name the log being tailed, and say plainly when there are others.
+  // The in-flight and batch panels above already aggregate every live
+  // log; this pre is the one panel that still shows a single file, so an
+  // unlabelled tail is the only place a second run could hide.
+  const others = Math.max(0, (data.active_logs || []).length - 1);
+  document.getElementById("log-path").textContent = data.active_log
+    ? "(" + data.active_log + (others ? ` · ${others} other live log${others > 1 ? "s" : ""} not tailed` : "") + ")"
+    : "";
   const logEl = document.getElementById("log");
   const wasAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   logEl.textContent = data.log_tail.join("\\n") || "(no active log)";
