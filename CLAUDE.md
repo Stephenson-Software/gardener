@@ -122,8 +122,10 @@ record what you actually observed before changing the docstring's claims.
 
 ## Testing changes
 
-- **Automated:** `PYTHONPATH=. python3 -m unittest discover -s tests -v`.
-  `test_dispatch.py` mocks `subprocess.run` — it must never actually
+- **Automated:** `PYTHONPATH=. python3 -m unittest discover -s tests -v`,
+  also run in CI (`.github/workflows/ci.yml`) on every push/PR to `main`
+  against Python 3.10 and the latest 3.x, no `pip install` step needed
+  (stdlib-only). `test_dispatch.py` mocks `subprocess.run` — it must never actually
   invoke `claude`. `test_state.py` uses a real sqlite3 file in a tmp dir,
   covering `repo_stats()`' all-time per-repo aggregates as well as the
   run round trip. The dashboard's in-page JavaScript (the garden plot's
