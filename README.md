@@ -1,5 +1,7 @@
 # gardener
 
+[![CI](https://github.com/dmccoystephenson/gardener/actions/workflows/ci.yml/badge.svg)](https://github.com/dmccoystephenson/gardener/actions/workflows/ci.yml)
+
 `gardener` is a safety-gated Python CLI that dispatches Claude Code against
 a fleet of software repos, in two distinct ways:
 
