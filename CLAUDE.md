@@ -23,8 +23,8 @@ several repos dispatched in sequence, unattended. Its safety mechanics
 follow the exact same "structural exclusion + explicit instruction" pattern
 `align` established, extended to a new problem `align` never had to solve:
 a dispatched dev-loop skill is written to stop and ask a human before
-merging, and headless dispatch has no human to ask. See README's Safety
-model section for what was actually tested and observed before this was
+merging, and headless dispatch has no human to ask. See
+`docs/SAFETY.md` for what was actually tested and observed before this was
 trusted.
 
 The "tend to my garden overnight" use case above is now real:
@@ -45,7 +45,7 @@ per strategy (a bare list index for `round-robin`, repo names for
 across runs). It adds no new merge-decision logic of its own — `tend`'s
 existing `merge_eligible()` gate (repo must *also* be on the separate merge
 allow-list) is what actually decides whether a merge can happen, unchanged.
-See README's "Overnight / unattended operation" section for the full
+See `docs/OVERNIGHT.md` for the full
 design, the honest reliability caveat that no device this has been run on
 gives an uninterrupted overnight guarantee, and the concrete wiring
 recipes for each device it has actually been deployed to (Android/UserLand
@@ -58,13 +58,13 @@ black box while it runs: `transcript.py` polls briefly, from a background
 thread, for the live JSONL transcript file Claude Code already writes for
 every `-p` session, and logs its path to stderr within seconds of dispatch
 start. `gardener tail-transcript <path> [-f]` pretty-prints that file. See
-README's "Live session visibility" section.
+`docs/USAGE.md`'s "Live session visibility" section.
 
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.
   If a future change genuinely needs one, justify it explicitly in
-  `README.md`'s Architecture section before adding it — this has held
+  `docs/ARCHITECTURE.md` before adding it — this has held
   since the first commit and shouldn't erode silently.
 - **Safety constraints live in `dispatch.py`, not scattered across
   callers.** Every mode's `claude` invocation (tool list, permission mode,
@@ -111,7 +111,7 @@ assumes or depends on it").
 
 Not research-doc-driven in the `RESEARCH.md` sense. The safety model is
 grounded in two things instead, both cited directly in `dispatch.py`'s
-docstring and `README.md`'s Safety model section: reading another local
+docstring and `docs/SAFETY.md`: reading another local
 Claude-dispatch endpoint's existing source (for
 the `bypassPermissions`-hard-reject posture), and hands-on confirmation
 against a real `claude -p` invocation for exactly what `--tools`,
@@ -186,7 +186,7 @@ record what you actually observed before changing the docstring's claims.
     empty, `git log` shows no new commit, and
     `gh repo view <owner/repo> --json pushedAt` matches what it was before
     the run. This is the actual verification gardener's first working
-    version was held to (see `README.md`'s "Manual/end-to-end
+    version was held to (see `docs/TESTING.md`'s "Manual/end-to-end
     verification" section) — don't consider a dispatch-layer change done
     without repeating it.
   - `tend` (no `--allow-merge`): confirm no merge occurred
@@ -220,14 +220,14 @@ record what you actually observed before changing the docstring's claims.
     corrupted or swapped with the other's — whatever device this actually
     runs on has no guaranteed process isolation and shares real CPU/RAM
     across every process on it (a property of the host device, not of
-    gardener — see README's "Wiring it to 'tend to my garden while I
+    gardener — see `docs/OVERNIGHT.md`'s "Wiring it to 'tend to my garden while I
     sleep'" section for what's actually been deployed where), so a real
     concurrent run is the only thing that actually confirms this works
     under real resource constraints, not just under mocks.
 - `--implement` and `--file-issue` should be exercised for real (not just
   unit-tested) before being trusted against anything that matters, the
   same way report mode was — this hadn't happened as of this repo's first
-  version (see `README.md`'s Project Status) and is unrelated to `tend`'s
+  version (see `docs/PROJECT_STATUS.md`) and is unrelated to `tend`'s
   own verification above.
 
 ## Commit and PR conventions
@@ -254,13 +254,18 @@ target-repo alignment rules, not just the ones it enforces on others.
 
 | File | What to verify |
 |---|---|
-| `README.md` | CLI usage, flags, and safety-model claims match what `cli.py`/`dispatch.py`/`dev_loop.py` actually do |
+| `README.md` | Top-level description bullets, Installation/Alerting steps, and every link to `docs/*.md` still point at a real section in that file |
+| `docs/USAGE.md` | CLI usage, flags, and command-reference claims match what `cli.py`/`dispatch.py`/`dev_loop.py` actually do |
 | `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`, and the `tend`-specific `AskUserQuestion`/`Agent`/`ScheduleWakeup` findings) still holds against the currently-installed `claude` version |
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
 | `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
-| README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path) and each documented per-device wiring recipe's exact invocation (`devsrv`, `bin/run-overnight.sh` + Task Scheduler, cron/systemd) is current for the device it describes — still states the "no true always-on daemon guarantee on any device this has been run on" caveat plainly, not oversold |
-| README's "The garden view" section | The plant/data mapping table still matches what `dashboard.py`'s `plantSvg` actually draws, and `build_garden_rows`' row shape still feeds it — the whole point of that view is that nothing in it is invented, so a visual tweak that stops matching the table is a doc bug |
+| `docs/OVERNIGHT.md` | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path) and each documented per-device wiring recipe's exact invocation (`devsrv`, `bin/run-overnight.sh` + Task Scheduler, cron/systemd) is current for the device it describes — still states the "no true always-on daemon guarantee on any device this has been run on" caveat plainly, not oversold |
+| `docs/DASHBOARD.md` | The plant/data mapping table still matches what `dashboard.py`'s `plantSvg` actually draws, and `build_garden_rows`' row shape still feeds it — the whole point of that view is that nothing in it is invented, so a visual tweak that stops matching the table is a doc bug |
+| `docs/SAFETY.md` | The three-layer tool-scoping model, the `AskUserQuestion`/`Agent`/`ScheduleWakeup` headless findings, and the merge allow-list mechanics still match `dispatch.py`'s actual `MODE_SPECS`/`tend_mode_spec()` |
+| `docs/ALERTING.md` | The `Notifier`/`DiscordNotifier`/`NullNotifier`/`CompositeNotifier` shape and `_notify_run`'s severity mapping still match `notify.py`/`cli.py` |
+| `docs/TESTING.md` | The per-module test-coverage description still matches what each `tests/test_*.py` file actually asserts |
+| `docs/ARCHITECTURE.md` | The module tree lists every file in `gardener/` (including `repo_lock.py`) with an accurate one-line description |
 | `run_log.py` module docstring | The logs-dir path it writes to still matches the one `dashboard.py` reads from, and the `.log` filename suffix still matches `find_active_log`'s glob — `tests/test_run_log.py` guards both, so treat a failure there as the docs being wrong, not the test |
-| `bin/run-overnight.sh` | Still matches README's WSL2/Task Scheduler recipe verbatim (PATH export present, no separate log redirection now that `run_log.py` owns logging) — this is the literal file the real "Gardener Overnight" Task Scheduler job invokes nightly, not just documentation |
+| `bin/run-overnight.sh` | Still matches `docs/OVERNIGHT.md`'s WSL2/Task Scheduler recipe verbatim (PATH export present, no separate log redirection now that `run_log.py` owns logging) — this is the literal file the real "Gardener Overnight" Task Scheduler job invokes nightly, not just documentation |
 | `transcript.py` module docstring | The transcript-path encoding rule (`encode_cwd`) still matches a real `claude -p` session's actual `~/.claude/projects/<encoded-cwd>/` directory naming — re-verify against a real dispatch (not assumption) before trusting the old notes if this ever seems off |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |

@@ -455,7 +455,7 @@ class ModeSpec:
 # (see dev_loop.py) — so a short, curated set of common
 # language/build-tool invocation prefixes is included alongside git/gh.
 # This is a wider trust surface than align --implement's, on purpose and
-# documented as such (see README's Safety model section) — not an
+# documented as such (see docs/SAFETY.md) — not an
 # oversight. `gh pr merge` is never part of this fixed list; it's added
 # per-invocation by tend_mode_spec() only when eligible (see module
 # docstring's "Merge allow-list" section).

@@ -31,7 +31,7 @@ most for a typical contribution:
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.
   If you think a change genuinely needs one, justify it explicitly in
-  `README.md`'s Architecture section as part of the same PR.
+  `docs/ARCHITECTURE.md` as part of the same PR.
 - Safety constraints for a `claude` invocation live in `dispatch.py`'s
   `MODE_SPECS`, not scattered across callers — don't add a one-off flag
   from `cli.py` directly.
@@ -45,9 +45,9 @@ most for a typical contribution:
    `fix/<short-name>` for corrections (see `CLAUDE.md`'s "Commit and PR
    conventions" for the full prefix list this repo uses, e.g. `docs/`,
    `ci/`, `chore/`).
-2. Make your change, updating `README.md`/`CLAUDE.md` in the same PR if
-   your change affects behavior they document (see `CLAUDE.md`'s
-   "Documentation sources of truth" section).
+2. Make your change, updating `README.md`/the relevant `docs/*.md`
+   file/`CLAUDE.md` in the same PR if your change affects behavior they
+   document (see `CLAUDE.md`'s "Documentation sources of truth" section).
 3. Run the test suite:
 
    ```bash
