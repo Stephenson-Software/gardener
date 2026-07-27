@@ -20,6 +20,15 @@ never itself decides what "aligned" means or what a fix should look like;
 it only decides *how much a dispatched Claude run is allowed to do about
 it*. See [Usage](#usage) below for the full command set.
 
+> **Note on running this yourself:** `align` clones `dms-conventions`
+> (above), and `tend` bootstraps a target repo's dev-loop skill via a
+> `create-dev-loop` skill — both are currently private repos of the
+> author's own. Cloning gardener and running it against your own repos
+> works today for reading the code, the tests, and the design writeup
+> below, but `align`/`tend` won't fully function for you out of the box
+> unless you swap in your own equivalent conventions doc and
+> skill-bootstrapping mechanism.
+
 ## Description
 
 - **`gardener align --repo <owner/repo>`**: clones the target repo
@@ -76,7 +85,7 @@ export GARDENER_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/XXX/YYY"
 
 # 2. A gitignored config file, for a persistent/cron context where
 #    exporting an env var per-invocation isn't practical (same shape as
-#    Stephenson-Software/gateway's `.monitor.env`):
+#    the `.monitor.env` convention used elsewhere in this ecosystem):
 mkdir -p ~/.local/state/gardener   # or $GARDENER_STATE_DIR if overridden
 umask 077
 echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXX/YYY' \
@@ -144,8 +153,9 @@ gardener dashboard [--port N]
 Where `align` checks a repo against dms-conventions, **`gardener tend
 --repo owner/repo`** makes real, broader progress on the repo itself by
 dispatching *that repo's own* `<slug>-dev-loop` Claude Code skill (the kind
-normally invoked interactively as `/gateway-dev-loop`, `/dpm-dev-loop`,
-etc.) — headlessly, unattended, safety-gated the same way every other mode
+normally invoked interactively as `/example-repo-dev-loop`,
+`/another-repo-dev-loop`, etc.) — headlessly, unattended, safety-gated the
+same way every other mode
 in this file is. This is for a "tend to my garden overnight" use case:
 several repos, dispatched one after another, nobody watching.
 
@@ -230,8 +240,11 @@ while `gardener overnight` is already dispatching `X`, or two overlapping
 is also up). Without anything guarding against this, both processes would
 clone/checkout/dispatch against the *same* shared working tree in
 `~/.cache/gardener/repos/<owner>__<repo>` concurrently — the same class of
-failure that has corrupted `.git/objects` in this ecosystem before (see
-`~/pocket-rig/CLAUDE.md`'s documented `git worktree` corruption incident).
+failure that has corrupted `.git/objects` in this ecosystem before (a
+documented `git worktree add`/`remove` corruption incident from a separate
+local project, a different mechanism than the concurrent-clone case here
+but the same underlying lesson: concurrent git operations against one
+shared directory are not safe to assume away).
 
 `gardener align` and `gardener tend` (and therefore `gardener overnight`,
 which dispatches `tend` in-process) now take an exclusive, non-blocking,
@@ -390,12 +403,14 @@ This device (a UserLand/Android sandbox) has no systemd, no cron, and no
 true always-on daemon guarantee — Android can and will kill background
 processes on a task swipe-away, aggressive battery/OOM management, or
 extended idle, the same way it kills every other background process on
-this machine. There is no way around that here. What `~/pocket-rig/bin/
-devsrv` gives you instead: the command is *registered* so it's visible,
-restartable without retyping it, and comes back on its own the next time an
-interactive shell starts (wired into `.bashrc`) if it gets killed —
-**not** an uninterrupted guarantee that it runs the whole night no matter
-what.
+this machine. There is no way around that here. What a small local
+process-supervisor script gives you instead (the examples below use
+`devsrv` as a stand-in name — substitute whatever registers/restarts
+long-running commands on your own setup): the command is *registered* so
+it's visible, restartable without retyping it, and comes back on its own
+the next time an interactive shell starts (wired into `.bashrc`) if it
+gets killed — **not** an uninterrupted guarantee that it runs the whole
+night no matter what.
 
 The actual invocation:
 
@@ -529,8 +544,8 @@ synchronous dispatch, not `--bg`](#why-synchronous-dispatch-not---bg)
 below) and only capture output when the whole run finishes — for `tend`,
 that's up to `TEND_DEFAULT_TIMEOUT_SECONDS` (45 min) per repo with
 otherwise zero visibility into what's happening while it runs, a real gap
-for anyone watching `devsrv logs gardener-overnight -f` or the dashboard's
-log viewer overnight.
+for anyone watching `devsrv logs gardener-overnight -f` or a local
+dashboard's log viewer overnight.
 
 Claude Code already solves the actual data half of this on its own, for
 every `-p` session, no special flag required: it writes a JSONL transcript
@@ -850,9 +865,9 @@ gardener never invokes `claude` with `bypassPermissions` or any
 equivalent auto-approve-everything mode, for any mode, under any flag
 combination — this is enforced in `dispatch.py` (`_build_invocation`
 raises rather than silently proceeding if it's ever reached), mirroring
-[`~/pocket-rig/dashboard/`](https://github.com/dmccoystephenson/pocket-rig)'s
-existing Claude-dispatch endpoint, which hard-rejects `bypassPermissions`
-server-side the same way.
+the same posture as another local Claude-dispatch endpoint used
+elsewhere, which hard-rejects `bypassPermissions` server-side the same
+way.
 
 Beyond that floor, each mode is built from three independently-confirmed
 layers (see the full writeup in `dispatch.py`'s module docstring):
@@ -929,7 +944,7 @@ in the layer list above) — not merely discouraged in the prompt.
 
 ### Why synchronous dispatch, not `--bg`
 
-pocket-rig's dashboard uses `claude --bg` because it's answering an HTTP
+Some dashboards use `claude --bg` because they're answering an HTTP
 request that can't hang open. `gardener align` is invoked from a terminal
 or cron and can reasonably block until Claude finishes, so it uses
 `claude -p` (headless "run once, print, exit" mode) instead — one
@@ -948,13 +963,13 @@ its own presentation.
 
 - **`DiscordNotifier`** — the first/primary implementation. Posts a
   Discord embed via a webhook URL using stdlib `urllib.request` only (no
-  `requests` dependency — see [Architecture](#architecture)). Mirrors
-  `Stephenson-Software/gateway`'s `monitoring/notify-discord.sh` exactly:
+  `requests` dependency — see [Architecture](#architecture)). Mirrors a
+  Discord-alerting convention used elsewhere in this ecosystem exactly:
   same title/description/color embed shape, same "no webhook configured →
   log and return, never fail the caller" behavior, and the same Discord
   embed colors for success (`3066993`, green) and error (`15158332`,
-  red); the warning color (`16776960`, yellow) matches that repo's
-  `cert-check.sh` "expiring soon" alert. **Never raises** — a bad webhook,
+  red); the warning color (`16776960`, yellow) matches that convention's
+  own "expiring soon" cert-check alert. **Never raises** — a bad webhook,
   a network error, or Discord being down must never be able to break the
   actual `gardener align` run it's reporting on; every failure path is
   caught and logged to stderr instead.
@@ -1011,14 +1026,13 @@ argv-construction level but have not yet been run for real against a live
 repo — only report-only mode has been exercised end to end so far.
 
 `tend` (no `--allow-merge`) has also been run for real, end to end,
-against `dmccoystephenson/snmp-command-generator` (2026-07-18): no
-existing `/snmp-command-generator-dev-loop` skill, so `create-dev-loop`
+against `dmccoystephenson/example-repo` (2026-07-18): no
+existing `/example-repo-dev-loop` skill, so `create-dev-loop`
 dispatched first (194s, $0.71, produced a usable skill), then `tend`
 dispatched it (250s, $1.00, `ok=True`, 7 permission denials — out-of-scope
 attempts correctly blocked, not itemized in gardener's own output beyond
 the count). Result: the dispatched run found no open issues/PRs, added
-missing CLI test coverage for two untested code paths, opened
-[PR #5](https://github.com/dmccoystephenson/snmp-command-generator/pull/5)
+missing CLI test coverage for two untested code paths, opened PR #5
 (green on all 4 CI matrix legs), did not attempt to merge it, and ended
 its final answer with a `DECISION NEEDED:` line naming the PR and that a
 human must review/merge — exactly the fallback documented in
@@ -1034,7 +1048,7 @@ manifest here either.
 `tend --allow-merge` has also been run for real, end to end, against the
 same repo (2026-07-18), after deliberately adding it to the merge
 allow-list first (`gardener allowlist add --repo
-dmccoystephenson/snmp-command-generator`) — chosen because PR #5 was
+dmccoystephenson/example-repo`) — chosen because PR #5 was
 already known-safe (test-only diff, +38/-0, zero application-code
 changes, green on all 4 CI matrix legs, already reviewed once during the
 no-flags run above). The dispatched run (79s, $0.32, `ok=True`, one
@@ -1053,7 +1067,7 @@ explicitly set up first.
 
 `gardener overnight` has also been run for real, end to end (2026-07-18),
 against a 2-repo garden (`dmccoystephenson/create-dev-loop`,
-`dmccoystephenson/snmp-command-generator`) with an isolated
+`dmccoystephenson/example-repo`) with an isolated
 `GARDENER_STATE_DIR` and an empty merge allow-list (deliberately — neither
 repo was eligible to merge for this test, same "err toward not merging"
 posture as the `tend --allow-merge` verification above), invoked twice in a
@@ -1079,10 +1093,10 @@ be observed without waiting out a full 8h window):
   [Alerting (optional)](#alerting-optional)). The resume cursor advanced to
   index 1.
 - **Run 2**: re-invoked identically. Correctly resumed at index 1
-  (`snmp-command-generator`), NOT index 0 again — confirming the
+  (`example-repo`), NOT index 0 again — confirming the
   round-robin resume mechanism works across separate invocations, not just
   within a loop in one process. That repo already had its
-  `/snmp-command-generator-dev-loop` skill (no bootstrap needed this time,
+  `/example-repo-dev-loop` skill (no bootstrap needed this time,
   hence a faster overall run: 340.2s dispatch, $1.22, `ok=True`, 4
   permission denials), opened PR #6, again ended in `DECISION NEEDED:`, and
   again stopped before attempting a second repo (`193s left, need 2700s
@@ -1090,7 +1104,7 @@ be observed without waiting out a full 8h window):
   garden had now been attempted exactly once across the two runs.
 
 Confirmed afterward via `gh pr list`: PR #55 (`create-dev-loop`) and PR #6
-(`snmp-command-generator`) are both open, not merged — `overnight` made
+(`example-repo`) are both open, not merged — `overnight` made
 real progress on two separate repos across two separate invocations without
 ever mutating either target's default branch, exactly as designed. The
 `devsrv` wiring documented above was also verified for real: `devsrv start
@@ -1105,16 +1119,15 @@ start" even though it ran correctly and exited 0 — an artifact of testing
 with a near-instant no-op, not a real failure mode for an actual
 multi-repo overnight run — and, separately, a long-running placeholder
 process to confirm the full `start`/`status`/`stop`/`restart`/`remove`
-lifecycle and `--autostart` persistence all work exactly as
-`~/pocket-rig/bin/devsrv`'s own docs describe).
+lifecycle and `--autostart` persistence all work exactly as devsrv's own
+docs describe).
 
 **Live transcript visibility** (see [Live session
 visibility](#live-session-visibility)) has also been run for real
 (2026-07-18), end to end, with a real `gardener align --repo
 dmccoystephenson/Simple-Calculator-GUI-Using-SDL` (report-only, an
-unrelated low-stakes repo — deliberately not `Stephenson-Software/gateway`,
-`dmccoystephenson/pocket-rig`, or `dmccoystephenson/gardener`, all still
-possibly in use by a concurrent `gardener overnight` run at the time),
+unrelated low-stakes repo — deliberately not any repo still possibly in
+use by a concurrent `gardener overnight` run at the time),
 isolated to a scratch `GARDENER_CACHE_DIR`/`GARDENER_STATE_DIR` and with
 stderr captured to a file for timestamped evidence:
 
@@ -1180,12 +1193,12 @@ actual failure's leftover artifact still on disk
 ## Architecture
 
 Stdlib-only Python — no third-party pip dependencies. This matches the
-established house style in this ecosystem (see e.g.
-`Stephenson-Software/gateway`'s `services/gateway-dashboard/app.py`: "Plain
-stdlib Python... no build step / third-party deps"). gardener shells out
+established house style used elsewhere in this ecosystem ("Plain stdlib
+Python... no build step / third-party deps"). gardener shells out
 to three external CLIs (`git`, `gh`, `claude`) rather than reimplementing
 git hosting, GitHub API auth, or an agent loop — that's a process
-dependency, not a pip one, and is the same shape pocket-rig's tools use.
+dependency, not a pip one, and is the same shape other local tooling here
+uses.
 
 ```
 gardener/

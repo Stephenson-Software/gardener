@@ -108,8 +108,8 @@ assumes or depends on it").
 
 Not research-doc-driven in the `RESEARCH.md` sense. The safety model is
 grounded in two things instead, both cited directly in `dispatch.py`'s
-docstring and `README.md`'s Safety model section: reading
-`~/pocket-rig/dashboard/server.py`'s existing Claude-dispatch endpoint (for
+docstring and `README.md`'s Safety model section: reading another local
+Claude-dispatch endpoint's existing source (for
 the `bypassPermissions`-hard-reject posture), and hands-on confirmation
 against a real `claude -p` invocation for exactly what `--tools`,
 `--allowedTools`, and each `--permission-mode` actually do — not assumed
