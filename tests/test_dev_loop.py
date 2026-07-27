@@ -12,12 +12,12 @@ from gardener.dispatch import MODE_SPECS, Mode
 
 class TestSlugify(unittest.TestCase):
     def test_simple_name(self):
-        self.assertEqual(dev_loop.slugify_repo_name("dmccoystephenson/gateway"), "gateway")
+        self.assertEqual(dev_loop.slugify_repo_name("example-org/gateway"), "gateway")
 
     def test_lowercases_and_hyphenates(self):
         self.assertEqual(
-            dev_loop.slugify_repo_name("dmccoystephenson/Simple-Calculator-GUI-Using-SDL"),
-            "simple-calculator-gui-using-sdl",
+            dev_loop.slugify_repo_name("example-org/Calculator-GUI-Using-SDL"),
+            "calculator-gui-using-sdl",
         )
 
     def test_collapses_non_alnum_runs(self):
@@ -31,7 +31,7 @@ class TestSlugify(unittest.TestCase):
             dev_loop.slugify_repo_name("owner/---")
 
     def test_skill_slug_appends_dev_loop_suffix(self):
-        self.assertEqual(dev_loop.skill_slug("dmccoystephenson/gateway"), "gateway-dev-loop")
+        self.assertEqual(dev_loop.skill_slug("example-org/gateway"), "gateway-dev-loop")
 
 
 class TestHasDevLoopSkill(unittest.TestCase):

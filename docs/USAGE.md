@@ -12,8 +12,9 @@ gardener dashboard [--port N]
 ```
 
 - **`gardener align --repo owner/repo`** (no flags) — **report-only,
-  dry-run by default.** Dispatches Claude to read the target repo and
-  dms-conventions' `ALIGNMENT_CHECKLIST.md`, and produce a gap checklist.
+  dry-run by default.** Dispatches Claude to read the target repo and your
+  [conventions repo](../README.md#conventions-repo)'s
+  `ALIGNMENT_CHECKLIST.md`, and produce a gap checklist.
   Claude has no write or shell tool available in this mode — see
   [Safety model](SAFETY.md) — so it cannot modify the target repo,
   open a PR, or open an issue no matter what the prompt says. The gap
@@ -24,7 +25,7 @@ gardener dashboard [--port N]
 - **`--implement`** — additionally authorizes Claude to implement fixes in
   the target repo: branch, commit, and open a PR, following *the target
   repo's own* conventions (language, build tool, test framework) rather
-  than copying dms-conventions' stack-agnostic examples literally.
+  than copying the conventions repo's examples literally.
 - **`--file-issue`** — instead of implementing, authorizes Claude to open
   one scoped GitHub issue in the target repo summarizing the gaps, for
   repos that already have their own `*-dev-loop` skill to pick the work up
@@ -54,7 +55,7 @@ gardener dashboard [--port N]
 
 ## `gardener tend` — dispatching a target repo's own dev-loop
 
-Where `align` checks a repo against dms-conventions, **`gardener tend
+Where `align` checks a repo against your conventions repo, **`gardener tend
 --repo owner/repo`** makes real, broader progress on the repo itself by
 dispatching *that repo's own* `<slug>-dev-loop` Claude Code skill (the kind
 normally invoked interactively as `/example-repo-dev-loop`,
@@ -195,9 +196,18 @@ level.
   `TEND_DEFAULT_TIMEOUT_SECONDS` for the full reasoning. The internal
   `create-dev-loop` dispatch `tend` runs when a repo has no skill yet has
   its own fixed 900s/15min ceiling, not exposed as a flag.
+- `--conventions-repo <git-url>` (`align` only) — the conventions repo to
+  audit against, overriding `$GARDENER_CONVENTIONS_URL`. There is no
+  built-in default; with neither set, `align` exits 2 with setup
+  instructions rather than dispatching. See
+  [Conventions repo](../README.md#conventions-repo) for the required layout.
 - `--no-refresh-conventions` (`align` only) / `--no-refresh-target`
   (`align` and `tend`) — reuse whatever is already cached instead of
-  fetching latest first.
+  fetching latest first. One exception: if the cached conventions checkout
+  belongs to a *different* conventions repo than the one now configured,
+  `align` re-points and refreshes it anyway — reusing it would audit
+  against the previously-configured repo, a wrong answer rather than a
+  stale one.
 
 ## Live session visibility
 

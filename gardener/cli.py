@@ -108,7 +108,7 @@ MODE_INSTRUCTIONS = {
    authorize or refuse. Do not attempt to open a PR or an issue.""",
     Mode.IMPLEMENT: """4. You are authorized to implement the identified gaps directly in this
    checked-out repository, following ITS OWN conventions (language, build
-   tool, test framework) rather than copying dms-conventions' literal
+   tool, test framework) rather than copying the conventions repo's literal
    examples. Concretely:
    - Create a branch named per COMMIT_PR_CONVENTIONS.md's prefix
      convention (feature/... or fix/...).
@@ -119,7 +119,7 @@ MODE_INSTRUCTIONS = {
      COMMIT_PR_CONVENTIONS.md. Only add a Co-Authored-By trailer if this
      repo's own history already uses that convention.
    - Push the branch and open a pull request (`gh pr create`) summarizing
-     the gaps closed, referencing dms-conventions doc(s) by URL instead of
+     the gaps closed, referencing the conventions doc(s) by URL instead of
      restating their rules in the PR body.
    - Only `git *` and `gh pr *` commands are available to you; nothing
      else is pre-approved and there is no human available in this session
@@ -315,12 +315,20 @@ def fetch_issue_counts(garden: list[str], timeout: int = 30) -> dict[str, int]:
     return counts
 
 
-def build_prompt(mode: Mode, repo: str, target_cwd: Path, conventions_dir: Path, default_branch: str) -> str:
+def build_prompt(
+    mode: Mode,
+    repo: str,
+    target_cwd: Path,
+    conventions_dir: Path,
+    default_branch: str,
+    conventions_url: str,
+) -> str:
     template = Template(PROMPT_TEMPLATE_PATH.read_text())
     return template.substitute(
         repo=repo,
         target_cwd=str(target_cwd),
         conventions_dir=str(conventions_dir),
+        conventions_url=conventions_url,
         default_branch=default_branch,
         mode_instructions=MODE_INSTRUCTIONS[mode],
     )
@@ -400,14 +408,25 @@ def cmd_align(args: argparse.Namespace) -> int:
 
     mode = Mode.IMPLEMENT if args.implement else Mode.FILE_ISSUE if args.file_issue else Mode.REPORT
 
-    print(f"gardener: aligning {args.repo} against dms-conventions (mode={mode.value})", file=sys.stderr)
+    # Resolved before the lock and before any progress output: an
+    # unconfigured conventions repo is a setup error, and printing
+    # "aligning X against ..." first would imply a run had started.
+    try:
+        conventions_url = conventions.resolve_url(args.conventions_repo)
+    except conventions.ConventionsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    print(f"gardener: aligning {args.repo} against {conventions_url} (mode={mode.value})", file=sys.stderr)
     if mode is Mode.REPORT:
         print("gardener: report-only — Claude has no write/shell tools in this run", file=sys.stderr)
 
     try:
         with repo_lock.repo_lock(args.repo):
-            conv = conventions.ensure_conventions(refresh=not args.no_refresh_conventions)
-            print(f"gardener: dms-conventions checked out at {conv.path}", file=sys.stderr)
+            conv = conventions.ensure_conventions(
+                refresh=not args.no_refresh_conventions, url=conventions_url
+            )
+            print(f"gardener: conventions checked out at {conv.path}", file=sys.stderr)
 
             target_dir = clone_or_refresh_target_repo(
                 args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
@@ -415,7 +434,9 @@ def cmd_align(args: argparse.Namespace) -> int:
             print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
 
             branch = current_branch(target_dir)
-            prompt = build_prompt(mode, args.repo, target_dir, conv.path, branch)
+            prompt = build_prompt(
+                mode, args.repo, target_dir, conv.path, branch, conventions_url
+            )
 
             print("gardener: dispatching claude (this can take a while)...", file=sys.stderr)
             result = run_claude(
@@ -1211,7 +1232,8 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gardener",
-        description="Align a target repo against dms-conventions via a dispatched Claude Code run.",
+        description="Dispatch Claude Code against a fleet of repos: audit one against your "
+                    "engineering conventions, or make real progress via each repo's own dev-loop skill.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1232,8 +1254,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Seconds to wait for the dispatched claude run (default {DEFAULT_TIMEOUT_SECONDS})",
     )
     align.add_argument(
+        "--conventions-repo", default=None, metavar="GIT_URL",
+        help="Git URL of the conventions repo to audit against "
+             f"(default: ${conventions.CONVENTIONS_URL_ENV}; required, no built-in default)",
+    )
+    align.add_argument(
         "--no-refresh-conventions", action="store_true",
-        help="Reuse the cached dms-conventions checkout as-is instead of fetching latest",
+        help="Reuse the cached conventions checkout as-is instead of fetching latest",
     )
     align.add_argument(
         "--no-refresh-target", action="store_true",
