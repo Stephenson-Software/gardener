@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Safety-gated CLI that dispatches Claude Code to align repos against dms-conventions, or tend a whole fleet of repos unattended overnight via each one's own dev-loop skill — never merges without an explicit per-repo opt-in."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "UNLICENSED" }
+license = { text = "MIT" }
 authors = [{ name = "dmccoystephenson" }]
 dependencies = []
 
