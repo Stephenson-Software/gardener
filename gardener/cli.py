@@ -570,8 +570,9 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
                     # session can't even read what's in its way. Confirmed as the
                     # root cause of a real failed run (dmccoystephenson/gardener,
                     # 2026-07-18) — see this repo's git history for the transcript
-                    # comparison against the same run's successful gateway-dev-loop
-                    # dispatch, which had no stale artifact blocking it.
+                    # comparison against that same overnight run's other,
+                    # successful dev-loop dispatch, which had no stale artifact
+                    # blocking it.
                     add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
                     model=args.model,
                     timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
@@ -691,8 +692,8 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
     # calls _dispatch_tend directly, bypassing cmd_tend entirely (see
     # TendResult's docstring), so a print living only in cmd_tend would
     # silently never fire for the overnight path. Confirmed missing for
-    # real during --concurrency testing (2026-07-18): gateway/gardener/
-    # pocket-rig all completed and were correctly recorded/classified, but
+    # real during --concurrency testing (2026-07-18): all three repos in
+    # that batch completed and were correctly recorded/classified, but
     # overnight's log never showed a "done in Xms" line for any of them.
     print("", file=sys.stderr)
     print(

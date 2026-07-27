@@ -44,14 +44,14 @@ special characters, including the path's leading `/`. Confirmed directly
    leading `-` of, the `-home-userland` path segment) produced the
    observed `--`, confirming runs are not collapsed to one `-`.
 2. Cross-checked against a real, already-existing gardener dispatch's own
-   transcript directory, from a live `tend` run against
-   `Stephenson-Software/gateway` earlier the same night: cwd
-   `/home/userland/.cache/gardener/repos/Stephenson-Software__gateway`
+   transcript directory, from a live `tend` run against another repo
+   earlier the same night: cwd
+   `/home/userland/.cache/gardener/repos/example-org__example-repo`
    (gardener's own `repo.replace("/", "__")` cache-dir naming, see
    `cli.py`'s `clone_or_refresh_target_repo`) produced
-   `-home-userland--cache-gardener-repos-Stephenson-Software--gateway` —
+   `-home-userland--cache-gardener-repos-example-org--example-repo` —
    the `__` gardener itself introduced became `--`, and the single `-`
-   already inside `Stephenson-Software` stayed a single `-`. Same rule,
+   already inside `example-org` stayed a single `-`. Same rule,
    independently confirmed against data gardener didn't generate for this
    purpose.
 
@@ -203,8 +203,8 @@ def start_transcript_watcher(cwd: PathLike, after: Optional[float] = None) -> th
 
 # ---- Pretty-printer ----
 #
-# Same shape as the ad hoc Python snippet that was hand-typed to tail the
-# real `Stephenson-Software/gateway` transcript on 2026-07-18 (parsing each
+# Same shape as the ad hoc Python snippet that was hand-typed to tail a
+# real dispatch transcript on 2026-07-18 (parsing each
 # line's `message.content[].type` for `tool_use`/`text`/`tool_result`) —
 # this is that snippet made permanent, tested, and reachable as `gardener
 # tail-transcript`.
