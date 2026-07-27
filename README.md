@@ -51,9 +51,9 @@ it*. See [Usage](#usage) below for the full command set.
   and the unattended batch dispatcher that tends them one after another
   overnight. See [docs/OVERNIGHT.md](docs/OVERNIGHT.md).
 - **`gardener dashboard`**: a local, read-only web UI over `gardener
-  status`'s own run history plus whatever `tend`/`overnight` log was
-  written to most recently, so an unattended overnight run doesn't require
-  polling the CLI by hand to see what it's doing. See
+  status`'s own run history plus every `tend`/`overnight` log still being
+  written to, so an unattended overnight run doesn't require polling the
+  CLI by hand to see what it's doing. See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 ## Installation

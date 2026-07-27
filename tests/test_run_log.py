@@ -198,10 +198,11 @@ class TestDashboardReadsWhatGardenerWrites(unittest.TestCase):
             )
             print("gardener: tending owner/a (allow_merge=True)", file=sys.stderr)
             print("gardener: tending owner/b (allow_merge=True)", file=sys.stderr)
-            print("notify: sent to Discord: gardener tend: MUTATION — owner/a", file=sys.stderr)
+            print("gardener: finished tending owner/a", file=sys.stderr)
 
         found = dashboard.find_active_log(self.logs_dir)
         self.assertEqual(found, path)
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir), [path])
         lines = dashboard.tail_lines(found)
         self.assertEqual(dashboard.parse_in_progress(lines), ["owner/b"])
         self.assertEqual(dashboard.parse_batch_progress(lines), (3, 4, 20))

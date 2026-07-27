@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -1303,6 +1304,159 @@ class TestCmdTendNotifications(unittest.TestCase):
         _title, message, level = mock_notifier.notify.call_args[0]
         self.assertEqual(level, Level.ERROR)
         self.assertIn("already being worked on", message)
+
+
+class TestDispatchTendProgressMarkers(unittest.TestCase):
+    """`_dispatch_tend`'s stderr narration is the dashboard's only source
+    for "what is running right now", so the writing half here and the
+    reading half in `dashboard.parse_in_progress` are asserted together —
+    same drift-guard shape as `cmd_overnight`'s batch-line test above.
+
+    Every one of `_dispatch_tend`'s four return paths must clear the repo,
+    not just the one that reaches a Discord notification: before issue #51
+    the dashboard inferred completion from `notify.py`'s webhook-success
+    line, which `NullNotifier` (no webhook configured — a documented,
+    supported setup) never prints, so every repo the log ever started
+    stayed pinned in "Currently tending" for the life of that log."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_db = Path(self._tmpdir.name) / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, repo="owner/name"):
+        return argparse.Namespace(
+            repo=repo, allow_merge=False, model=None,
+            timeout=TEND_DEFAULT_TIMEOUT_SECONDS, no_refresh_target=False,
+            state_db=self.state_db,
+        )
+
+    def _in_progress(self, stderr: io.StringIO) -> list:
+        return dashboard.parse_in_progress(stderr.getvalue().splitlines())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_completed_dispatch_clears_the_repo_with_no_notifier_output(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        from gardener.cli import _dispatch_tend
+
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+        # The default notifier is a MagicMock here, so it prints nothing —
+        # exactly what NullNotifier does when no webhook is configured.
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            _dispatch_tend(self._args())
+
+        self.assertIn("gardener: tending owner/name (allow_merge=False)", stderr.getvalue())
+        self.assertIn("gardener: finished tending owner/name", stderr.getvalue())
+        self.assertEqual(self._in_progress(stderr), [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo", side_effect=RuntimeError("clone failed"))
+    def test_setup_error_before_dispatch_still_clears_the_repo(
+        self, mock_clone, mock_default_notifier
+    ):
+        from gardener.cli import _dispatch_tend
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = _dispatch_tend(self._args())
+
+        self.assertFalse(result.dispatched)
+        self.assertEqual(self._in_progress(stderr), [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.repo_lock.repo_lock")
+    def test_repo_already_locked_still_clears_the_repo(self, mock_lock, mock_default_notifier):
+        from gardener.cli import _dispatch_tend
+
+        mock_lock.side_effect = repo_lock.RepoLockedError("owner/name is already being tended")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = _dispatch_tend(self._args())
+
+        self.assertFalse(result.dispatched)
+        self.assertEqual(self._in_progress(stderr), [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_failed_create_dev_loop_bootstrap_still_clears_the_repo(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        from gardener.cli import _dispatch_tend
+
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=False, result_text="", raw_stdout="{}", stderr="boom", exit_code=1,
+            duration_ms=100, cost_usd=0.01, session_id="s1",
+            permission_denials=[], is_error=True,
+        )
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = _dispatch_tend(self._args())
+
+        self.assertFalse(result.dispatched)
+        self.assertEqual(self._in_progress(stderr), [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.clone_or_refresh_target_repo", side_effect=KeyboardInterrupt)
+    def test_interrupted_dispatch_still_clears_the_repo(self, mock_clone, mock_default_notifier):
+        # The marker is printed from a `finally`, so even the kill
+        # `cmd_overnight`'s cursor-durability test simulates leaves the
+        # panel accurate rather than pinning the repo forever.
+        from gardener.cli import _dispatch_tend
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(KeyboardInterrupt):
+            _dispatch_tend(self._args())
+
+        self.assertEqual(self._in_progress(stderr), [])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_only_the_finished_repo_clears_when_two_dispatches_interleave(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, mock_default_notifier
+    ):
+        # Both markers name their repo, which is what makes a
+        # --concurrency 2 log — where two dispatches write to the same
+        # file at once — attributable rather than ambiguous.
+        from gardener.cli import _dispatch_tend
+
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 issues, no PR opened, repo already aligned",
+            raw_stdout="{}", stderr="", exit_code=0, duration_ms=100, cost_usd=0.01,
+            session_id="s1", permission_denials=[], is_error=False,
+        )
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            print("gardener: tending owner/other (allow_merge=False)", file=sys.stderr)
+            _dispatch_tend(self._args())
+
+        self.assertEqual(self._in_progress(stderr), ["owner/other"])
 
 
 class TestFindOrphanedPR(unittest.TestCase):

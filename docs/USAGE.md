@@ -242,13 +242,14 @@ reading as the file grows, like `tail -f`, until interrupted.
 a run log at `~/.local/state/gardener/logs/<command>-<YYYYmmdd-HHMMSS>.log`
 (`run_log.py`; the path is printed as the run's first line). This is what
 makes the dashboard's live panels work at all: those panels are built by
-re-reading gardener's `gardener: tending ...` / `overnight dispatching ...
-(N-M/T candidates this run ...)` / `notify: sent to Discord: ...` progress
-lines back out of "the active log", and before this existed no such file
-was ever written — so for any run not launched in a terminal someone was
-already watching (i.e. every unattended run, the entire case the dashboard
-exists for) "Tonight", "Currently tending", and "Live log" were
-permanently empty while "Recent runs" kept working off the SQLite history.
+re-reading gardener's `gardener: tending <repo> ...` / `gardener: finished
+tending <repo>` / `overnight dispatching ... (N-M/T candidates this run
+...)` progress lines back out of the active logs, and before this existed
+no such file was ever written — so for any run not launched in a terminal
+someone was already watching (i.e. every unattended run, the entire case
+the dashboard exists for) "Tonight", "Currently tending", and "Live log"
+were permanently empty while "Recent runs" kept working off the SQLite
+history.
 
 It is a tee, not a redirect: stderr still goes to wherever it already went,
 so running a dispatch in a terminal looks exactly as it did before.
@@ -263,3 +264,25 @@ run; the run's own log is always the newest and so is never the file
 deleted. A log that can't be opened (read-only state dir, out of disk)
 prints one warning and the run continues without one — logging must never
 be able to fail a dispatch.
+
+Two dispatching runs at once each get their own log — a manual `gardener
+tend` alongside the devsrv-managed `overnight` run is a supported
+configuration, which is why `repo_lock.py` exists — so the live panels
+read *every* log written to within `dashboard.ACTIVE_LOG_WINDOW_SECONDS`
+(the real `tend` dispatch timeout plus a margin, since a single dispatch
+can sit inside one `claude` subprocess that long without printing a line),
+not just the newest one. "Currently tending" is the union across them and
+the batch bar comes from the freshest log that actually has one, so
+starting a one-repo tend no longer makes the overnight run beside it
+disappear. The "Live log" tail still shows a single file — interleaving
+two raw narrations would be unreadable — but it names that file and says
+how many other live logs it isn't tailing. See
+[DASHBOARD.md](DASHBOARD.md) for the panels themselves.
+
+A repo clears from "Currently tending" when its `gardener: finished
+tending <repo>` line appears, which `_dispatch_tend` prints from a
+`finally` on every one of its return paths. This used to be inferred from
+the `notify: sent to Discord: ...` line instead, which meant an operator
+with no webhook configured (a supported setup — notifications are then a
+no-op) never cleared a single repo: the panel accumulated every repo the
+run had ever touched instead of showing what was actually running.
