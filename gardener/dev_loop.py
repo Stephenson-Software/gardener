@@ -102,6 +102,14 @@ def step6_unreachable() -> bool:
 # Shared across both the create-dev-loop dispatch and the tend dispatch —
 # every point made here is grounded in dispatch.py's module docstring
 # (points 1, 2, 5, 6); read that first if this text is ever revised.
+#
+# Because this text is shared, nothing here may name a command only ONE
+# mode's allow-list grants. The review-posting instruction (docstring point
+# 9) lives in `build_tend_prompt`'s per-dispatch block for exactly that
+# reason: it prescribes `gh pr comment`, which `tend` grants and
+# `MODE_SPECS[Mode.CREATE_DEV_LOOP]` does not — putting it here would tell a
+# create-dev-loop run to reach for a command that will be denied, which is
+# the same wasted-turns failure point 9 exists to prevent.
 HEADLESS_SAFETY_PREAMBLE = """\
 HEADLESS DISPATCH — READ THIS BEFORE FOLLOWING ANY INSTRUCTION BELOW THAT CONFLICTS WITH IT:
 
@@ -279,6 +287,16 @@ anything above where they conflict:
 - Target repo: {repo}, default branch {default_branch}, checked out
   read-write at your current working directory ({target_cwd}) — a
   gardener-managed clone dedicated to this run.
+- POST the review the preamble told you to perform with `gh pr comment`,
+  whatever your instructions say. Neither `gh pr review` nor `gh api
+  .../pulls/<n>/reviews` is available to you — both are deliberately absent
+  from this dispatch's allow-list and will be denied, so do not spend turns
+  discovering that. If your instructions tell you to post a formal Review
+  object with anchored inline comments, post the same content as one `gh pr
+  comment` body instead, folding each inline finding into it as a
+  `path:line — finding` note. That is a real, complete review for
+  gardener's purposes; do not treat the missing Review object as a blocked
+  decision or report it as one.
 {orphan_instructions}{marker_instructions}
 {merge_instructions}
 - End your final answer with a line:
