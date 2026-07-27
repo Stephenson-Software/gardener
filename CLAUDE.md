@@ -45,9 +45,12 @@ per strategy (a bare list index for `round-robin`, repo names for
 across runs). It adds no new merge-decision logic of its own — `tend`'s
 existing `merge_eligible()` gate (repo must *also* be on the separate merge
 allow-list) is what actually decides whether a merge can happen, unchanged.
-See README's "Overnight / unattended operation" section for the full design
-and the honest reliability caveat about this device having no true
-always-on daemon guarantee.
+See README's "Overnight / unattended operation" section for the full
+design, the honest reliability caveat that no device this has been run on
+gives an uninterrupted overnight guarantee, and the concrete wiring
+recipes for each device it has actually been deployed to (Android/UserLand
+via `devsrv`, WSL2/Windows via Task Scheduler and `bin/run-overnight.sh`,
+plain Linux via cron/systemd).
 
 Every dispatch (`align`/`tend`/`overnight`) still runs synchronously — see
 `dispatch.py`'s "Why synchronous dispatch" note — but is no longer a total
@@ -212,11 +215,13 @@ record what you actually observed before changing the docstring's claims.
     `--hours 0.1 --concurrency 2` against 2 low-stakes garden repos,
     confirming both dispatch, both get their own correct per-repo
     notification, and neither's recorded `state.Run`/notification data is
-    corrupted or swapped with the other's — this device has no true process
-    isolation and real, shared CPU/RAM (see `~/.claude/CLAUDE.md`'s
-    environment notes), so a real concurrent run is the only thing that
-    actually confirms this works under this device's real resource
-    constraints, not just under mocks.
+    corrupted or swapped with the other's — whatever device this actually
+    runs on has no guaranteed process isolation and shares real CPU/RAM
+    across every process on it (a property of the host device, not of
+    gardener — see README's "Wiring it to 'tend to my garden while I
+    sleep'" section for what's actually been deployed where), so a real
+    concurrent run is the only thing that actually confirms this works
+    under real resource constraints, not just under mocks.
 - `--implement` and `--file-issue` should be exercised for real (not just
   unit-tested) before being trusted against anything that matters, the
   same way report mode was — this hadn't happened as of this repo's first
@@ -251,8 +256,9 @@ target-repo alignment rules, not just the ones it enforces on others.
 | `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`, and the `tend`-specific `AskUserQuestion`/`Agent`/`ScheduleWakeup` findings) still holds against the currently-installed `claude` version |
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes; references to dms-conventions doc paths match that repo's actual current layout |
 | `dev_loop.py`'s `HEADLESS_SAFETY_PREAMBLE` and prompt builders | Still accurately describes which tools are absent/excluded in `tend`/`create-dev-loop` mode (must match `dispatch.py`'s actual `tend_mode_spec()`/`MODE_SPECS[Mode.CREATE_DEV_LOOP]`) |
-| README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path, the exact `devsrv` invocation) and still states the "no true always-on daemon guarantee on this device" caveat plainly, not oversold |
+| README's "Overnight / unattended operation" section | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path) and each documented per-device wiring recipe's exact invocation (`devsrv`, `bin/run-overnight.sh` + Task Scheduler, cron/systemd) is current for the device it describes — still states the "no true always-on daemon guarantee on any device this has been run on" caveat plainly, not oversold |
 | README's "The garden view" section | The plant/data mapping table still matches what `dashboard.py`'s `plantSvg` actually draws, and `build_garden_rows`' row shape still feeds it — the whole point of that view is that nothing in it is invented, so a visual tweak that stops matching the table is a doc bug |
 | `run_log.py` module docstring | The logs-dir path it writes to still matches the one `dashboard.py` reads from, and the `.log` filename suffix still matches `find_active_log`'s glob — `tests/test_run_log.py` guards both, so treat a failure there as the docs being wrong, not the test |
+| `bin/run-overnight.sh` | Still matches README's WSL2/Task Scheduler recipe verbatim (PATH export present, no separate log redirection now that `run_log.py` owns logging) — this is the literal file the real "Gardener Overnight" Task Scheduler job invokes nightly, not just documentation |
 | `transcript.py` module docstring | The transcript-path encoding rule (`encode_cwd`) still matches a real `claude -p` session's actual `~/.claude/projects/<encoded-cwd>/` directory naming — re-verify against a real dispatch (not assumption) before trusting the old notes if this ever seems off |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process |

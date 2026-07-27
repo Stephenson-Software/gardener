@@ -236,8 +236,9 @@ naturally stops matching on the next run — no separate cleanup needed.
 Nothing stops two independent `gardener` invocations from targeting the
 same repo at the same time — a manual `gardener tend --repo X` run by hand
 while `gardener overnight` is already dispatching `X`, or two overlapping
-`overnight` runs (e.g. one started by hand while the `devsrv`-managed one
-is also up). Without anything guarding against this, both processes would
+`overnight` runs (e.g. one started by hand while a supervised one — `devsrv`,
+a scheduled task, cron — is also up). Without anything guarding against
+this, both processes would
 clone/checkout/dispatch against the *same* shared working tree in
 `~/.cache/gardener/repos/<owner>__<repo>` concurrently — the same class of
 failure that has corrupted `.git/objects` in this ecosystem before (a
@@ -298,11 +299,12 @@ to my garden while I sleep" entry point:
    `--concurrency` > 1 — each is still just one independent, blocking
    `claude -p` subprocess (see [Why synchronous
    dispatch](#why-synchronous-dispatch)), now several running in parallel
-   OS processes rather than one at a time. This device has no true process
-   isolation and real, shared CPU/RAM (see the "no true always-on daemon
-   guarantee" caveat below) — `2` is a deliberately modest default, and
-   raising it further is a decision to make with that tradeoff in mind, not
-   a free speedup.
+   OS processes rather than one at a time. Whatever machine this actually
+   runs on shares real CPU/RAM across every process on it, with no
+   guaranteed isolation between them (see the "no true always-on daemon
+   guarantee" caveat below, itself a property of the host device, not of
+   gardener) — `2` is a deliberately modest default, and raising it further
+   is a decision to make with that tradeoff in mind, not a free speedup.
 3. `--allow-merge` is passed unconditionally to every dispatch. This is
    safe *without* `overnight` needing any merge-decision logic of its own:
    `tend`'s own `merge_eligible()` check still requires the target repo to
@@ -399,18 +401,39 @@ to my garden while I sleep" entry point:
 
 #### Wiring it to "tend to my garden while I sleep"
 
-This device (a UserLand/Android sandbox) has no systemd, no cron, and no
-true always-on daemon guarantee — Android can and will kill background
-processes on a task swipe-away, aggressive battery/OOM management, or
-extended idle, the same way it kills every other background process on
-this machine. There is no way around that here. What a small local
-process-supervisor script gives you instead (the examples below use
-`devsrv` as a stand-in name — substitute whatever registers/restarts
-long-running commands on your own setup): the command is *registered* so
-it's visible, restartable without retyping it, and comes back on its own
-the next time an interactive shell starts (wired into `.bashrc`) if it
-gets killed — **not** an uninterrupted guarantee that it runs the whole
-night no matter what.
+`gardener overnight --hours N` is a single long-running foreground
+command — it doesn't daemonize, background itself, install anything, or
+know or care what invoked it. Making it actually run unattended, on a
+schedule, and survive an interruption is entirely a property of *how the
+host device invokes and supervises it* — gardener has no opinion on that
+beyond the resume cursor described above, which is what makes *any* of
+the recipes below safe to interrupt and restart rather than something
+each one has to solve itself.
+
+**No device this has actually been run on gives an uninterrupted
+"runs the whole night no matter what" guarantee.** The honest baseline,
+true regardless of device, is: something restarts or reschedules
+`gardener overnight`, and the resume cursor means that restart picks up
+roughly where the last one left off instead of re-tending the garden from
+scratch. What differs per device is *what* does the restarting/scheduling
+and *why* an interruption happens at all. Below are the recipes this has
+actually been run under — pick the one matching your device, or adapt the
+pattern to whatever scheduler yours has; don't assume any one of these is
+"the" way gardener expects to be run.
+
+##### Android / UserLand sandbox — `devsrv`, no cron or systemd
+
+This device class has no systemd, no cron, and no true always-on daemon
+guarantee — Android can and will kill background processes on a task
+swipe-away, aggressive battery/OOM management, or extended idle, the same
+way it kills every other background process on the device. There is no
+way around that here. What a small local process-supervisor script gives
+you instead (`devsrv` below is a stand-in name — substitute whatever
+registers/restarts long-running commands on your own setup): the command
+is *registered* so it's visible, restartable without
+retyping it, and comes back on its own the next time an interactive shell
+starts (wired into `.bashrc`) if it gets killed — **not** an uninterrupted
+guarantee that it runs the whole night no matter what.
 
 The actual invocation:
 
@@ -420,10 +443,10 @@ devsrv status gardener-overnight   # confirm it's running
 devsrv logs gardener-overnight -f  # watch progress live
 ```
 
-`--hours 6` here is a deliberate local choice, not the default: gardener's
-own default is `8.0` (`overnight.DEFAULT_OVERNIGHT_HOURS`, see the time
-budget section above). The registered service is the source of truth for
-what this device actually runs — check it with `devsrv status
+`--hours 6` here is a deliberate local choice on this device, not
+gardener's default (`8.0`, `overnight.DEFAULT_OVERNIGHT_HOURS` — see the
+time budget section above). The registered service is the source of truth
+for what a given device actually runs — check it with `devsrv status
 gardener-overnight` rather than trusting this snippet if the two ever
 disagree.
 
@@ -444,6 +467,92 @@ kill is still re-dispatched fresh on the next run (the resume cursor only
 advances past *completed* repos) — but that re-dispatch now recognizes and
 continues any PR the interrupted session already opened rather than
 starting a duplicate; see "Orphaned work recovery" above.
+
+##### WSL2 + Windows Task Scheduler
+
+A different device this has actually been run on: a WSL2 Ubuntu instance
+with no true `cron` daemon of its own (WSL2 doesn't run background
+services unless something starts them, and nothing keeps a `cron` job
+alive across a WSL shutdown) but a real, reliable host-side scheduler —
+Windows Task Scheduler — one directory up. The registered task runs
+
+```
+wsl.exe -d <distro> -u <user> -- bash -lc "/path/to/gardener/bin/run-overnight.sh"
+```
+
+on a daily trigger, and `bin/run-overnight.sh` in this repo is that
+script — tracked in git specifically so its fixes (below) aren't
+device-local knowledge that quietly disappears:
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+export PATH="/root/.local/bin:$PATH"
+GARDENER_BIN="/root/.venvs/gardener/bin/gardener"
+HOURS="${GARDENER_OVERNIGHT_HOURS:-8}"
+"$GARDENER_BIN" overnight --hours "$HOURS"
+```
+
+Two gotchas confirmed the hard way against a real scheduled failure, both
+now baked into the script above rather than left as tribal knowledge:
+
+1. **`bash -lc "…"` is never interactive, even with `-l`.** Stock Ubuntu's
+   `~/.bashrc` starts with `[ -z "$PS1" ] && return`, which bails out
+   before ever reaching whatever line further down that file puts `claude`
+   on `PATH` (e.g. `export PATH="$HOME/.local/bin:$PATH"`, if that's where
+   `claude` lives on your setup) — a genuinely fresh Task Scheduler launch
+   never sees that PATH entry, so every dispatch fails instantly with
+   `claude not found on PATH`, and it's easy to miss in testing because an
+   interactive shell you test the script from *already* has the enriched
+   PATH inherited, masking the bug. Confirmed directly:
+   `env -i HOME="$HOME" USER=root bash -lc 'which claude'` fails against
+   an unpatched script's environment. The fix is exporting `PATH`
+   explicitly in the script itself, as above, rather than depending on
+   `.bashrc` sourcing at all.
+2. **Don't also redirect the script's own output to a log file.**
+   `gardener overnight` already writes and prunes its own run log
+   internally (`run_log.py` — see "Run logs" below); a script-level
+   `>>"$LOG_FILE" 2>&1` wrapper around the invocation is redundant, and
+   when it happens to compute the same filename gardener's own logger
+   does in the same second, the result is every line duplicated in that
+   file. Let gardener own its own logging entirely.
+
+Real-verified on 2026-07-26: the unpatched script failed 28/28 repos in
+about a minute, confirmed as the PATH issue above via the same `env -i`
+reproduction, fixed, and re-verified with a full live `gardener overnight`
+run that dispatched real work end to end through the exact scheduled
+invocation path.
+
+##### Generic Linux — cron or a systemd timer
+
+Neither of the above applies to a plain Linux server or desktop with a
+working `cron`/`systemd` — the straightforward version, for a user with
+`gardener` on `PATH` in their crontab's environment already:
+
+```cron
+# crontab -e
+0 1 * * * /home/you/.venvs/gardener/bin/gardener overnight --hours 8
+```
+
+or, as a systemd user timer:
+
+```ini
+# ~/.config/systemd/user/gardener-overnight.service
+[Service]
+ExecStart=/home/you/.venvs/gardener/bin/gardener overnight --hours 8
+
+# ~/.config/systemd/user/gardener-overnight.timer
+[Timer]
+OnCalendar=*-*-* 01:00:00
+[Install]
+WantedBy=timers.target
+```
+
+`cron`'s own invocation environment is famously minimal (no login shell,
+no `.bashrc`) — the same PATH lesson from the Task Scheduler recipe above
+applies here too: use an absolute path to the `gardener` binary (as
+above) rather than relying on `PATH` at all, and don't assume anything
+`~/.bashrc`/`~/.profile` sets up will be present.
 
 ### Device-wide failures abort the run instead of consuming the garden
 
@@ -544,8 +653,9 @@ synchronous dispatch, not `--bg`](#why-synchronous-dispatch-not---bg)
 below) and only capture output when the whole run finishes — for `tend`,
 that's up to `TEND_DEFAULT_TIMEOUT_SECONDS` (45 min) per repo with
 otherwise zero visibility into what's happening while it runs, a real gap
-for anyone watching `devsrv logs gardener-overnight -f` or a local
-dashboard's log viewer overnight.
+for anyone watching an unattended run's logs (via whichever process
+supervisor manages it — `devsrv logs`, `journalctl`, a plain log file, or
+the dashboard's own log viewer) overnight.
 
 Claude Code already solves the actual data half of this on its own, for
 every `-p` session, no special flag required: it writes a JSONL transcript
@@ -555,7 +665,7 @@ starting, printed to stderr the same way every other `gardener:` progress
 line is:
 
 ```
-gardener: session transcript: /home/userland/.claude/projects/-home-userland...-repo/<session-id>.jsonl (tail -f it for live detail, or `gardener tail-transcript -f <path>`)
+gardener: session transcript: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl (tail -f it for live detail, or `gardener tail-transcript -f <path>`)
 ```
 
 This is a background daemon thread started right before the existing,
@@ -828,10 +938,10 @@ coverage (fully mocked `gh`/deterministic seeded shuffle) standing in for
 this on its own.
 
 **`--concurrency > 1` specifically** has now had real, unattended
-end-to-end exercise on this device: the `gardener-overnight` devsrv
-service ran `--hours 6 --concurrency 3` against the then-15-repo garden on
-2026-07-25, dispatching all 15 in batches of 3 (11 PRs opened, 4 errored,
-one Discord summary). Concurrent dispatch itself held up — no repo's
+end-to-end exercise on the Android/UserLand device: the `gardener-overnight`
+devsrv service ran `--hours 6 --concurrency 3` against the then-15-repo
+garden on 2026-07-25, dispatching all 15 in batches of 3 (11 PRs opened, 4
+errored, one Discord summary). Concurrent dispatch itself held up — no repo's
 recorded `state.Run` or notification was swapped with another's (the
 failure mode the old `redirect_stdout`-based capture would have been
 vulnerable to — see [issue
@@ -1107,11 +1217,11 @@ Confirmed afterward via `gh pr list`: PR #55 (`create-dev-loop`) and PR #6
 (`example-repo`) are both open, not merged — `overnight` made
 real progress on two separate repos across two separate invocations without
 ever mutating either target's default branch, exactly as designed. The
-`devsrv` wiring documented above was also verified for real: `devsrv start
-<name> --autostart -- gardener overnight --hours 8` (the budget the service
-was registered with at the time of that test; it has since been
-re-registered with `--hours 6` — the wiring is what was being verified
-here, not the number) (tested against both
+Android/UserLand `devsrv` wiring documented above was also verified for
+real: `devsrv start <name> --autostart -- gardener overnight --hours 8`
+(the budget the service was registered with at the time of that test; it
+has since been re-registered with `--hours 6` — the wiring is what was
+being verified here, not the number) (tested against both
 the exact real command — confirmed its stderr output lands correctly in
 `devsrv logs`, though a run against an empty garden exits before devsrv's
 brief startup poll window closes, which devsrv reports as "failed to
@@ -1121,6 +1231,18 @@ multi-repo overnight run — and, separately, a long-running placeholder
 process to confirm the full `start`/`status`/`stop`/`restart`/`remove`
 lifecycle and `--autostart` persistence all work exactly as devsrv's own
 docs describe).
+
+The WSL2/Windows Task Scheduler wiring documented above was separately
+real-verified (2026-07-26), on the device that actually runs it: the
+unpatched `bin/run-overnight.sh` failed 28/28 garden repos in about a
+minute with `claude not found on PATH`, reproduced directly with
+`env -i HOME="$HOME" USER=root bash -lc 'which claude'` against the exact
+Task Scheduler invocation shape, fixed by exporting `PATH` explicitly in
+the script, and confirmed by re-running the exact fixed script the same
+way, which dispatched real work end to end. The log-duplication fix in
+the same recipe was confirmed by inspection of a real run's log showing
+every line doubled, traced to the script's own redirect and `run_log.py`
+both writing the same path.
 
 **Live transcript visibility** (see [Live session
 visibility](#live-session-visibility)) has also been run for real
