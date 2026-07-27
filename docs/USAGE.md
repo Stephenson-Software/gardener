@@ -40,12 +40,15 @@ gardener dashboard [--port N]
   `gardener status` prints, plus the [garden view](DASHBOARD.md) (the
   garden list and the merge allow-list joined with each repo's stats, as a
   table or as a plot of plants) and
-  a live-updating tail of whichever `tend`/`overnight` run log was most
-  recently written to (see [Run logs](#run-logs) — a dispatching run writes
-  one itself; auto-refreshes every 4s; "currently tending" is a
-  best-effort parse of that log's own progress lines, not a second source
-  of truth — `gardener status`'s sqlite db remains the one authoritative
-  outcome record). If `--port` is already bound (e.g. a previous
+  a live-updating tail of the most recently written `tend`/`overnight` run
+  log (see [Run logs](#run-logs) — a dispatching run writes one itself;
+  auto-refreshes every 4s). "Currently tending" and the batch bar are
+  built from *every* run log still being written to, not just the tailed
+  one, so a manual `tend` started alongside the overnight run doesn't hide
+  it — and the tail names the log it's showing plus how many others it
+  isn't. All of that is a best-effort parse of those logs' own progress
+  lines, not a second source of truth — `gardener status`'s sqlite db
+  remains the one authoritative outcome record. If `--port` is already bound (e.g. a previous
   invocation still running), gardener picks a free one instead of failing
   and says so on stderr.
 
@@ -276,8 +279,7 @@ the batch bar comes from the freshest log that actually has one, so
 starting a one-repo tend no longer makes the overnight run beside it
 disappear. The "Live log" tail still shows a single file — interleaving
 two raw narrations would be unreadable — but it names that file and says
-how many other live logs it isn't tailing. See
-[DASHBOARD.md](DASHBOARD.md) for the panels themselves.
+how many other live logs it isn't tailing.
 
 A repo clears from "Currently tending" when its `gardener: finished
 tending <repo>` line appears, which `_dispatch_tend` prints from a
