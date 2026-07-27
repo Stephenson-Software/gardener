@@ -133,7 +133,13 @@ def find_active_logs(
     the module docstring). When nothing is that fresh it falls back to
     `find_active_log`'s single newest log, so a finished run's narration
     still renders instead of the page going blank the moment its last line
-    ages out."""
+    ages out.
+
+    Deliberately uncapped: `build_status` reads every log this returns on
+    every 4 s poll, but silently dropping one is the exact failure this
+    replaces, and `run_log.DEFAULT_KEEP` already bounds the directory at
+    30 files — of which only concurrently-dispatching ones can be inside
+    the window at all."""
     if not logs_dir.exists():
         return []
     cutoff = (now if now is not None else time.time()) - window_seconds
@@ -327,7 +333,7 @@ def build_status(
     active_logs = find_active_logs(logs_dir)
     lines_by_log = {path: tail_lines(path, log_tail_lines) for path in active_logs}
     active_log = active_logs[0] if active_logs else None
-    log_lines = lines_by_log.get(active_log, []) if active_log else []
+    log_lines = lines_by_log.get(active_log, [])
 
     in_progress: list[str] = []
     for path in active_logs:

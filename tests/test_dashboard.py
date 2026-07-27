@@ -103,6 +103,28 @@ class TestFindActiveLogs(unittest.TestCase):
         (self.logs_dir / "notes.txt").write_text("hi")
         self.assertEqual(dashboard.find_active_logs(self.logs_dir), [])
 
+    def test_the_window_boundary_is_exact_with_an_injected_clock(self):
+        # `now` is injectable so the boundary can be asserted without
+        # depending on the filesystem's mtime resolution, in the same
+        # spirit as transcript.py's injected time_fn/sleep_fn.
+        import os
+
+        self.logs_dir.mkdir()
+        path = self.logs_dir / "tend-1.log"
+        path.write_text("x")
+        os.utime(path, (1_000_000, 1_000_000))
+
+        inside = 1_000_000 + dashboard.ACTIVE_LOG_WINDOW_SECONDS
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside), [path])
+        # One second past the window it is no longer *fresh* — but it is
+        # still the newest log, so the fallback keeps the page populated.
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside + 1), [path])
+        # With a fresher log present, the stale one is genuinely dropped.
+        newer = self.logs_dir / "overnight-1.log"
+        newer.write_text("x")
+        os.utime(newer, (inside, inside))
+        self.assertEqual(dashboard.find_active_logs(self.logs_dir, now=inside + 1), [newer])
+
     def test_window_is_long_enough_for_a_silent_tend_dispatch(self):
         # A tend can sit inside one `claude` subprocess for the entire
         # dispatch timeout without gardener printing anything, so a window
