@@ -80,7 +80,13 @@ where the budget/headroom logic specifically is under test,
 wall-clock jitter. `tests/test_cli.py` also covers the target-repo refresh's
 `git clean` invocation with `_run` mocked (dependency caches excluded via
 `-e`, build outputs still cleaned, the clean step's longer timeout, and a
-failing clean still raising with the full command in the message);
+failing clean still raising with the full command in the message), and
+`main()`'s `log_name` wiring — that `build_parser()` sets it only on the
+dispatching subcommands (`align`/`tend`/`overnight`) and leaves it unset on
+the read-only ones (`status`/`allowlist`/`garden`/`tail-transcript`/
+`dashboard`), and that `main()` itself opens a run log only for the former,
+with `cmd_align`/`cmd_status` and `run_log.tee_stderr` mocked so no test
+opens a real log file;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
 without ever making a real HTTP call; `tests/test_garden.py` and

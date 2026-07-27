@@ -43,6 +43,7 @@ from gardener.cli import (
     fetch_issue_counts,
     fetch_open_issue_count,
     find_orphaned_pr,
+    main,
     merge_eligible,
     repo_arg,
 )
@@ -262,6 +263,67 @@ class TestDashboardArgParsing(unittest.TestCase):
     def test_port_override(self):
         args = self.parser.parse_args(["dashboard", "--port", "9001"])
         self.assertEqual(args.port, 9001)
+
+
+class TestLogNameWiring(unittest.TestCase):
+    """main() only wraps a subcommand's run in a `run_log` when the parser
+    set `log_name` for it — the dispatching commands (align/tend/overnight),
+    never the read-only ones. See cli.py's `main` and CLAUDE.md's testing
+    section."""
+
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_dispatching_subcommands_carry_their_own_log_name(self):
+        cases = {
+            "align": ["align", "--repo", "owner/name"],
+            "tend": ["tend", "--repo", "owner/name"],
+            "overnight": ["overnight"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(command=name):
+                args = self.parser.parse_args(argv)
+                self.assertEqual(getattr(args, "log_name", None), name)
+
+    def test_read_only_subcommands_have_no_log_name(self):
+        cases = {
+            "status": ["status"],
+            "allowlist": ["allowlist", "list"],
+            "garden": ["garden", "list"],
+            "tail-transcript": ["tail-transcript", "/tmp/session.jsonl"],
+            "dashboard": ["dashboard"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(command=name):
+                args = self.parser.parse_args(argv)
+                self.assertIsNone(getattr(args, "log_name", None))
+
+    @patch("gardener.cli.run_log.tee_stderr")
+    @patch("gardener.cli.cmd_status")
+    def test_main_does_not_open_a_log_for_a_read_only_command(
+        self, mock_cmd_status, mock_tee_stderr
+    ):
+        mock_cmd_status.return_value = 0
+
+        result = main(["status"])
+
+        self.assertEqual(result, 0)
+        mock_cmd_status.assert_called_once()
+        mock_tee_stderr.assert_not_called()
+
+    @patch("gardener.cli.run_log.tee_stderr")
+    @patch("gardener.cli.cmd_align")
+    def test_main_opens_a_log_for_a_dispatching_command(
+        self, mock_cmd_align, mock_tee_stderr
+    ):
+        mock_cmd_align.return_value = 0
+        mock_tee_stderr.return_value.__enter__.return_value = None
+
+        result = main(["align", "--repo", "owner/name"])
+
+        self.assertEqual(result, 0)
+        mock_cmd_align.assert_called_once()
+        mock_tee_stderr.assert_called_once_with("align")
 
 
 class TestFetchIssueCounts(unittest.TestCase):
