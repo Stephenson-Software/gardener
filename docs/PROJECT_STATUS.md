@@ -60,7 +60,7 @@ be observed without waiting out a full 8h window):
 - **Run 1**: started at the resume cursor's default (index 0,
   `create-dev-loop`, alphabetically first). No `/create-dev-loop-dev-loop`
   skill existed yet under that exact derived slug (the repo's actual local
-  skill was hand-named `cdl-dev-loop`, a different slug than gardener
+  skill had been hand-named with an abbreviation, a different slug than gardener
   derives from the repo name — see `dev_loop.py`'s slug derivation), so
   `tend` bootstrapped one via `create-dev-loop` first, then dispatched it
   (403.6s dispatch, $1.87, `ok=True`, 3 permission denials — correctly
@@ -121,10 +121,9 @@ both writing the same path.
 
 **Live transcript visibility** (see [Live session
 visibility](USAGE.md#live-session-visibility)) has also been run for real
-(2026-07-18), end to end, with a real `gardener align --repo
-dmccoystephenson/Simple-Calculator-GUI-Using-SDL` (report-only, an
-unrelated low-stakes repo — deliberately not any repo still possibly in
-use by a concurrent `gardener overnight` run at the time),
+(2026-07-18), end to end, with a real `gardener align` (report-only)
+against an unrelated low-stakes repo — deliberately not any repo still
+possibly in use by a concurrent `gardener overnight` run at the time —
 isolated to a scratch `GARDENER_CACHE_DIR`/`GARDENER_STATE_DIR` and with
 stderr captured to a file for timestamped evidence:
 
