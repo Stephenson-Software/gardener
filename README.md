@@ -775,10 +775,9 @@ Please file a bug report [here](https://github.com/dmccoystephenson/gardener/iss
 
 ## Contributing
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — not yet written (see
-  [Project Status](#project-status)); until then, open an issue or PR
-  directly and ground any convention proposal in dms-conventions the same
-  way dms-conventions grounds its own docs in a real source repo.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose a change, branch
+naming, and running the test suite. Community participation is governed by
+the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Testing
 
