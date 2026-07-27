@@ -1009,9 +1009,9 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         exists mainly for the runs that didn't need it: the 2026-07-25 run
         tended 6 repos, was killed, and the next run started the cycle over
         from zero because none of those 6 had ever been persisted (issue
-        #42). Writing per batch is what makes README's "a run that gets
-        interrupted partway through the garden doesn't lose progress on the
-        repos it already finished" actually true.
+        #42). Writing per batch is what makes docs/OVERNIGHT.md's "a run
+        that gets interrupted partway through the garden doesn't lose
+        progress on the repos it already finished" actually true.
 
         Both branches are computed from the accumulated `outcomes`/
         `attempted` rather than just this batch's, so this is idempotent —
@@ -1311,8 +1311,8 @@ def build_parser() -> argparse.ArgumentParser:
              "by each repo's live open-GitHub-issue count (one `gh` call per garden "
              "repo). issue-count/random resume by repo name rather than list "
              "position, since their ordering isn't stable across runs — this keeps "
-             "the same every-repo-per-cycle guarantee round-robin has; see README's "
-             "Overnight section.",
+             "the same every-repo-per-cycle guarantee round-robin has; see "
+             "docs/OVERNIGHT.md.",
     )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)

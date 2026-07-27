@@ -57,8 +57,8 @@ def _save(path: Path, repos: list[str]) -> None:
     # Written atomically (temp file + os.replace) rather than a direct
     # write_text, which truncates-then-writes in place: a process killed
     # mid-write (this device can and does kill background processes
-    # without warning — see README's "Wiring it to 'tend to my garden
-    # while I sleep'" section) would otherwise leave a torn, invalid-JSON
+    # without warning — see docs/OVERNIGHT.md's "Wiring it to 'tend to my
+    # garden while I sleep'" section) would otherwise leave a torn, invalid-JSON
     # file for the next `gardener overnight` to trip over. os.replace is
     # atomic on the same filesystem, which the temp file always is since
     # it's a sibling of `path`.
