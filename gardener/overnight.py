@@ -28,7 +28,7 @@ Two things this module deliberately does NOT try to do:
   using the actual elapsed wall-clock time so far — not a precomputed
   `hours*3600 / TEND_DEFAULT_TIMEOUT_SECONDS` repo count. A night of
   faster-than-worst-case tend calls (79-250s observed in practice per
-  README's Project Status, well under the 2700s ceiling) can therefore fit
+  docs/PROJECT_STATUS.md, well under the 2700s ceiling) can therefore fit
   more repos than the worst-case arithmetic would suggest, while a night
   that hits the ceiling still can't blow through the budget by more than
   one repo's worth.
@@ -136,8 +136,8 @@ class Strategy(str, Enum):
 DEFAULT_OVERNIGHT_HOURS = 8.0
 
 # Two repos at a time. This device has no true process isolation and real,
-# shared CPU/RAM (see README's "no true always-on daemon guarantee"
-# caveat), so this is a deliberately modest step up from strictly
+# shared CPU/RAM (see docs/OVERNIGHT.md's "no true always-on daemon
+# guarantee" caveat), so this is a deliberately modest step up from strictly
 # sequential rather than "as wide as the garden is long" — a batch is still
 # bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS either way (see
 # `batch_repos`), so the budget arithmetic is unaffected by this default.

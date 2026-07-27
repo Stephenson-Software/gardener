@@ -20,8 +20,8 @@ Otherwise, per CLAUDE.md's "Conventions" section:
 
 <!-- Delete any line that doesn't apply to this PR. -->
 
-- [ ] `README.md` updated for any CLI flag, safety-model, or behavior
-      change
+- [ ] `README.md`/the relevant `docs/*.md` file updated for any CLI flag,
+      safety-model, or behavior change
 - [ ] `CLAUDE.md` updated if this changes a convention or hard rule
 
 ## Test plan
