@@ -201,6 +201,40 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
    via `--add-dir` for that mode to have any recovery path when a prior
    attempt leaves partial state behind — `Write`'s sandbox exemption alone
    is not enough to make a directory usable end to end.
+9. **`gh pr review` and `gh api` are deliberately absent from `tend`'s
+   allow-list, and the preamble names `gh pr comment` as the review-posting
+   path because of it.** Every `<slug>-dev-loop` skill documents its
+   self-review step as `gh api repos/<owner>/<repo>/pulls/<n>/reviews
+   --method POST` (falling back to `gh pr review --comment`), and neither
+   matches any pattern in `TEND_BASE_ALLOWED_TOOLS`. Observed live during a
+   `tend` dispatch of gardener's own repo (the run that opened #39, see
+   issue #40): `gh api .../pulls/39/reviews --method POST` denied, then
+   `gh pr review 39 --comment --body-file ...` denied, then `gh pr comment
+   39 --body-file ...` succeeded — the review did get posted, but only
+   after two wasted turns, and flattened to a plain comment. Re-confirmed
+   the same way on the dispatch that produced this note.
+   Both stay absent on purpose, and neither should be added as the
+   "obvious fix" later:
+   - `Bash(gh pr review *)` also spells `gh pr review --approve`, which
+     would let a dispatched session approve its own PR and thereby satisfy
+     a branch-protection approval requirement — precisely the human gate
+     this safety model exists to preserve. Same class of hazard as the bare
+     `Bash(gh pr *)` in point 4, for a different verb.
+   - `Bash(gh api *)` is a wildcard over the entire GitHub API (merges,
+     settings, collaborators). `--method POST` appearing in an allow-list
+     pattern is not a reliable scoping mechanism — `MODE_SPECS[Mode.CREATE_DEV_LOOP]`
+     grants `Bash(gh api user *)` and nothing broader for exactly this
+     reason.
+   The cost of the omission is a degraded review (no anchored inline
+   comments, not a real Review object), which is paid in the prompt
+   instead: `build_tend_prompt`'s per-dispatch block tells the run up front
+   to post its review via `gh pr comment` with inline findings folded in as
+   `path:line` notes, so the working path is the documented one rather than
+   something each run rediscovers after two denials. That instruction is
+   deliberately NOT in the shared `HEADLESS_SAFETY_PREAMBLE`:
+   `MODE_SPECS[Mode.CREATE_DEV_LOOP]` does not grant `Bash(gh pr comment *)`,
+   so a preamble naming it would hand a create-dev-loop run the same
+   denied-command problem this point exists to remove from `tend`.
 
 ## Merge allow-list (`tend --allow-merge`)
 
@@ -447,6 +481,12 @@ TEND_BASE_ALLOWED_TOOLS: tuple[str, ...] = (
     "Bash(gh pr list *)",
     "Bash(gh pr diff *)",
     "Bash(gh pr checks *)",
+    # `gh pr comment` is also the ONLY way a dispatched run can post its
+    # self-review — `Bash(gh pr review *)` and `Bash(gh api *)` are
+    # deliberately absent (self-approval via `gh pr review --approve`, and a
+    # whole-API wildcard, respectively). Don't add either as a convenience;
+    # see module docstring point 9 and dev_loop.py's `build_tend_prompt`,
+    # which tells the run to use this pattern instead.
     "Bash(gh pr comment *)",
     "Bash(gh pr close *)",
     "Bash(gh issue *)",

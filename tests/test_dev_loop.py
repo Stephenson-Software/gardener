@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gardener import dev_loop
+from gardener.dispatch import MODE_SPECS, Mode
 
 
 class TestSlugify(unittest.TestCase):
@@ -95,6 +96,20 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn("nowhere else", prompt)
         self.assertIn("GARDENER_SUMMARY", prompt)
 
+    def test_create_prompt_does_not_prescribe_a_command_its_mode_lacks(self):
+        # The review-posting instruction names `gh pr comment`, which
+        # tend_mode_spec() grants and MODE_SPECS[Mode.CREATE_DEV_LOOP] does
+        # not. It therefore belongs in build_tend_prompt's per-dispatch
+        # block, never in the preamble both prompts share — telling a
+        # create-dev-loop run to reach for a denied command is the exact
+        # wasted-turns failure that instruction exists to prevent.
+        prompt = dev_loop.build_create_dev_loop_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/target")
+        )
+        granted = MODE_SPECS[Mode.CREATE_DEV_LOOP].allowed_tools
+        self.assertNotIn("Bash(gh pr comment *)", granted)
+        self.assertNotIn("gh pr comment", prompt)
+
     def test_create_prompt_tells_dispatched_session_to_perform_step_6(self):
         prompt = dev_loop.build_create_dev_loop_prompt(
             "owner/name", "name-dev-loop", Path("/tmp/target")
@@ -120,6 +135,36 @@ class TestPromptBuilding(unittest.TestCase):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", True)
         self.assertIn("HAS been explicitly pre-authorized to merge", prompt)
         self.assertNotIn("has NOT been authorized to merge", prompt)
+
+    def test_tend_prompt_names_gh_pr_comment_as_the_review_posting_path(self):
+        # See issue #40: dev-loop skills all document the review step as
+        # `gh api .../reviews` / `gh pr review`, neither of which tend's
+        # allow-list grants. The preamble must name the one command that
+        # does work, so a run doesn't burn turns on two denials first.
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False
+        )
+        self.assertIn("gh pr comment", prompt)
+        self.assertIn("gh pr review", prompt)
+        self.assertIn("path:line", prompt)
+
+    def test_tend_prompt_does_not_call_a_missing_review_object_a_blocked_decision(self):
+        # A degraded review is an accepted trade, not a DECISION NEEDED —
+        # otherwise every tend run would end asking a human about it.
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False
+        )
+        # Collapse whitespace first: the phrase is line-wrapped in the
+        # source, so a raw substring check can only match a fragment on one
+        # side of the wrap — and the fragment that fits ("missing Review
+        # object as a blocked decision") is polarity-blind, passing just as
+        # happily if the "do not treat the" were ever dropped and the
+        # instruction inverted. Normalizing lets one assertion cover the
+        # negation and survive a future re-wrap of the same sentence.
+        self.assertIn(
+            "do not treat the missing Review object as a blocked decision",
+            " ".join(prompt.split()),
+        )
 
     def test_tend_prompt_overrides_hardcoded_working_directory(self):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
