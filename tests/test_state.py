@@ -188,7 +188,13 @@ class TestRepoStats(unittest.TestCase):
         created and usable — `_run_tend_dispatch` proceeds straight to the
         real tend dispatch after it. What's incomplete is create-dev-loop's
         own Step 6 GitHub tracker repo, which says nothing about the target
-        repo's health."""
+        repo's health.
+
+        Spelled as a literal rather than `state.CREATED_INCOMPLETE_OUTCOME`
+        on purpose: this is the exact string already sitting in rows of
+        every existing `gardener.sqlite3`, and `repo_stats` has to keep
+        classifying those correctly even if the constant is ever renamed.
+        `tests/test_cli.py` covers the constant-to-record-site coupling."""
         self._record(
             "owner/a", "created_incomplete", "2026-07-01T00:00:00+00:00", mode="create-dev-loop"
         )

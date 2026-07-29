@@ -49,6 +49,17 @@ def default_db_path() -> Path:
 #: The one outcome `cli.py` records for a dispatch that failed.
 ERROR_OUTCOME = "error"
 
+#: The two outcomes of the create-dev-loop bootstrap dispatch `tend` runs
+#: when a target repo has no `<slug>-dev-loop` skill yet. Named here (and
+#: used by `cli.py`'s `_run_tend_dispatch`) rather than spelled as bare
+#: literals at the record site, so the classification below and the code
+#: that produces these values can't drift apart — every other non-error
+#: outcome is a `Mode` value, which `tests/test_cli.py` already pins to
+#: this module; these two are the pair that would otherwise be free-
+#: floating strings in three files.
+CREATED_OUTCOME = "created"
+CREATED_INCOMPLETE_OUTCOME = "created_incomplete"
+
 #: Outcomes `cli.py` records for a dispatch that actually did its job.
 #: Kept as a set rather than `outcome != ERROR_OUTCOME` so a future outcome
 #: has to be classified deliberately instead of silently counting as a
@@ -66,14 +77,13 @@ SUCCESS_OUTCOMES = frozenset({
     "file-issue",
     # `_run_tend_dispatch`, likewise.
     "tend",
-    # The create-dev-loop bootstrap dispatch `tend` runs first when a
-    # target repo has no `<slug>-dev-loop` skill yet. `created_incomplete`
+    # The create-dev-loop bootstrap dispatch. `CREATED_INCOMPLETE_OUTCOME`
     # counts as a success too: it means the skill *was* created and usable
     # (`_run_tend_dispatch` goes straight on to the real tend dispatch
     # after it) — what's incomplete is create-dev-loop's own Step 6 GitHub
     # tracker repo, which says nothing about how the target repo is doing.
-    "created",
-    "created_incomplete",
+    CREATED_OUTCOME,
+    CREATED_INCOMPLETE_OUTCOME,
 })
 
 #: Every outcome value `cli.py` can record. Nothing reads this at runtime;

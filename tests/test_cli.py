@@ -553,8 +553,12 @@ class TestRecordedOutcomeVocabulary(unittest.TestCase):
                 self.assertIn(mode.value, state.KNOWN_OUTCOMES)
 
     def test_the_create_dev_loop_bootstrap_outcomes_are_known(self):
-        self.assertIn("created", state.KNOWN_OUTCOMES)
-        self.assertIn("created_incomplete", state.KNOWN_OUTCOMES)
+        """The one pair of outcomes that isn't a `Mode` value.
+        `_run_tend_dispatch` records these via the same `state` constants
+        asserted here, so the record site and the classification can't
+        drift apart the way three copies of a bare string literal could."""
+        self.assertIn(state.CREATED_OUTCOME, state.KNOWN_OUTCOMES)
+        self.assertIn(state.CREATED_INCOMPLETE_OUTCOME, state.KNOWN_OUTCOMES)
 
 
 class TestNotifyRun(unittest.TestCase):
