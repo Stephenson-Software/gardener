@@ -46,11 +46,51 @@ def default_db_path() -> Path:
     return default_state_dir() / "gardener.sqlite3"
 
 
-#: Outcomes `cli.py` records for a dispatch that actually did its job —
-#: everything else (currently only `error`) counts against a repo. Kept as
-#: a set rather than `outcome != "error"` so a future outcome has to be
-#: classified deliberately instead of silently counting as a success.
-SUCCESS_OUTCOMES = frozenset({"tend", "created", "report"})
+#: The one outcome `cli.py` records for a dispatch that failed.
+ERROR_OUTCOME = "error"
+
+#: The two outcomes of the create-dev-loop bootstrap dispatch `tend` runs
+#: when a target repo has no `<slug>-dev-loop` skill yet. Named here (and
+#: used by `cli.py`'s `_run_tend_dispatch`) rather than spelled as bare
+#: literals at the record site, so the classification below and the code
+#: that produces these values can't drift apart — every other non-error
+#: outcome is a `Mode` value, which `tests/test_cli.py` already pins to
+#: this module; these two are the pair that would otherwise be free-
+#: floating strings in three files.
+CREATED_OUTCOME = "created"
+CREATED_INCOMPLETE_OUTCOME = "created_incomplete"
+
+#: Outcomes `cli.py` records for a dispatch that actually did its job.
+#: Kept as a set rather than `outcome != ERROR_OUTCOME` so a future outcome
+#: has to be classified deliberately instead of silently counting as a
+#: success — but a value in *neither* this set nor `ERROR_OUTCOME` is not
+#: "deliberate", it's invisible: `repo_stats()` counts it as neither, so
+#: the dashboard's garden view draws a repo whose runs all succeeded as a
+#: struggling plant with zero tends. That is exactly what `implement`,
+#: `file-issue`, and `created_incomplete` did until issue #67; see
+#: `KNOWN_OUTCOMES` below for the guard against it recurring.
+SUCCESS_OUTCOMES = frozenset({
+    # `cmd_align` records the mode's own name on success, so every
+    # non-error `align` outcome is a `Mode` value verbatim.
+    "report",
+    "implement",
+    "file-issue",
+    # `_run_tend_dispatch`, likewise.
+    "tend",
+    # The create-dev-loop bootstrap dispatch. `CREATED_INCOMPLETE_OUTCOME`
+    # counts as a success too: it means the skill *was* created and usable
+    # (`_run_tend_dispatch` goes straight on to the real tend dispatch
+    # after it) — what's incomplete is create-dev-loop's own Step 6 GitHub
+    # tracker repo, which says nothing about how the target repo is doing.
+    CREATED_OUTCOME,
+    CREATED_INCOMPLETE_OUTCOME,
+})
+
+#: Every outcome value `cli.py` can record. Nothing reads this at runtime;
+#: it exists so `tests/test_state.py` can assert the classification above
+#: covers the whole vocabulary, and `tests/test_cli.py` that every `Mode`
+#: value a run records verbatim is in it.
+KNOWN_OUTCOMES = SUCCESS_OUTCOMES | {ERROR_OUTCOME}
 
 
 @dataclass
@@ -187,7 +227,7 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
             SELECT repo,
                    COUNT(*) AS runs,
                    SUM(CASE WHEN outcome IN ({placeholders}) THEN 1 ELSE 0 END) AS successes,
-                   SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS errors,
+                   SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS errors,
                    MIN(timestamp) AS first_run,
                    MAX(timestamp) AS last_run,
                    MAX(CASE WHEN outcome IN ({placeholders}) THEN timestamp END) AS last_success,
@@ -196,7 +236,7 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
             FROM runs
             GROUP BY repo
             """,
-            (*successes, *successes),
+            (*successes, ERROR_OUTCOME, *successes),
         ).fetchall()
         # The newest row per repo, for its outcome. `MAX(id)` rather than
         # `MAX(timestamp)`: timestamps are second-resolution, so two runs

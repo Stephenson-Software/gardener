@@ -532,6 +532,35 @@ class TestExtractGapSummary(unittest.TestCase):
         self.assertEqual(extract_gap_summary("short answer"), "short answer")
 
 
+class TestRecordedOutcomeVocabulary(unittest.TestCase):
+    """`cmd_align` and `_run_tend_dispatch` record `mode.value` verbatim as
+    a successful run's `state.Run.outcome`, so the two vocabularies are
+    coupled: a `Mode` whose value isn't in `state.KNOWN_OUTCOMES` gets
+    recorded as an outcome `state.repo_stats()` classifies as neither a
+    success nor an error, and the dashboard draws the repo as struggling
+    with zero tends (issue #67). Asserting the coupling here is what makes
+    adding a Mode fail loudly instead of silently."""
+
+    def test_every_mode_recorded_verbatim_is_a_known_state_outcome(self):
+        for mode in Mode:
+            if mode is Mode.CREATE_DEV_LOOP:
+                # The one Mode that never records its own value: its
+                # bootstrap dispatch records `created`/`created_incomplete`
+                # instead (see cli.py's `_run_tend_dispatch`), both of
+                # which KNOWN_OUTCOMES carries directly.
+                continue
+            with self.subTest(mode=mode.value):
+                self.assertIn(mode.value, state.KNOWN_OUTCOMES)
+
+    def test_the_create_dev_loop_bootstrap_outcomes_are_known(self):
+        """The one pair of outcomes that isn't a `Mode` value.
+        `_run_tend_dispatch` records these via the same `state` constants
+        asserted here, so the record site and the classification can't
+        drift apart the way three copies of a bare string literal could."""
+        self.assertIn(state.CREATED_OUTCOME, state.KNOWN_OUTCOMES)
+        self.assertIn(state.CREATED_INCOMPLETE_OUTCOME, state.KNOWN_OUTCOMES)
+
+
 class TestNotifyRun(unittest.TestCase):
     """_notify_run's job is purely translating a recorded state.Run into a
     (title, message, level) tuple and handing it to a Notifier — this is
@@ -1287,6 +1316,13 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("skill created", stderr.getvalue())
         # no notification for the (now-complete) bootstrap, one for the tend run itself
         self.assertEqual(mock_notifier.notify.call_count, 1)
+        # Same record-site pin as the step-6-unreachable case below, for
+        # the complete-bootstrap outcome.
+        bootstrap = [
+            r for r in state.list_runs(db_path=self.state_db) if r.mode == Mode.CREATE_DEV_LOOP.value
+        ]
+        self.assertEqual([r.outcome for r in bootstrap], ["created"])
+        self.assertEqual(bootstrap[0].outcome, state.CREATED_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
@@ -1327,6 +1363,16 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("Step 6", stderr.getvalue())
         # one notification for the incomplete bootstrap, one for the tend run itself
         self.assertEqual(mock_notifier.notify.call_count, 2)
+        # The bootstrap row records the literal string `repo_stats` has to
+        # classify, pinning the record site to state's own constant — the
+        # `created_incomplete` half of TestRecordedOutcomeVocabulary's
+        # assertion is only meaningful if this is what actually lands in
+        # the db (issue #67).
+        bootstrap = [
+            r for r in state.list_runs(db_path=self.state_db) if r.mode == Mode.CREATE_DEV_LOOP.value
+        ]
+        self.assertEqual([r.outcome for r in bootstrap], ["created_incomplete"])
+        self.assertEqual(bootstrap[0].outcome, state.CREATED_INCOMPLETE_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
