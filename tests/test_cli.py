@@ -1316,6 +1316,13 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("skill created", stderr.getvalue())
         # no notification for the (now-complete) bootstrap, one for the tend run itself
         self.assertEqual(mock_notifier.notify.call_count, 1)
+        # Same record-site pin as the step-6-unreachable case below, for
+        # the complete-bootstrap outcome.
+        bootstrap = [
+            r for r in state.list_runs(db_path=self.state_db) if r.mode == Mode.CREATE_DEV_LOOP.value
+        ]
+        self.assertEqual([r.outcome for r in bootstrap], ["created"])
+        self.assertEqual(bootstrap[0].outcome, state.CREATED_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
@@ -1356,6 +1363,16 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("Step 6", stderr.getvalue())
         # one notification for the incomplete bootstrap, one for the tend run itself
         self.assertEqual(mock_notifier.notify.call_count, 2)
+        # The bootstrap row records the literal string `repo_stats` has to
+        # classify, pinning the record site to state's own constant — the
+        # `created_incomplete` half of TestRecordedOutcomeVocabulary's
+        # assertion is only meaningful if this is what actually lands in
+        # the db (issue #67).
+        bootstrap = [
+            r for r in state.list_runs(db_path=self.state_db) if r.mode == Mode.CREATE_DEV_LOOP.value
+        ]
+        self.assertEqual([r.outcome for r in bootstrap], ["created_incomplete"])
+        self.assertEqual(bootstrap[0].outcome, state.CREATED_INCOMPLETE_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
