@@ -24,13 +24,19 @@ recovers and gives up once the backoff is exhausted, and that a usage limit
 is flagged blocked but never retried), always with `sleep_fn` injected so no
 test actually sleeps; `tests/test_state.py`
 uses a real sqlite3 file in a tmp dir (including `repo_stats`' all-time
-per-repo aggregates — that `created` counts as a success, that a later
+per-repo aggregates — that every value in `state.KNOWN_OUTCOMES` is
+classified as either a success or an error rather than falling silently
+between the two, that a successful `align --implement`/`--file-issue` run
+and a `created_incomplete` bootstrap all count as successes, that a later
 `error` never overwrites `last_success`, and that `last_outcome` breaks a
 same-second timestamp tie by row id); `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
-`status --repo` deliberately still accept one), prompt templating,
+`status --repo` deliberately still accept one), prompt templating, the
+coupling between `Mode`'s values and `state.KNOWN_OUTCOMES` (a successful
+run records `mode.value` verbatim as its outcome, so a new `Mode` that
+isn't a known outcome would go uncounted in `repo_stats`),
 `_notify_run`'s severity mapping (mocking the
 notifier, not `state.Run` construction), `cmd_align` and `cmd_tend` with
 clone/dispatch mocked (mode selection, `state.record_run`/`_notify_run`

@@ -152,6 +152,56 @@ class TestRepoStats(unittest.TestCase):
         self.assertEqual(stats.cost_usd, 0.0)
         self.assertEqual(stats.duration_ms, 0)
 
+    def test_every_known_outcome_counts_as_a_success_or_an_error(self):
+        """No outcome may fall through the gap between `SUCCESS_OUTCOMES`
+        and `ERROR_OUTCOME`. One that does is counted as neither, which is
+        invisible rather than conservative: the dashboard's garden view
+        reads `successes`/`last_success` straight off this, so a repo whose
+        runs all succeeded gets drawn as a struggling plant with zero
+        tends. `implement`, `file-issue`, and `created_incomplete` all did
+        exactly that until issue #67."""
+        for i, outcome in enumerate(sorted(state.KNOWN_OUTCOMES)):
+            self._record("owner/a", outcome, f"2026-07-{i + 1:02d}T00:00:00+00:00")
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertEqual(stats.runs, len(state.KNOWN_OUTCOMES))
+        self.assertEqual(
+            stats.successes + stats.errors,
+            stats.runs,
+            "an outcome in KNOWN_OUTCOMES is classified as neither a success nor an "
+            "error — add it to SUCCESS_OUTCOMES or make it ERROR_OUTCOME",
+        )
+        self.assertEqual(stats.successes, len(state.SUCCESS_OUTCOMES))
+        self.assertEqual(stats.errors, 1)
+
+    def test_a_successful_align_implement_run_is_a_success(self):
+        """`cmd_align` records `mode.value` verbatim on success, so an
+        `--implement`/`--file-issue` run's outcome is the mode name — not
+        `tend`. Regression guard for issue #67."""
+        self._record("owner/a", "implement", "2026-07-01T00:00:00+00:00", mode="implement")
+        self._record("owner/a", "file-issue", "2026-07-02T00:00:00+00:00", mode="file-issue")
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertEqual((stats.runs, stats.successes, stats.errors), (2, 2, 0))
+        self.assertEqual(stats.last_success, "2026-07-02T00:00:00+00:00")
+
+    def test_a_step6_incomplete_bootstrap_is_still_a_success(self):
+        """`created_incomplete` means the `<slug>-dev-loop` skill was
+        created and usable — `_run_tend_dispatch` proceeds straight to the
+        real tend dispatch after it. What's incomplete is create-dev-loop's
+        own Step 6 GitHub tracker repo, which says nothing about the target
+        repo's health.
+
+        Spelled as a literal rather than `state.CREATED_INCOMPLETE_OUTCOME`
+        on purpose: this is the exact string already sitting in rows of
+        every existing `gardener.sqlite3`, and `repo_stats` has to keep
+        classifying those correctly even if the constant is ever renamed.
+        `tests/test_cli.py` covers the constant-to-record-site coupling."""
+        self._record(
+            "owner/a", "created_incomplete", "2026-07-01T00:00:00+00:00", mode="create-dev-loop"
+        )
+        stats = state.repo_stats(db_path=self.db_path)["owner/a"]
+        self.assertEqual((stats.successes, stats.errors), (1, 0))
+        self.assertEqual(stats.last_success, "2026-07-01T00:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

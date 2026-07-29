@@ -630,7 +630,11 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                 create_run = state.Run(
                     repo=args.repo,
                     mode=Mode.CREATE_DEV_LOOP.value,
-                    outcome="error" if not create_result.ok else ("created_incomplete" if step6_gap else "created"),
+                    outcome=state.ERROR_OUTCOME
+                    if not create_result.ok
+                    else (
+                        state.CREATED_INCOMPLETE_OUTCOME if step6_gap else state.CREATED_OUTCOME
+                    ),
                     timestamp=state.now_iso(),
                     gap_summary=extract_gap_summary(create_result.result_text)
                     if create_result.result_text

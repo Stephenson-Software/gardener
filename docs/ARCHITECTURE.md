@@ -11,8 +11,12 @@ uses.
 ```
 gardener/
   gardener/
-    cli.py          — argparse CLI (align, tend, allowlist, status), prompt
-                       building, orchestration
+    __init__.py      — package docstring and __version__; no runtime logic
+    __main__.py      — `python3 -m gardener` entry point (delegates to
+                       cli.main, same as the `gardener` console script)
+    cli.py          — argparse CLI (align, tend, allowlist, garden, overnight,
+                       status, tail-transcript, dashboard), prompt building,
+                       orchestration
     dispatch.py      — the safety-gated subprocess wrapper around `claude -p`
                        (Mode/ModeSpec definitions and tend_mode_spec() for
                        every mode, including tend's per-invocation merge gate)
