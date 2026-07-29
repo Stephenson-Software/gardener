@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from gardener import dashboard, run_log
 
@@ -171,6 +172,90 @@ class TestPruneOldLogs(unittest.TestCase):
         with run_log.tee_stderr("tend", logs_dir=self.logs_dir, keep=0) as path:
             print("current run", file=sys.stderr)
         self.assertTrue(path.exists())
+
+    def test_oserror_scanning_the_dir_returns_empty_list_rather_than_raising(self):
+        unreadable = MagicMock(spec=Path)
+        unreadable.glob.side_effect = OSError("permission denied")
+
+        self.assertEqual(run_log.prune_old_logs(unreadable), [])
+
+    def test_a_file_that_cannot_be_deleted_is_skipped_not_raised(self):
+        self._write("tend-1.log", 1000)
+        self._write("tend-2.log", 2000)
+
+        with patch("pathlib.Path.unlink", side_effect=OSError("locked")):
+            removed = run_log.prune_old_logs(self.logs_dir, keep=0)
+
+        self.assertEqual(removed, [])
+
+
+class TestTeeStreamDirectly(unittest.TestCase):
+    """`_TeeStream`'s own contract is "the mirror side can fail in any way
+    and the run must not notice" (see run_log.py's "must never break a
+    dispatch" docstring section). These construct it directly, with a
+    mirror double whose methods raise on demand, rather than going through
+    `tee_stderr`'s real file handle."""
+
+    def test_write_returns_the_primarys_count_even_if_the_mirror_write_fails(self):
+        primary = io.StringIO()
+        mirror = MagicMock()
+        mirror.write.side_effect = OSError("disk full")
+        stream = run_log._TeeStream(primary, mirror)
+
+        n = stream.write("hello")
+
+        self.assertEqual(primary.getvalue(), "hello")
+        self.assertEqual(n, len("hello"))
+
+    def test_write_survives_a_mirror_flush_failure(self):
+        primary = io.StringIO()
+        mirror = MagicMock()
+        mirror.flush.side_effect = ValueError("I/O operation on closed file")
+        stream = run_log._TeeStream(primary, mirror)
+
+        stream.write("hello")  # must not raise
+
+        self.assertEqual(primary.getvalue(), "hello")
+
+    def test_writelines_writes_every_line_to_both_streams(self):
+        primary = io.StringIO()
+        mirror = io.StringIO()
+        stream = run_log._TeeStream(primary, mirror)
+
+        stream.writelines(["first\n", "second\n"])
+
+        self.assertEqual(primary.getvalue(), "first\nsecond\n")
+        self.assertEqual(mirror.getvalue(), "first\nsecond\n")
+
+    def test_flush_survives_a_mirror_flush_failure(self):
+        primary = MagicMock()
+        mirror = MagicMock()
+        mirror.flush.side_effect = OSError("closed")
+        stream = run_log._TeeStream(primary, mirror)
+
+        stream.flush()  # must not raise
+
+        primary.flush.assert_called_once()
+
+    def test_isatty_passes_through_to_the_primary(self):
+        primary = MagicMock()
+        primary.isatty.return_value = True
+        stream = run_log._TeeStream(primary, io.StringIO())
+
+        self.assertTrue(stream.isatty())
+
+    def test_encoding_passes_through_when_the_primary_has_one(self):
+        primary = MagicMock()
+        primary.encoding = "latin-1"
+        stream = run_log._TeeStream(primary, io.StringIO())
+
+        self.assertEqual(stream.encoding, "latin-1")
+
+    def test_encoding_falls_back_to_utf8_when_the_primary_has_none(self):
+        primary = MagicMock(spec=["write"])  # no `encoding` attribute at all
+        stream = run_log._TeeStream(primary, io.StringIO())
+
+        self.assertEqual(stream.encoding, "utf-8")
 
 
 class TestDashboardReadsWhatGardenerWrites(unittest.TestCase):
