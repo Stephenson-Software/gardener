@@ -74,7 +74,11 @@ for both the positional round-robin cursor and the name-keyed strategy
 cursor — that a dedicated ERROR notification fires alongside the batch
 summary naming the specific class rather than always saying "authenticate",
 that a failing notifier doesn't crash the run, and that an *ordinary*
-per-repo error still does not abort the batch or hold the cursor) and
+per-repo error still does not abort the batch or hold the cursor —
+`_blocking_reason`'s three named failure-class branches and its generic
+fallback, and `_first_blocked_index`'s cursor-advance distance, are also
+pinned directly, independent of `cmd_overnight`, in `TestBlockingReason`/
+`TestFirstBlockedIndex`) and
 its cursor durability under a kill (a `BaseException` raised from the
 mocked dispatch, which `_dispatch_one_for_overnight`'s `except Exception`
 deliberately doesn't catch, so `cmd_overnight`'s post-loop code never runs
