@@ -26,6 +26,8 @@ from gardener.cli import (
     REPO_RE,
     TendResult,
     clone_or_refresh_target_repo,
+    _blocking_reason,
+    _first_blocked_index,
     _notify_run,
     _record_and_notify,
     _safe_record_run,
@@ -48,6 +50,7 @@ from gardener.cli import (
     repo_arg,
 )
 from gardener.dispatch import (
+    AUTH_RETRY_BACKOFF_SECONDS,
     TEND_DEFAULT_TIMEOUT_SECONDS,
     DispatchResult,
     Mode,
@@ -530,6 +533,105 @@ class TestExtractGapSummary(unittest.TestCase):
 
     def test_short_text_without_marker_is_returned_whole(self):
         self.assertEqual(extract_gap_summary("short answer"), "short answer")
+
+
+class TestFirstBlockedIndex(unittest.TestCase):
+    """`_first_blocked_index` doubles as how far the round-robin resume
+    cursor may safely advance (cli.py's own docstring) — an off-by-one here
+    would silently skip or re-attempt a repo, so it's worth pinning
+    directly rather than only through `cmd_overnight` integration tests."""
+
+    def test_empty_list_returns_zero(self):
+        self.assertEqual(_first_blocked_index([]), 0)
+
+    def test_no_blocked_repo_returns_full_length(self):
+        outcomes = [overnight.RepoOutcome(repo="a"), overnight.RepoOutcome(repo="b")]
+        self.assertEqual(_first_blocked_index(outcomes), 2)
+
+    def test_returns_index_of_first_blocked_repo(self):
+        outcomes = [
+            overnight.RepoOutcome(repo="a"),
+            overnight.RepoOutcome(repo="b", blocked=True),
+            overnight.RepoOutcome(repo="c", blocked=True),
+        ]
+        self.assertEqual(_first_blocked_index(outcomes), 1)
+
+    def test_blocked_repo_at_index_zero(self):
+        outcomes = [overnight.RepoOutcome(repo="a", blocked=True), overnight.RepoOutcome(repo="b")]
+        self.assertEqual(_first_blocked_index(outcomes), 0)
+
+
+class TestBlockingReason(unittest.TestCase):
+    """`_blocking_reason` picks the operator-facing (reason, recovery)
+    message pair for the first blocked repo — the three real failure
+    classes demand genuinely different operator actions (cli.py's own
+    docstring), so each branch is worth pinning by name rather than just
+    asserting *that* a message was returned."""
+
+    def test_usage_limit_marker_gives_wait_for_reset_guidance(self):
+        outcomes = [
+            overnight.RepoOutcome(
+                repo="a", blocked=True,
+                gap_summary="You've hit your session limit · resets 12am (UTC)",
+            )
+        ]
+        reason, recovery = _blocking_reason(outcomes)
+        self.assertEqual(reason, "the usage/session limit is exhausted")
+        self.assertIn("Wait for the reset time", recovery)
+
+    def test_network_failure_marker_gives_connectivity_guidance(self):
+        outcomes = [
+            overnight.RepoOutcome(
+                repo="a", blocked=True,
+                gap_summary="error connecting to api.github.com",
+            )
+        ]
+        reason, recovery = _blocking_reason(outcomes)
+        self.assertEqual(reason, "GitHub was unreachable")
+        self.assertIn("connectivity", recovery)
+
+    def test_auth_failure_marker_gives_relogin_guidance_and_names_retry_count(self):
+        outcomes = [
+            overnight.RepoOutcome(
+                repo="a", blocked=True,
+                gap_summary="Failed to authenticate: OAuth session expired",
+            )
+        ]
+        reason, recovery = _blocking_reason(outcomes)
+        self.assertEqual(
+            reason,
+            f"the dispatched run could not authenticate (after {len(AUTH_RETRY_BACKOFF_SECONDS)} retries)",
+        )
+        self.assertIn("fresh login", recovery)
+
+    def test_unrecognized_marker_falls_back_to_generic_wording(self):
+        outcomes = [
+            overnight.RepoOutcome(repo="a", blocked=True, gap_summary="something unclassified broke"),
+        ]
+        reason, recovery = _blocking_reason(outcomes)
+        self.assertEqual(reason, "a device-wide failure blocked the batch")
+        self.assertIn("Resolve the condition reported above", recovery)
+
+    def test_uses_the_first_blocked_repo_when_several_are_blocked(self):
+        outcomes = [
+            overnight.RepoOutcome(repo="a", blocked=False),
+            overnight.RepoOutcome(
+                repo="b", blocked=True,
+                gap_summary="error connecting to api.github.com",
+            ),
+            overnight.RepoOutcome(
+                repo="c", blocked=True,
+                gap_summary="Failed to authenticate: OAuth session expired",
+            ),
+        ]
+        reason, _recovery = _blocking_reason(outcomes)
+        self.assertEqual(reason, "GitHub was unreachable")
+
+    def test_no_blocked_repo_falls_back_to_generic_wording(self):
+        outcomes = [overnight.RepoOutcome(repo="a"), overnight.RepoOutcome(repo="b")]
+        reason, recovery = _blocking_reason(outcomes)
+        self.assertEqual(reason, "a device-wide failure blocked the batch")
+        self.assertIn("Resolve the condition reported above", recovery)
 
 
 class TestRecordedOutcomeVocabulary(unittest.TestCase):
