@@ -19,6 +19,8 @@ from gardener.conventions import (
     REQUIRED_DOCS,
     ConventionsError,
     ConventionsSource,
+    _origin_url,
+    default_cache_dir,
     ensure_conventions,
     resolve_url,
 )
@@ -189,6 +191,59 @@ class TestEnsureConventions(unittest.TestCase):
             with self.assertRaises(ConventionsError):
                 ensure_conventions(cache_dir=self.cache_dir)
         mock_run_git.assert_not_called()
+
+
+class TestDefaultCacheDir(unittest.TestCase):
+    def test_override_env_var_wins(self):
+        with patch.dict("os.environ", {"GARDENER_CACHE_DIR": "/tmp/somewhere"}):
+            self.assertEqual(default_cache_dir(), Path("/tmp/somewhere") / "conventions")
+
+    def test_falls_back_to_home_cache_dir_when_unset(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(
+                default_cache_dir(), Path.home() / ".cache" / "gardener" / "conventions"
+            )
+
+
+class TestConventionsSourcePaths(unittest.TestCase):
+    def test_checklist_path_is_relative_to_source_path(self):
+        source = ConventionsSource(path=Path("/tmp/conv"))
+        self.assertEqual(source.checklist_path(), Path("/tmp/conv/ALIGNMENT_CHECKLIST.md"))
+
+    def test_alignment_prompt_path_is_relative_to_source_path(self):
+        source = ConventionsSource(path=Path("/tmp/conv"))
+        self.assertEqual(source.alignment_prompt_path(), Path("/tmp/conv/ALIGNMENT_PROMPT.md"))
+
+
+class TestOriginUrl(unittest.TestCase):
+    """_origin_url is the one piece of ensure_conventions's repoint logic
+    every TestEnsureConventions test above mocks out — these exercise its
+    own subprocess-parsing behavior directly, at the subprocess.run
+    boundary, the same way TestRunGit does for _run_git."""
+
+    @patch("gardener.conventions.subprocess.run")
+    def test_returns_stripped_stdout_on_success(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"{FAKE_URL}\n", stderr=""
+        )
+        self.assertEqual(_origin_url(Path("/tmp/conv")), FAKE_URL)
+
+    @patch("gardener.conventions.subprocess.run")
+    def test_returns_none_on_nonzero_exit(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="fatal: not a git repository"
+        )
+        self.assertIsNone(_origin_url(Path("/tmp/conv")))
+
+    @patch("gardener.conventions.subprocess.run")
+    def test_returns_none_rather_than_raising_on_subprocess_error(self, mock_run):
+        mock_run.side_effect = subprocess.SubprocessError("boom")
+        self.assertIsNone(_origin_url(Path("/tmp/conv")))
+
+    @patch("gardener.conventions.subprocess.run")
+    def test_returns_none_rather_than_raising_on_os_error(self, mock_run):
+        mock_run.side_effect = OSError("git binary not found")
+        self.assertIsNone(_origin_url(Path("/tmp/conv")))
 
 
 class TestRunGit(unittest.TestCase):
