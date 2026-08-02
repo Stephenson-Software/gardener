@@ -8,12 +8,14 @@ gardener's own repo checkout to `origin/<current-branch>`, never touches a
 target repo or the conventions repo (those are `cli.py`'s
 `clone_or_refresh_target_repo`/`conventions.py`'s `ensure_conventions`, an
 entirely separate concern), and never does anything that could lose local
-work: a dirty tree, a detached `HEAD`, or a local branch that isn't a
-fast-forward ancestor of `origin` all degrade to a skip, never a `reset
---hard` or a forced merge. `git status --porcelain`'s untracked (`??`)
-lines don't count as dirty — an ordinary checkout of this repo picks up
-untracked local files (an editor's `.claude/` scratch dir, `__pycache__`,
-etc.) that have nothing to do with whether a fast-forward is safe.
+work: a dirty tree, a detached `HEAD`, a local branch with no upstream on
+`origin` (e.g. an unpushed feature branch the operator is testing on), or
+a local branch that isn't a fast-forward ancestor of `origin` all degrade
+to a skip, never a `reset --hard` or a forced merge. `git status
+--porcelain`'s untracked (`??`) lines don't count as dirty — an ordinary
+checkout of this repo picks up untracked local files (an editor's
+`.claude/` scratch dir, `__pycache__`, etc.) that have nothing to do with
+whether a fast-forward is safe.
 
 `find_repo_root` locates gardener's own checkout by walking up from this
 module's file looking for a `.git` — this only resolves to something real
@@ -46,6 +48,7 @@ class UpdateStatus(str, Enum):
     SKIPPED_NO_GIT = "skipped_no_git"
     SKIPPED_DIRTY = "skipped_dirty"
     SKIPPED_DETACHED = "skipped_detached"
+    SKIPPED_NO_UPSTREAM = "skipped_no_upstream"
     SKIPPED_NOT_FAST_FORWARD = "skipped_not_fast_forward"
     ERROR = "error"
 
@@ -93,10 +96,11 @@ def self_update(
 ) -> UpdateResult:
     """Fast-forward gardener's own checkout to `origin/<current-branch>` if
     it's safe to. Never raises — every failure mode (not a git checkout,
-    dirty tree, detached HEAD, diverged branch, a `git` call itself
-    failing) is a distinct `UpdateStatus`, so a caller like `cmd_overnight`
-    can log it and keep going rather than let a self-update hiccup abort
-    the unattended run it's meant to run ahead of.
+    dirty tree, detached HEAD, no upstream on origin, diverged branch, a
+    `git` call itself failing) is a distinct `UpdateStatus`, so a caller
+    like `cmd_overnight` can log it and keep going rather than let a
+    self-update hiccup abort the unattended run it's meant to run ahead
+    of.
 
     `check_only=True` stops right before the actual fast-forward (used by
     `gardener update --check`) and reports `UPDATE_AVAILABLE` instead of
@@ -142,6 +146,20 @@ def self_update(
     if err:
         return UpdateResult(UpdateStatus.ERROR, err)
     old_sha = old_sha_res.stdout.strip()
+
+    upstream_res, err = _call(
+        run_fn,
+        ["git", "rev-parse", "--verify", "--quiet", f"{branch}@{{upstream}}"],
+        root,
+        timeout,
+    )
+    if err:
+        return UpdateResult(UpdateStatus.ERROR, err)
+    if upstream_res.returncode != 0:
+        return UpdateResult(
+            UpdateStatus.SKIPPED_NO_UPSTREAM,
+            f"{root}'s branch '{branch}' has no upstream on origin — skipping self-update",
+        )
 
     fetch_res, err = _call(
         run_fn, ["git", "fetch", "--quiet", "origin", branch], root, timeout
