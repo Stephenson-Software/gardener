@@ -43,6 +43,7 @@ class FakeGit:
 CLEAN_STATUS = ("status", "--porcelain")
 BRANCH = ("rev-parse", "--abbrev-ref")
 LOCAL_SHA = ("rev-parse", "HEAD")
+UPSTREAM = ("rev-parse", "--verify")
 FETCH = ("fetch", "--quiet")
 ANCESTOR = ("merge-base", "--is-ancestor")
 MERGE = ("merge", "--ff-only")
@@ -53,6 +54,7 @@ def _base_responses(local_sha="aaa111", remote_sha="bbb222", branch="main"):
         CLEAN_STATUS: _completed(stdout=""),
         BRANCH: _completed(stdout=f"{branch}\n"),
         LOCAL_SHA: _completed(stdout=f"{local_sha}\n"),
+        UPSTREAM: _completed(stdout=f"{local_sha}\n"),
         FETCH: _completed(),
         ("rev-parse", f"origin/{branch}"): _completed(stdout=f"{remote_sha}\n"),
         ANCESTOR: _completed(returncode=0),
@@ -73,10 +75,13 @@ class TestFindRepoRoot(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             nested = Path(tmp) / "a" / "b"
             nested.mkdir(parents=True)
-            # Real upward walk to the machine's actual filesystem root — safe
-            # to assert None here since neither a tmp dir nor any of its real
-            # ancestors (/tmp, /) are themselves a git checkout.
-            self.assertIsNone(selfupdate.find_repo_root(start=nested))
+            # Force every `.git` existence check to report false so the walk
+            # is guaranteed to reach the filesystem root and return None,
+            # regardless of where the machine's real TMPDIR happens to live
+            # (a real ancestor being a git checkout would otherwise make
+            # this test's outcome depend on the environment, not the code).
+            with patch.object(Path, "exists", return_value=False):
+                self.assertIsNone(selfupdate.find_repo_root(start=nested))
 
 
 class TestSelfUpdate(unittest.TestCase):
@@ -107,6 +112,15 @@ class TestSelfUpdate(unittest.TestCase):
         fake = FakeGit(responses)
         result = selfupdate.self_update(repo_root=Path("/repo"), run_fn=fake)
         self.assertEqual(result.status, UpdateStatus.SKIPPED_DETACHED)
+
+    def test_branch_with_no_upstream_is_skipped(self):
+        responses = _base_responses()
+        responses[UPSTREAM] = _completed(returncode=1)
+        fake = FakeGit(responses)
+        result = selfupdate.self_update(repo_root=Path("/repo"), run_fn=fake)
+        self.assertEqual(result.status, UpdateStatus.SKIPPED_NO_UPSTREAM)
+        # Never reaches fetch once we already know there's no upstream.
+        self.assertNotIn(list(FETCH), [c[1:3] for c in fake.calls])
 
     def test_already_up_to_date(self):
         fake = FakeGit(_base_responses(local_sha="aaa111", remote_sha="aaa111"))

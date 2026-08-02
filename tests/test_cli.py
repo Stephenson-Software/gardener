@@ -2162,6 +2162,7 @@ class TestCmdUpdate(unittest.TestCase):
             selfupdate.UpdateStatus.SKIPPED_NO_GIT,
             selfupdate.UpdateStatus.SKIPPED_DIRTY,
             selfupdate.UpdateStatus.SKIPPED_DETACHED,
+            selfupdate.UpdateStatus.SKIPPED_NO_UPSTREAM,
             selfupdate.UpdateStatus.SKIPPED_NOT_FAST_FORWARD,
         ):
             mock_self_update.return_value = selfupdate.UpdateResult(status, "skipped")
