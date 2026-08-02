@@ -5,10 +5,11 @@ gardener align --repo <owner/repo> [--implement] [--file-issue]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]
+gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 gardener dashboard [--port N]
+gardener update [--check]
 ```
 
 - **`gardener align --repo owner/repo`** (no flags) — **report-only,
@@ -52,6 +53,9 @@ gardener dashboard [--port N]
   remains the one authoritative outcome record. If `--port` is already bound (e.g. a previous
   invocation still running), gardener picks a free one instead of failing
   and says so on stderr.
+- **`gardener update [--check]`** — fast-forwards gardener's *own* checkout
+  to `origin`; see [Self-update](#self-update) below. `--check` fetches and
+  reports whether an update is available without applying it.
 
 ## `gardener tend` — dispatching a target repo's own dev-loop
 
@@ -179,6 +183,37 @@ are passed — see `merge_allowlist.py` and `dispatch.py`'s `tend_mode_spec()`.
 See also [Merge allow-list mechanics](SAFETY.md#merge-allow-list-mechanics)
 in the safety model for exactly how this is enforced at the tool-scoping
 level.
+
+## Self-update
+
+`gardener overnight` runs unattended (Task Scheduler, cron, `devsrv`) with
+nobody watching to notice new commits landed on gardener's own `main` and
+run `git pull` by hand — so, by default, it fast-forwards gardener's own
+checkout to `origin/<current-branch>` before reading the garden, logging
+one line either way (`gardener: self-update: ...`) to the same stderr/run
+log every other setup step writes to. Pass `--no-self-update` to skip it.
+
+This only ever touches gardener's own repo checkout — never a target repo
+or the conventions repo (those have their own separate refresh mechanics,
+`clone_or_refresh_target_repo`/`conventions.ensure_conventions`) — and it
+is conservative about when it's safe to: a dirty tree (tracked changes;
+untracked files don't count), a detached `HEAD`, or a local branch that
+has diverged from `origin` (not a fast-forward) all skip rather than force
+anything, and every one of those is a normal, silently-logged outcome, not
+a failure. It's also a no-op if gardener isn't running from a git checkout
+at all (e.g. installed from a built wheel rather than `pip install -e .`)
+— see `selfupdate.py`'s module docstring for exactly why an editable
+install is what makes this possible in the first place.
+
+Because this checkout's already-imported Python modules don't retroactively
+change mid-process, a self-update at the top of tonight's `overnight` run
+benefits *tomorrow* night's run (and any other `gardener` invocation
+after it), not the one currently executing.
+
+**`gardener update [--check]`** runs the exact same fast-forward on demand,
+for anyone who'd rather trigger it by hand than wait for the next
+`overnight` run. `--check` fetches and reports whether an update is
+available (and, if so, the old/new commit) without applying it.
 
 ## Other flags
 

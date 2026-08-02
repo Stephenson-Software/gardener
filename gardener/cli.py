@@ -1,6 +1,7 @@
 """argparse-based CLI: `gardener align`, `gardener tend`,
 `gardener allowlist`, `gardener garden`, `gardener overnight`,
-`gardener status`, `gardener tail-transcript`, and `gardener dashboard`.
+`gardener status`, `gardener tail-transcript`, `gardener dashboard`, and
+`gardener update`.
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
@@ -29,7 +30,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock,
-    run_log, state, transcript,
+    run_log, selfupdate, state, transcript,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -964,7 +965,26 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     `write_attempted` (repo names) plus `resume_order`/`next_attempted`
     instead, since neither of those two strategies' orderings are stable
     across runs — a bare index would silently resume at the wrong repo.
+
+    Before any of that, fast-forwards gardener's own checkout to
+    `origin/<current-branch>` (see `selfupdate.py`'s module docstring),
+    unless `--no-self-update` was given. This is the one setup step that
+    can never abort the run: `selfupdate.self_update` already never raises
+    (a dirty tree, detached HEAD, diverged branch, or a `git` failure all
+    come back as a non-error status/result to log), and this call is
+    wrapped in `try`/`except Exception` on top of that only as
+    belt-and-suspenders — an unattended overnight run failing outright
+    because its own self-update step hit something unexpected would be a
+    worse outcome than just skipping it and tending the garden with
+    whatever code is already on disk.
     """
+    if getattr(args, "self_update", True):
+        try:
+            update_result = selfupdate.self_update()
+            print(_self_update_log_line(update_result), file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 - must never abort the overnight run
+            print(f"gardener: self-update: unexpected error (non-fatal): {e}", file=sys.stderr)
+
     try:
         garden_list = garden.list_garden(path=args.garden_file)
     except ValueError as e:
@@ -1194,6 +1214,23 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _self_update_log_line(result: selfupdate.UpdateResult) -> str:
+    return f"gardener: self-update: {result.message}"
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Fast-forward gardener's own checkout to `origin/<current-branch>`
+    (see `selfupdate.py`'s module docstring for exactly what "safe to" means
+    — a dirty tree, detached HEAD, or diverged branch all skip rather than
+    force anything). `--check` fetches and reports whether an update is
+    available without applying it. Returns 1 only for `UpdateStatus.ERROR`
+    — every skip status is a normal, expected outcome (e.g. this checkout
+    has local changes), not a CLI failure."""
+    result = selfupdate.self_update(check_only=args.check)
+    print(_self_update_log_line(result))
+    return 1 if result.status is selfupdate.UpdateStatus.ERROR else 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
     if not runs:
@@ -1366,6 +1403,11 @@ def build_parser() -> argparse.ArgumentParser:
              "the same every-repo-per-cycle guarantee round-robin has; see "
              "docs/OVERNIGHT.md.",
     )
+    overnight_parser.add_argument(
+        "--no-self-update", dest="self_update", action="store_false", default=True,
+        help="Skip fast-forwarding gardener's own checkout to origin before this run "
+             "(on by default — see docs/OVERNIGHT.md's 'Self-update' section)",
+    )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
@@ -1407,6 +1449,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
     dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    update_parser = sub.add_parser(
+        "update",
+        help="Fast-forward gardener's own checkout to origin (see docs/USAGE.md)",
+    )
+    update_parser.add_argument(
+        "--check", action="store_true",
+        help="Fetch and report whether an update is available without applying it",
+    )
+    update_parser.set_defaults(func=cmd_update)
 
     return parser
 
