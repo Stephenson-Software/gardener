@@ -48,6 +48,11 @@ it*. See [Usage](#usage) below for the full command set.
   written to, so an unattended overnight run doesn't require polling the
   CLI by hand to see what it's doing. See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- **`gardener update`**: fast-forwards gardener's own checkout to `origin`
+  — `gardener overnight` does this automatically before each run (opt out
+  with `--no-self-update`), so a box running it unattended stays current
+  without anyone needing to notice new commits and `git pull` by hand. See
+  [Self-update](docs/USAGE.md#self-update).
 
 ## Installation
 
@@ -65,7 +70,10 @@ pip install -e .
 ```
 
 This installs the `gardener` console script (via `pyproject.toml`'s
-`[project.scripts]` entry point) and leaves the source editable.
+`[project.scripts]` entry point) and leaves the source editable — which is
+also what makes `gardener update`/`overnight`'s self-update work at all
+(see [Self-update](docs/USAGE.md#self-update)); a non-editable install has
+no `.git` checkout to fast-forward, so it degrades to a no-op.
 
 ### Conventions repo
 
@@ -149,10 +157,11 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-r
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]
+gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 gardener dashboard [--port N]
+gardener update [--check]
 ```
 
 See **[docs/USAGE.md](docs/USAGE.md)** for the full command reference:

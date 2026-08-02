@@ -185,3 +185,18 @@ actual failure's leftover artifact still on disk
   the run) and PR #7 remains open, not merged — gardener's first real
   self-tend made genuine progress on its own codebase without ever
   mutating its own main branch.
+
+**Self-update** (`selfupdate.py`, `gardener update`, and `overnight`'s
+default self-update step) has been verified for real, end to end
+(2026-08-01), against a throwaway local `origin`/clone pair (never gardener's
+own repo or a network host) rather than mocks: a real `git fetch` +
+`git merge --ff-only` correctly fast-forwarded a one-commit-behind clone
+and reported `updated <old> -> <new>`; running it again immediately
+correctly reported already up to date (a true no-op, confirmed via
+`git log`/`git status`); an uncommitted tracked-file edit correctly
+produced the dirty-tree skip without touching anything; a detached `HEAD`
+correctly produced the detached skip; and two clones each committing a
+different change on top of the same base correctly produced the
+diverged/not-fast-forward skip rather than forcing a merge. All five
+outcomes matched `tests/test_selfupdate.py`'s mocked-`run_fn` coverage
+exactly, so the mocks aren't standing in for untested real git behavior.

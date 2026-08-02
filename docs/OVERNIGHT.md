@@ -11,9 +11,14 @@ file (`~/.local/state/gardener/garden.json` by default, overridable via
 never touched overnight just because it exists on this machine, only
 because it was explicitly added. See `gardener/garden.py`.
 
-**`gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random]`** is the actual "tend
+**`gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]`** is the actual "tend
 to my garden while I sleep" entry point:
 
+0. Fast-forwards gardener's own checkout to `origin` first (on by default;
+   `--no-self-update` skips it) — see [Self-update](USAGE.md#self-update)
+   for the full design and exactly what makes this safe to do
+   unattended. Logs one line either way and never aborts the run, even if
+   the self-update step itself hits something unexpected.
 1. Reads the garden. An empty garden prints a clear message and exits `0`
    — nothing to do is not an error.
 2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**

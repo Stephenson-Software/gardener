@@ -15,8 +15,8 @@ gardener/
     __main__.py      — `python3 -m gardener` entry point (delegates to
                        cli.main, same as the `gardener` console script)
     cli.py          — argparse CLI (align, tend, allowlist, garden, overnight,
-                       status, tail-transcript, dashboard), prompt building,
-                       orchestration
+                       status, tail-transcript, dashboard, update), prompt
+                       building, orchestration
     dispatch.py      — the safety-gated subprocess wrapper around `claude -p`
                        (Mode/ModeSpec definitions and tend_mode_spec() for
                        every mode, including tend's per-invocation merge gate)
@@ -41,6 +41,11 @@ gardener/
                        gardener invocations never clone/checkout/dispatch
                        against the same shared clone directory at once (see
                        Usage's "Concurrent dispatch safety")
+    selfupdate.py    — fast-forwards gardener's own checkout to origin (never
+                       a target repo) for `gardener update` and, by default,
+                       at the start of `gardener overnight`; a dirty tree,
+                       detached HEAD, or diverged branch all skip rather than
+                       force anything (see Usage's "Self-update" section)
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     transcript.py    — live transcript-file discovery (encoding rule + bounded
                        poll, run from a background thread `dispatch.run_claude`
@@ -56,7 +61,7 @@ gardener/
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests (state, cli parsing/templating/notify-severity,
                        mocked dispatch, notify, garden, overnight, transcript,
-                       run_log, dashboard)
+                       run_log, dashboard, selfupdate)
 ```
 
 ## Relationship to a conventions repo

@@ -137,7 +137,17 @@ real `claude` subprocess call); `tests/test_repo_lock.py` covers
 `lock_file_path`'s naming convention and the `repo_lock` context manager's
 exclusivity and release-on-exit (normal and exception) using real
 `fcntl.flock` calls against a tmp dir, not a mock, since the whole point is
-proving the OS-level exclusion actually holds. None of the automated
+proving the OS-level exclusion actually holds; `tests/test_selfupdate.py`
+covers `self_update`'s every branch (up to date, a real fast-forward,
+skipped for a dirty tree/detached HEAD/diverged branch, `--check`'s
+update-available report, and a `git` failure/timeout/`OSError` all coming
+back as `ERROR` rather than raising) entirely through the injectable
+`run_fn` — never a real `subprocess.run`, `git`, or network call — plus
+`find_repo_root`'s upward filesystem walk against a real (but throwaway,
+tmp-dir) directory tree; `tests/test_cli.py` covers `cmd_update` (with
+`selfupdate.self_update` mocked) and `cmd_overnight`'s self-update wiring
+specifically — called by default, skipped by `--no-self-update`, and
+a raising/mocked self-update never aborting the run. None of the automated
 tests hit the network or a real repo, or invoke a real `claude` process —
 see [Manual/end-to-end verification](#manualend-to-end-verification) for
 that.
@@ -186,6 +196,20 @@ run's attempted repo differs from the first's (the name-keyed cursor
 correctly avoided repeating it) rather than either strategy's automated
 coverage (fully mocked `gh`/deterministic seeded shuffle) standing in for
 this on its own.
+
+**Self-update specifically** is also a pure orchestration change (no
+`dispatch.py`/`dev_loop.py`/prompt-template involvement), but it's the one
+piece of this feature set that does a real `git fetch`/`git merge
+--ff-only` against gardener's own checkout, so it's worth a real run once
+before trusting it unattended: from a clone that's a few commits behind
+`origin`, run `gardener update` and confirm it reports `updated <old> ->
+<new>` and `git log` shows the new commits with no local changes lost;
+then run it again immediately and confirm it reports already up to date
+(no-op the second time); then make an uncommitted tracked-file edit and
+confirm a further `gardener update` reports the dirty-tree skip rather
+than touching anything. `gardener overnight`'s own default self-update
+step is exactly this same call, so this also covers it — no separate
+overnight-specific real run is needed for this piece.
 
 **`--concurrency > 1` specifically** has now had real, unattended
 end-to-end exercise on the Android/UserLand device: the `gardener-overnight`

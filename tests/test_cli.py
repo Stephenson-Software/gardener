@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gardener import dashboard, dev_loop, garden, merge_allowlist, overnight, repo_lock, state
+from gardener import dashboard, dev_loop, garden, merge_allowlist, overnight, repo_lock, selfupdate, state
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
     PRESERVED_DEPENDENCY_DIRS,
@@ -41,6 +41,7 @@ from gardener.cli import (
     cmd_status,
     cmd_tail_transcript,
     cmd_tend,
+    cmd_update,
     extract_gap_summary,
     fetch_issue_counts,
     fetch_open_issue_count,
@@ -230,6 +231,27 @@ class TestOvernightArgParsing(unittest.TestCase):
     def test_strategy_rejects_unknown_value(self):
         with self.assertRaises(SystemExit):
             self.parser.parse_args(["overnight", "--strategy", "bogus"])
+
+    def test_self_update_defaults_to_true(self):
+        args = self.parser.parse_args(["overnight"])
+        self.assertTrue(args.self_update)
+
+    def test_no_self_update_flag_disables_it(self):
+        args = self.parser.parse_args(["overnight", "--no-self-update"])
+        self.assertFalse(args.self_update)
+
+
+class TestUpdateArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_update_defaults_check_to_false(self):
+        args = self.parser.parse_args(["update"])
+        self.assertFalse(args.check)
+
+    def test_update_check_flag(self):
+        args = self.parser.parse_args(["update", "--check"])
+        self.assertTrue(args.check)
 
 
 class TestTailTranscriptArgParsing(unittest.TestCase):
@@ -1796,7 +1818,7 @@ class TestCmdOvernight(unittest.TestCase):
         return argparse.Namespace(
             hours=hours, model=model, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
-            concurrency=concurrency, strategy=strategy, random_seed=random_seed,
+            concurrency=concurrency, strategy=strategy, random_seed=random_seed, self_update=False,
         )
 
     def _fake_dispatch_tend(self, outcomes: dict):
@@ -2039,6 +2061,115 @@ class TestCmdOvernight(unittest.TestCase):
         mock_pool.assert_not_called()
 
 
+class TestCmdOvernightSelfUpdate(unittest.TestCase):
+    """cmd_overnight's self-update integration — `selfupdate.self_update`
+    itself is unit-tested exhaustively in test_selfupdate.py, so this only
+    covers the wiring: called by default, skipped with --no-self-update,
+    and never allowed to abort the run even if it misbehaves."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, self_update=True):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=1, strategy="round-robin", random_seed=None,
+            self_update=self_update,
+        )
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_self_update_runs_by_default(self, mock_self_update):
+        mock_self_update.return_value = selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.UP_TO_DATE, "already up to date (abc1234)"
+        )
+        with redirect_stderr(io.StringIO()) as stderr:
+            cmd_overnight(self._args())
+        mock_self_update.assert_called_once_with()
+        self.assertIn("gardener: self-update: already up to date", stderr.getvalue())
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_no_self_update_flag_skips_it(self, mock_self_update):
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(self_update=False))
+        mock_self_update.assert_not_called()
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_missing_self_update_attr_still_defaults_to_running_it(self, mock_self_update):
+        """A bare Namespace without a `self_update` attribute at all (e.g.
+        an older caller predating this flag) must still get the same
+        on-by-default behavior as an explicit `self_update=True`."""
+        mock_self_update.return_value = selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.UP_TO_DATE, "already up to date (abc1234)"
+        )
+        args = self._args()
+        del args.self_update
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(args)
+        mock_self_update.assert_called_once_with()
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_a_raising_self_update_never_aborts_the_run(self, mock_self_update):
+        mock_self_update.side_effect = RuntimeError("boom")
+        with redirect_stderr(io.StringIO()) as stderr:
+            exit_code = cmd_overnight(self._args())
+        # Empty garden either way, but the point is this returns cleanly
+        # (0, the empty-garden no-op) instead of a raw traceback.
+        self.assertEqual(exit_code, 0)
+        self.assertIn("gardener: self-update: unexpected error (non-fatal): boom", stderr.getvalue())
+
+
+class TestCmdUpdate(unittest.TestCase):
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_prints_result_and_returns_0_on_success(self, mock_self_update):
+        mock_self_update.return_value = selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.UPDATED, "updated abc1234 -> def5678", "abc1234", "def5678"
+        )
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            exit_code = cmd_update(argparse.Namespace(check=False))
+        self.assertEqual(exit_code, 0)
+        self.assertIn("gardener: self-update: updated abc1234 -> def5678", stdout.getvalue())
+        mock_self_update.assert_called_once_with(check_only=False)
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_check_flag_is_threaded_through(self, mock_self_update):
+        mock_self_update.return_value = selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.UPDATE_AVAILABLE, "update available: abc1234 -> def5678"
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            cmd_update(argparse.Namespace(check=True))
+        mock_self_update.assert_called_once_with(check_only=True)
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_error_status_returns_1(self, mock_self_update):
+        mock_self_update.return_value = selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.ERROR, "git fetch failed: could not resolve host"
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            exit_code = cmd_update(argparse.Namespace(check=False))
+        self.assertEqual(exit_code, 1)
+
+    @patch("gardener.cli.selfupdate.self_update")
+    def test_skip_statuses_return_0_not_a_cli_failure(self, mock_self_update):
+        for status in (
+            selfupdate.UpdateStatus.SKIPPED_NO_GIT,
+            selfupdate.UpdateStatus.SKIPPED_DIRTY,
+            selfupdate.UpdateStatus.SKIPPED_DETACHED,
+            selfupdate.UpdateStatus.SKIPPED_NOT_FAST_FORWARD,
+        ):
+            mock_self_update.return_value = selfupdate.UpdateResult(status, "skipped")
+            with patch("sys.stdout", new_callable=io.StringIO):
+                exit_code = cmd_update(argparse.Namespace(check=False))
+            self.assertEqual(exit_code, 0, f"{status} should not be a CLI failure")
+
+
 class TestCloneOrRefreshClean(unittest.TestCase):
     """The refresh step's `git clean` invocation. `_run` is mocked — these
     tests never actually run `git`/`gh`.
@@ -2144,7 +2275,7 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
         return argparse.Namespace(
             hours=8.0, model=None, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
-            concurrency=concurrency, strategy=strategy, random_seed=None,
+            concurrency=concurrency, strategy=strategy, random_seed=None, self_update=False,
         )
 
     def _fake_dispatch_tend(self, auth_failures: set, gap_summary: str = "Failed to authenticate: OAuth session expired"):
@@ -2386,7 +2517,7 @@ class TestCmdOvernightCursorSurvivesAKill(unittest.TestCase):
         return argparse.Namespace(
             hours=8.0, model=None, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
-            concurrency=concurrency, strategy=strategy, random_seed=1234,
+            concurrency=concurrency, strategy=strategy, random_seed=1234, self_update=False,
         )
 
     def _dispatch_until_killed(self, kill_on: str):
@@ -2482,7 +2613,7 @@ class TestCmdOvernightStrategies(unittest.TestCase):
         return argparse.Namespace(
             hours=hours, model=None, garden_file=self.garden_file,
             cursor_file=self.cursor_file, state_db=self.state_db,
-            concurrency=concurrency, strategy=strategy, random_seed=random_seed,
+            concurrency=concurrency, strategy=strategy, random_seed=random_seed, self_update=False,
         )
 
     def _fake_dispatch_tend(self):
