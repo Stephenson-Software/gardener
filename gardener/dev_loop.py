@@ -163,6 +163,29 @@ any instruction below that assumes otherwise.
 # --json body`; keep the two in sync if this ever changes.
 ORPHAN_MARKER = "<!-- gardener-tend-dispatch -->"
 
+# The GitHub identity a dispatched run writes under is the operator's own
+# (`gh` is authenticated as them, not as gardener) — so, unlike a
+# Co-Authored-By commit trailer, a PR/issue this tool opens is otherwise
+# indistinguishable from one the operator wrote by hand. This is the
+# disclosure line that closes that gap, applied to every place gardener's
+# dispatched runs write GitHub content on the operator's behalf: `align
+# --implement`/`--file-issue` (via cli.py's MODE_INSTRUCTIONS, which
+# imports this) and `tend` (via build_tend_prompt below). Commit messages
+# are deliberately exempt — those already follow
+# COMMIT_PR_CONVENTIONS.md's own style, a separate concern.
+GARDENER_REPO_URL = "https://github.com/Stephenson-Software/gardener"
+
+ATTRIBUTION_REQUIREMENT = (
+    "Passive voice, no exceptions, in every PR description, issue body, and "
+    "PR/issue comment you write this run (never first person, never "
+    '"I"/"we"). Each one must also include its own line disclosing that it '
+    "was drafted during a Gardener session, linking "
+    f"{GARDENER_REPO_URL} — for example: \"This PR description was drafted "
+    f'during a Gardener session ({GARDENER_REPO_URL}).\" Commit messages are '
+    "exempt from both rules — follow COMMIT_PR_CONVENTIONS.md's own style "
+    "for those instead."
+)
+
 
 @dataclass(frozen=True)
 class OrphanedPR:
@@ -291,6 +314,7 @@ anything above where they conflict:
 - Target repo: {repo}, default branch {default_branch}, checked out
   read-write at your current working directory ({target_cwd}) — a
   gardener-managed clone dedicated to this run.
+- {ATTRIBUTION_REQUIREMENT}
 - POST the review the preamble told you to perform with `gh pr comment`,
   whatever your instructions say. Neither `gh pr review` nor `gh api
   .../pulls/<n>/reviews` is available to you — both are deliberately absent
