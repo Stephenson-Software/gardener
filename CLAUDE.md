@@ -266,6 +266,7 @@ the commit.
 | File | What to verify |
 |---|---|
 | `README.md` | Top-level description bullets, Installation/Alerting steps, and every link to `docs/*.md` still point at a real section in that file |
+| `SECURITY.md` | The trust model and safety-model summary still match `docs/SAFETY.md` and `dispatch.py`'s actual `MODE_SPECS` |
 | `docs/USAGE.md` | CLI usage, flags, and command-reference claims match what `cli.py`/`dispatch.py`/`dev_loop.py` actually do |
 | `dispatch.py` module docstring | Every claim about `claude` CLI behavior (`--tools`, `--allowedTools`, `--permission-mode`, and the `tend`-specific `AskUserQuestion`/`Agent`/`ScheduleWakeup` findings) still holds against the currently-installed `claude` version |
 | `gardener/prompts/align_repo.md.tmpl` | Placeholders match exactly what `cli.py`'s `build_prompt` substitutes, and the `$conventions_dir` doc paths it tells a run to read are exactly `conventions.py`'s `REQUIRED_DOCS` minus `README.md` (which is required only as a sanity check that the clone is a conventions repo — see that list's comment). A path in one and not the other means either a run reads a file gardener never verified exists, or gardener requires a file no run ever reads |

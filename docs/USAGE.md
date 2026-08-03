@@ -151,11 +151,10 @@ a scheduled task, cron — is also up). Without anything guarding against
 this, both processes would
 clone/checkout/dispatch against the *same* shared working tree in
 `~/.cache/gardener/repos/<owner>__<repo>` concurrently — the same class of
-failure that has caused real `.git/objects` corruption before (a
-documented `git worktree add`/`remove` corruption incident from a separate
-local project, a different mechanism than the concurrent-clone case here
-but the same underlying lesson: concurrent git operations against one
-shared directory are not safe to assume away).
+failure that has caused real `.git/objects` corruption before via
+concurrent `git worktree add`/`remove` races, a different mechanism than
+the concurrent-clone case here but the same underlying lesson: concurrent
+git operations against one shared directory are not safe to assume away.
 
 `gardener align` and `gardener tend` (and therefore `gardener overnight`,
 which dispatches `tend` in-process) now take an exclusive, non-blocking,

@@ -12,11 +12,11 @@ its own presentation.
 - **`DiscordNotifier`** — the first/primary implementation. Posts a
   Discord embed via a webhook URL using stdlib `urllib.request` only (no
   `requests` dependency — see [Architecture](ARCHITECTURE.md)). Uses a
-  consistent Discord embed shape: title/description/color, same "no webhook configured →
-  log and return, never fail the caller" behavior, and the same Discord
-  embed colors for success (`3066993`, green) and error (`15158332`,
-  red); the warning color (`16776960`, yellow) is used for an
-  "expiring soon" style alert. **Never raises** — a bad webhook,
+  consistent embed shape: a title, description, and color field, plus a
+  "no webhook configured → log and return, never fail the caller"
+  behavior. Colors: success is `3066993` (green), error is `15158332`
+  (red), and warning is `16776960` (yellow, used for an "expiring soon"
+  style alert). **Never raises** — a bad webhook,
   a network error, or Discord being down must never be able to break the
   actual `gardener align` run it's reporting on; every failure path is
   caught and logged to stderr instead.
