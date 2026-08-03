@@ -1,1 +1,5 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Stephenson-Software/gardener/security/policy
+    about: Please do not report security vulnerabilities as a public issue — see SECURITY.md
