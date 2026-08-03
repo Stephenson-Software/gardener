@@ -18,7 +18,11 @@ to my garden while I sleep" entry point:
    `--no-self-update` skips it) — see [Self-update](USAGE.md#self-update)
    for the full design and exactly what makes this safe to do
    unattended. Logs one line either way and never aborts the run, even if
-   the self-update step itself hits something unexpected.
+   the self-update step itself hits something unexpected. A skip or an
+   error additionally alerts through the configured notifier (see
+   [Alerting](ALERTING.md#self-update-alerts)) — the run proceeds either
+   way, but tending the garden with code that may be behind `origin` is no
+   longer evidence only a stderr line nobody reads carries.
 1. Reads the garden. An empty garden prints a clear message and exits `0`
    — nothing to do is not an error.
 2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**
