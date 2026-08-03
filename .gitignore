@@ -7,3 +7,4 @@ dist/
 venv/
 *.sqlite3
 .pytest_cache/
+.claude/

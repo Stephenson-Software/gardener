@@ -101,9 +101,8 @@ def default_webhook_config_path() -> Path:
     """A gitignored, `.env`-style file next to gardener's sqlite state
     (`$GARDENER_STATE_DIR/notify.env`, same override gardener already uses
     for its run-history db) — for a persistent/cron context where setting
-    an env var every invocation isn't practical, mirroring a similar
-    `.monitor.env` on-box convention used elsewhere. gardener never
-    creates this file itself, only reads it."""
+    an env var every invocation isn't practical. gardener never creates
+    this file itself, only reads it."""
     return _default_state_dir() / "notify.env"
 
 

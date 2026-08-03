@@ -137,8 +137,8 @@ configure a webhook one of two ways (checked in this order):
 export GARDENER_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/XXX/YYY"
 
 # 2. A gitignored config file, for a persistent/cron context where
-#    exporting an env var per-invocation isn't practical (same shape as
-#    the `.monitor.env` convention used elsewhere in this ecosystem):
+#    exporting an env var per-invocation isn't practical — a plain
+#    KEY=VALUE dotenv file, mode 600):
 mkdir -p ~/.local/state/gardener   # or $GARDENER_STATE_DIR if overridden
 umask 077
 echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXX/YYY' \
