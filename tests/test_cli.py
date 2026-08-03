@@ -534,10 +534,22 @@ class TestPromptTemplating(unittest.TestCase):
             prompt = build_prompt(Mode.IMPLEMENT, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("gh pr create", prompt)
 
+    def test_implement_mode_prompt_requires_passive_voice_and_gardener_attribution(self):
+        with tempfile.TemporaryDirectory() as td:
+            prompt = build_prompt(Mode.IMPLEMENT, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
+        self.assertIn(dev_loop.ATTRIBUTION_REQUIREMENT, prompt)
+        self.assertIn(dev_loop.GARDENER_REPO_URL, prompt)
+
     def test_file_issue_mode_prompt_forbids_multiple_issues(self):
         with tempfile.TemporaryDirectory() as td:
             prompt = build_prompt(Mode.FILE_ISSUE, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("Do not open more than one issue", prompt)
+
+    def test_file_issue_mode_prompt_requires_passive_voice_and_gardener_attribution(self):
+        with tempfile.TemporaryDirectory() as td:
+            prompt = build_prompt(Mode.FILE_ISSUE, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
+        self.assertIn(dev_loop.ATTRIBUTION_REQUIREMENT, prompt)
+        self.assertIn(dev_loop.GARDENER_REPO_URL, prompt)
 
 
 class TestExtractGapSummary(unittest.TestCase):

@@ -179,6 +179,12 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn(dev_loop.ORPHAN_MARKER, prompt)
         self.assertIn("NEW pull request", prompt)
 
+    def test_tend_prompt_requires_passive_voice_and_gardener_attribution(self):
+        prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
+        self.assertIn(dev_loop.ATTRIBUTION_REQUIREMENT, prompt)
+        self.assertIn("Passive voice", prompt)
+        self.assertIn(dev_loop.GARDENER_REPO_URL, prompt)
+
     def test_tend_prompt_without_orphan_has_no_continuation_instructions(self):
         prompt = dev_loop.build_tend_prompt("owner/name", "name-dev-loop", Path("/tmp/t"), "main", False)
         self.assertNotIn("gardener found an existing OPEN pull request", prompt)

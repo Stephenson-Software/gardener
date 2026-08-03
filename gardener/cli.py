@@ -107,7 +107,7 @@ MODE_INSTRUCTIONS = {
    tools available in this session — that is enforced at the tool level,
    not just by these instructions — so there is nothing further to
    authorize or refuse. Do not attempt to open a PR or an issue.""",
-    Mode.IMPLEMENT: """4. You are authorized to implement the identified gaps directly in this
+    Mode.IMPLEMENT: f"""4. You are authorized to implement the identified gaps directly in this
    checked-out repository, following ITS OWN conventions (language, build
    tool, test framework) rather than copying the conventions repo's literal
    examples. Concretely:
@@ -122,15 +122,17 @@ MODE_INSTRUCTIONS = {
    - Push the branch and open a pull request (`gh pr create`) summarizing
      the gaps closed, referencing the conventions doc(s) by URL instead of
      restating their rules in the PR body.
+   - {dev_loop.ATTRIBUTION_REQUIREMENT}
    - Only `git *` and `gh pr *` commands are available to you; nothing
      else is pre-approved and there is no human available in this session
      to approve anything further. Do not merge the PR.""",
-    Mode.FILE_ISSUE: """4. You are authorized to open exactly ONE GitHub issue in this repo
+    Mode.FILE_ISSUE: f"""4. You are authorized to open exactly ONE GitHub issue in this repo
    (`gh issue create`) summarizing every gap found in step 2, scoped so a
    *-dev-loop skill in this repo (if one exists) can pick it up next
    cycle. Do not implement any fix yourself — you have no file-write
    tools available in this session, only `gh issue *` commands are
-   pre-approved. Do not open more than one issue.""",
+   pre-approved. Do not open more than one issue.
+   - {dev_loop.ATTRIBUTION_REQUIREMENT}""",
 }
 
 
