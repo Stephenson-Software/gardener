@@ -209,7 +209,9 @@ enforced in `dispatch.py`, which raises rather than silently proceeding if
 it's ever reached. See **[docs/SAFETY.md](docs/SAFETY.md)** for the full
 three-layer tool-scoping model, how headless `tend` dispatch handles the
 "ask the user before merging" problem with nobody there to ask, and the
-merge allow-list mechanics.
+merge allow-list mechanics. See **[SECURITY.md](SECURITY.md)** to report a
+vulnerability or to review the trust model before pointing gardener at a
+repo you don't fully trust.
 
 ## Alerting design
 
