@@ -137,8 +137,8 @@ configure a webhook one of two ways (checked in this order):
 export GARDENER_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/XXX/YYY"
 
 # 2. A gitignored config file, for a persistent/cron context where
-#    exporting an env var per-invocation isn't practical (same shape as
-#    the `.monitor.env` convention used elsewhere in this ecosystem):
+#    exporting an env var per-invocation isn't practical — a plain
+#    KEY=VALUE dotenv file, mode 600):
 mkdir -p ~/.local/state/gardener   # or $GARDENER_STATE_DIR if overridden
 umask 077
 echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXX/YYY' \
@@ -209,7 +209,9 @@ enforced in `dispatch.py`, which raises rather than silently proceeding if
 it's ever reached. See **[docs/SAFETY.md](docs/SAFETY.md)** for the full
 three-layer tool-scoping model, how headless `tend` dispatch handles the
 "ask the user before merging" problem with nobody there to ask, and the
-merge allow-list mechanics.
+merge allow-list mechanics. See **[SECURITY.md](SECURITY.md)** to report a
+vulnerability or to review the trust model before pointing gardener at a
+repo you don't fully trust.
 
 ## Alerting design
 

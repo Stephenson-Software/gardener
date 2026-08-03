@@ -1,8 +1,7 @@
 # Architecture
 
-Stdlib-only Python — no third-party pip dependencies. This matches the
-established house style used elsewhere in this ecosystem ("Plain stdlib
-Python... no build step / third-party deps"). gardener shells out
+Stdlib-only Python — no third-party pip dependencies: no build step,
+nothing to audit or pin. gardener shells out
 to three external CLIs (`git`, `gh`, `claude`) rather than reimplementing
 git hosting, GitHub API auth, or an agent loop — that's a process
 dependency, not a pip one, and is the same shape other local tooling here

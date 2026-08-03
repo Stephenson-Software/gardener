@@ -71,8 +71,8 @@ several repos, dispatched one after another, nobody watching.
 1. Clones/refreshes `owner/repo` into gardener's cache, exactly like
    `align` does.
 2. Derives the skill slug from the repo's actual name (`owner/repo` ->
-   `repo-dev-loop`, matching the naming already used by every
-   `<slug>-dev-loop` skill/repo in this ecosystem — see `dev_loop.py`),
+   `repo-dev-loop`, matching the naming every generated
+   `<slug>-dev-loop` skill/repo already uses — see `dev_loop.py`),
    and checks whether `~/.claude/commands/<slug>-dev-loop.md` already
    resolves to a real file.
 3. **If no skill exists yet**, dispatches `create-dev-loop` first (a
@@ -151,7 +151,7 @@ a scheduled task, cron — is also up). Without anything guarding against
 this, both processes would
 clone/checkout/dispatch against the *same* shared working tree in
 `~/.cache/gardener/repos/<owner>__<repo>` concurrently — the same class of
-failure that has corrupted `.git/objects` in this ecosystem before (a
+failure that has caused real `.git/objects` corruption before (a
 documented `git worktree add`/`remove` corruption incident from a separate
 local project, a different mechanism than the concurrent-clone case here
 but the same underlying lesson: concurrent git operations against one
