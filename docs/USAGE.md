@@ -198,8 +198,12 @@ or the conventions repo (those have their own separate refresh mechanics,
 is conservative about when it's safe to: a dirty tree (tracked changes;
 untracked files don't count), a detached `HEAD`, or a local branch that
 has diverged from `origin` (not a fast-forward) all skip rather than force
-anything, and every one of those is a normal, silently-logged outcome, not
-a failure. It's also a no-op if gardener isn't running from a git checkout
+anything, and none of those is a failure — but on the unattended
+`overnight` path (not on `gardener update` run by hand), a skip or an
+actual error also alerts through the configured notifier rather than only
+logging, since an unattended box tending the garden with stale code is
+exactly the case nobody is reading stderr for (see
+[Alerting](ALERTING.md#self-update-alerts)). It's also a no-op if gardener isn't running from a git checkout
 at all (e.g. installed from a built wheel rather than `pip install -e .`)
 — see `selfupdate.py`'s module docstring for exactly why an editable
 install is what makes this possible in the first place.

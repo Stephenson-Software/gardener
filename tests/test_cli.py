@@ -2138,6 +2138,119 @@ class TestCmdOvernightSelfUpdate(unittest.TestCase):
         self.assertIn("gardener: self-update: unexpected error (non-fatal): boom", stderr.getvalue())
 
 
+class TestCmdOvernightSelfUpdateAlerting(unittest.TestCase):
+    """Every self-update skip must reach the operator's notifier, not just
+    stderr — an unattended box tending with stale code is precisely the
+    case nobody is reading logs for. The routine up-to-date/updated path
+    must stay silent, or the nightly noise gets muted and takes the real
+    warnings with it."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=1, strategy="round-robin", random_seed=None,
+            self_update=True,
+        )
+
+    def _run_with(self, result):
+        """Run cmd_overnight with self_update mocked to `result`, returning
+        the list of (title, message, level) calls made to the notifier."""
+        with patch("gardener.cli.selfupdate.self_update", return_value=result), \
+                patch("gardener.cli.notify.default_notifier") as mock_notifier:
+            with redirect_stderr(io.StringIO()):
+                cmd_overnight(self._args())
+        return mock_notifier.return_value.notify.call_args_list
+
+    def test_every_skip_status_alerts_as_a_warning(self):
+        skips = [
+            selfupdate.UpdateStatus.SKIPPED_NO_GIT,
+            selfupdate.UpdateStatus.SKIPPED_DIRTY,
+            selfupdate.UpdateStatus.SKIPPED_DETACHED,
+            selfupdate.UpdateStatus.SKIPPED_NO_UPSTREAM,
+            selfupdate.UpdateStatus.SKIPPED_NOT_FAST_FORWARD,
+        ]
+        for status in skips:
+            with self.subTest(status=status):
+                calls = self._run_with(selfupdate.UpdateResult(status, "skipped because reasons"))
+                self.assertEqual(len(calls), 1)
+                title, message, level = calls[0].args
+                self.assertIn("SKIPPED", title)
+                self.assertIn("stale code", title)
+                self.assertIn("skipped because reasons", message)
+                self.assertIs(level, Level.WARNING)
+
+    def test_the_diverged_case_reports_both_shas(self):
+        """The status that actually bit this deployment: a force-pushed
+        origin. The alert has to carry enough to act on without ssh'ing in."""
+        calls = self._run_with(selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.SKIPPED_NOT_FAST_FORWARD,
+            "HEAD has diverged from origin/main — not a fast-forward, skipping self-update",
+            "abc1234567", "def7654321",
+        ))
+        self.assertEqual(len(calls), 1)
+        _, message, level = calls[0].args
+        self.assertIn("abc123456", message)
+        self.assertIn("def765432", message)
+        self.assertIs(level, Level.WARNING)
+
+    def test_error_status_alerts_at_error_level(self):
+        calls = self._run_with(selfupdate.UpdateResult(
+            selfupdate.UpdateStatus.ERROR, "git fetch failed: network unreachable"
+        ))
+        self.assertEqual(len(calls), 1)
+        title, message, level = calls[0].args
+        self.assertIn("FAILED", title)
+        self.assertIn("network unreachable", message)
+        self.assertIs(level, Level.ERROR)
+
+    def test_routine_outcomes_stay_silent(self):
+        for status, msg in [
+            (selfupdate.UpdateStatus.UP_TO_DATE, "already up to date (abc1234)"),
+            (selfupdate.UpdateStatus.UPDATED, "updated abc1234 -> def5678"),
+        ]:
+            with self.subTest(status=status):
+                self.assertEqual(self._run_with(selfupdate.UpdateResult(status, msg)), [])
+
+    def test_an_escaping_exception_alerts_too(self):
+        """`self_update` is written never to raise, so if one escapes
+        anyway it's the least likely thing to be noticed — the
+        belt-and-suspenders path has to alert, not just log."""
+        with patch("gardener.cli.selfupdate.self_update", side_effect=RuntimeError("boom")), \
+                patch("gardener.cli.notify.default_notifier") as mock_notifier:
+            with redirect_stderr(io.StringIO()):
+                exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        calls = mock_notifier.return_value.notify.call_args_list
+        self.assertEqual(len(calls), 1)
+        title, message, level = calls[0].args
+        self.assertIn("FAILED", title)
+        self.assertIn("boom", message)
+        self.assertIs(level, Level.ERROR)
+
+    def test_a_failing_notifier_never_aborts_the_run(self):
+        """Mirrors _notify_run's stance: alerting must never break the run
+        it reports on."""
+        with patch("gardener.cli.selfupdate.self_update", return_value=selfupdate.UpdateResult(
+                selfupdate.UpdateStatus.SKIPPED_DIRTY, "dirty tree")), \
+                patch("gardener.cli.notify.default_notifier",
+                      side_effect=RuntimeError("discord down")):
+            with redirect_stderr(io.StringIO()) as stderr:
+                exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        self.assertIn("notification failed (non-fatal): discord down", stderr.getvalue())
+
+
 class TestCmdUpdate(unittest.TestCase):
     @patch("gardener.cli.selfupdate.self_update")
     def test_prints_result_and_returns_0_on_success(self, mock_self_update):

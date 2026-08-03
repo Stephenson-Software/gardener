@@ -979,13 +979,29 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     because its own self-update step hit something unexpected would be a
     worse outcome than just skipping it and tending the garden with
     whatever code is already on disk.
+
+    That tolerance is exactly why the outcome is also alerted, not just
+    logged: any skip means this run is tending with code that may be
+    behind `origin`, and on an unattended box a stderr line saying so is
+    read by nobody. `_notify_self_update` fires a WARNING for every skip
+    and an ERROR for a self-update failure, and stays silent on the
+    routine up-to-date/updated path.
     """
     if getattr(args, "self_update", True):
         try:
             update_result = selfupdate.self_update()
             print(_self_update_log_line(update_result), file=sys.stderr)
+            _notify_self_update(update_result)
         except Exception as e:  # noqa: BLE001 - must never abort the overnight run
             print(f"gardener: self-update: unexpected error (non-fatal): {e}", file=sys.stderr)
+            # The belt-and-suspenders path alerts too: something unexpected
+            # enough to escape `self_update` (which is written never to
+            # raise) is exactly the case least likely to be noticed.
+            _notify_self_update(
+                selfupdate.UpdateResult(
+                    selfupdate.UpdateStatus.ERROR, f"unexpected error: {e}"
+                )
+            )
 
     try:
         garden_list = garden.list_garden(path=args.garden_file)
@@ -1218,6 +1234,55 @@ def cmd_overnight(args: argparse.Namespace) -> int:
 
 def _self_update_log_line(result: selfupdate.UpdateResult) -> str:
     return f"gardener: self-update: {result.message}"
+
+
+# Which self-update outcomes are worth waking someone up for. Every
+# SKIPPED_* status means the same operationally-important thing — the run
+# about to happen is tending the garden with whatever code is already on
+# disk, which may be behind `origin` — and a skip is only ever *logged* to
+# stderr, so an unattended run can go on silently using stale code for as
+# long as nobody reads the logs. UP_TO_DATE/UPDATED/UPDATE_AVAILABLE are
+# deliberately absent: the routine path must stay silent, or a nightly
+# alert becomes noise that gets muted, taking the real warnings with it.
+_SELF_UPDATE_ALERT_LEVELS = {
+    selfupdate.UpdateStatus.SKIPPED_NO_GIT: notify.Level.WARNING,
+    selfupdate.UpdateStatus.SKIPPED_DIRTY: notify.Level.WARNING,
+    selfupdate.UpdateStatus.SKIPPED_DETACHED: notify.Level.WARNING,
+    selfupdate.UpdateStatus.SKIPPED_NO_UPSTREAM: notify.Level.WARNING,
+    selfupdate.UpdateStatus.SKIPPED_NOT_FAST_FORWARD: notify.Level.WARNING,
+    selfupdate.UpdateStatus.ERROR: notify.Level.ERROR,
+}
+
+
+def _notify_self_update(result: selfupdate.UpdateResult) -> None:
+    """Alert on a self-update outcome that left `cmd_overnight` running
+    code it couldn't confirm is current. Mirrors `_notify_run`'s stance
+    exactly — this only maps an `UpdateResult` to a (title, message,
+    level) tuple and hands it to a `Notifier`, and never raises, because
+    alerting must never break the run it reports on.
+
+    Scoped to the unattended `overnight` path on purpose: `gardener
+    update` run by hand already prints the same outcome to a human who is
+    watching, and firing a Discord alert at someone for a command they
+    just typed is noise, not visibility.
+    """
+    level = _SELF_UPDATE_ALERT_LEVELS.get(result.status)
+    if level is None:
+        return
+
+    if level is notify.Level.ERROR:
+        title = "gardener overnight: self-update FAILED"
+    else:
+        title = "gardener overnight: self-update SKIPPED — tending with stale code"
+
+    message = result.message
+    if result.old_sha and result.new_sha:
+        message = f"{message}\n\nlocal: {result.old_sha[:9]}\norigin: {result.new_sha[:9]}"
+
+    try:
+        notify.default_notifier().notify(title, message, level)
+    except Exception as e:  # noqa: BLE001 - alerting must never break the run it reports on
+        print(f"gardener: self-update: notification failed (non-fatal): {e}", file=sys.stderr)
 
 
 def cmd_update(args: argparse.Namespace) -> int:

@@ -36,10 +36,12 @@ record and notify steps are individually failure-isolated — a
 and logged rather than crashing the run whose successful dispatch it was
 merely trying to persist, the same "must never break the run it reports
 on" posture `_notify_run` itself already had for a bad webhook.
-`_notify_run` owns the only alerting *business logic* in the codebase — turning a
+`_notify_run` owns the per-run alerting *business logic* — turning a
 recorded `state.Run`'s `outcome`/`mode` into a severity — deliberately
 kept out of `notify.py` itself, which only knows how to present an
-already-decided `(title, message, level)`:
+already-decided `(title, message, level)`. (`_notify_self_update`, below,
+is the one other place that decides a severity, and follows the same
+split.)
 
 - `outcome == "error"` → always `Level.ERROR`, regardless of mode. This is
   the case most worth getting right (an error is the easiest outcome to
@@ -55,3 +57,38 @@ already-decided `(title, message, level)`:
   future mode never has to be added to `notify.py` or `_notify_run` by
   hand to be covered — it falls into the mutation branch automatically
   unless it's literally `"report"`.
+
+## Self-update alerts
+
+`gardener overnight` fast-forwards gardener's own checkout before tending
+anything (see [Overnight](OVERNIGHT.md) and `selfupdate.py`'s module
+docstring). That step is deliberately incapable of aborting the run: every
+failure mode degrades to a skip. The cost of that tolerance is that a box
+can go on tending the garden with stale code indefinitely, and the only
+evidence is a line on stderr that, on an unattended device, nobody reads.
+
+`cli.py`'s `_notify_self_update` closes that gap, mapping the
+`UpdateStatus` to a severity via `_SELF_UPDATE_ALERT_LEVELS`:
+
+- Every `SKIPPED_*` status (`NO_GIT`, `DIRTY`, `DETACHED`, `NO_UPSTREAM`,
+  `NOT_FAST_FORWARD`) → `Level.WARNING`, titled "self-update SKIPPED —
+  tending with stale code". They differ in cause but not in consequence:
+  this run is using code that may be behind `origin`. When the result
+  carries both SHAs (as `NOT_FAST_FORWARD` does), the message includes
+  them, so the alert is actionable without logging into the box.
+- `ERROR`, plus any exception that escapes `self_update` itself →
+  `Level.ERROR`, titled "self-update FAILED".
+- `UP_TO_DATE`/`UPDATED`/`UPDATE_AVAILABLE` → **no alert at all**. This
+  silence is the point: a nightly notification for the routine path is
+  noise, and noise gets muted, which would take the warnings above with
+  it.
+
+Scoped to `overnight` on purpose — `gardener update` typed by hand already
+prints its outcome to someone watching, so alerting there would be noise
+rather than visibility.
+
+`SKIPPED_NO_GIT` is worth calling out: unlike the others it's a permanent
+property of a non-editable install, so it will fire every night until the
+deployment is changed to an editable checkout. That's intentional (an
+install that can never self-update is worth knowing about) but it is the
+one status likely to want suppressing if a wheel install is deliberate.
