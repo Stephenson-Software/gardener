@@ -338,9 +338,28 @@ repos they hit:
 | 2026-07-24 | auth (`Failed to authenticate: OAuth session expired and could not be refreshed`) | 12 of 15 repos in ~1 minute, each $0.00 and 2-5s; auth recovered on its own ~20 minutes later |
 | 2026-07-20, 2026-07-25 | usage limit (`You've hit your session limit · resets 12am (UTC)`) | 35 repos, 20 of them in a four-minute window |
 | 2026-07-21, 2026-07-25 | GitHub unreachable (`error connecting to api.github.com`, GraphQL `unexpected EOF`) | 17 repos |
+| 2026-08-04 | GitHub unreachable in a third wording (`http2: client conn could not be established`) | 2 repos |
 
 In every case the cursor advanced past the affected repos, so they stayed
 untended for the night through no fault of their own.
+
+The 2026-08-04 pair is the instructive one: the class was already covered,
+but only by the two *wordings* recorded above, and Go's http2 transport
+error is neither. Every one of these markers is a substring of some tool's
+un-versioned error prose, so the marker set decays silently as those tools
+reword — a marker set is not a fix you make once. The cheap periodic check
+is to replay the recorded run history through the current classifier and
+look at what it *doesn't* catch, since a device-wide outage is recognisable
+in that history without any classifier at all: several repos failing within
+the same second or two, each in seconds and at $0.00.
+
+Also worth stating explicitly, because it is the tempting wrong fix: all 24
+recorded failures of this class share the wrapper sentence `could not
+determine default branch for <repo>`, and that sentence must **not** be a
+marker. `cli.py`'s `_default_branch_name` raises it for a deleted, renamed,
+or permission-denied repo just as readily as for an outage — matching it
+would abort the whole batch, and park the resume cursor, on a repo that is
+permanently gone. Only the transport error `gh` appends to it may classify.
 
 ## Dependency caches survive the target-repo refresh
 

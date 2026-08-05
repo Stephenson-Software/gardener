@@ -30,10 +30,12 @@ device-wide failure classification and retry policy (each of
 `looks_like_auth_failure`/`looks_like_usage_limit`/`looks_like_network_failure`
 matched against the *verbatim* text of a real recorded failure rather than
 paraphrased, that `is_device_global_failure` covers all three while ordinary
-build/test failures trip none of them, that the retry stops as soon as auth
-recovers and gives up once the backoff is exhausted, and that a usage limit
-is flagged blocked but never retried), always with `sleep_fn` injected so no
-test actually sleeps; `tests/test_state.py`
+build/test failures trip none of them, that the bare `could not determine
+default branch` wrapper the network class always arrives inside is
+deliberately *not* enough to classify on its own, that the retry stops as
+soon as auth recovers and gives up once the backoff is exhausted, and that a
+usage limit is flagged blocked but never retried), always with `sleep_fn`
+injected so no test actually sleeps; `tests/test_state.py`
 also pins the `GARDENER_STATE_DIR` contract across every module that
 resolves it — `state.py`, `garden.py`, `merge_allowlist.py`,
 `overnight.py`, `notify.py`, `run_log.py`, and `repo_lock.py` each carry

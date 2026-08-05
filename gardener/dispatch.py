@@ -369,13 +369,30 @@ USAGE_LIMIT_MARKERS = (
 # is classified from the raised error's text instead (see
 # `_dispatch_one_for_overnight`). Also grounded in recorded history: 17
 # failures across 2026-07-21 and 2026-07-25 with "error connecting to
-# api.github.com" or a GraphQL "unexpected EOF".
+# api.github.com" or a GraphQL "unexpected EOF", plus 2 more on 2026-08-04
+# carrying Go's http2 transport wording instead (`Post
+# "https://api.github.com/graphql": http2: client conn could not be
+# established`) — same outage class, same second, different string, and
+# nothing matched it.
+#
+# Note what is deliberately *not* a marker: "could not determine default
+# branch", the `cli.py` wrapper all 24 recorded failures of this class share.
+# It reads like the obvious thing to match and is the wrong thing to match —
+# `_default_branch_name` raises it for a deleted, renamed, or
+# permission-denied repo too, which is a permanent per-repo fact rather than
+# a device-wide one. Matching the wrapper would abort a whole batch, and
+# leave the resume cursor parked, on a repo that will fail identically
+# forever. Match the transport error `gh` appends to it instead.
 NETWORK_FAILURE_MARKERS = (
     "error connecting to api.github.com",
     "check your internet connection",
     "unexpected eof",
     "could not resolve host",
     "connection refused",
+    # Broad on purpose, per this module's "no wording here is a stable
+    # contract" rule: covers the observed "http2: client conn could not be
+    # established" and its siblings ("...is closed", "...has been closed").
+    "http2: client conn",
 )
 
 
