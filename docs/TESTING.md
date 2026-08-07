@@ -147,10 +147,22 @@ must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
 `overnight.py`, not just `state.py`'s own db path, and that a newer
 manual-`tend` log does not hide the concurrent `overnight` run's in-flight
-repos or batch bar) — plus `run_server`'s
-loopback-only enforcement, without ever covering its `http.server` layer
+repos or batch bar). `find_active_logs` additionally covers the prune race
+(a log deleted between the `glob` and the `stat` is skipped, not fatal) —
+that test patches `Path.is_file` as well as `Path.stat`, because `is_file`
+calls `stat` internally and swallows `OSError`, so patching `stat` alone
+passes without ever reaching the `except OSError` branch. `run_server` is
+covered for both of its rejection paths (a non-loopback host and one that
+fails to resolve, the latter surfacing as `ValueError` rather than a bare
+`socket.gaierror`), for not constructing a server at all when the host is
+rejected, and for its serve/shutdown lifecycle with `ThreadingHTTPServer`
+mocked — `KeyboardInterrupt` exits cleanly, `server_close()` runs even when
+`serve_forever()` raises something else, and the `state_dir` reaches
+`_DashboardHandler` as a class attribute before serving begins. Its
+`http.server` request-handling layer is still deliberately not covered
 directly (mirroring how `test_dispatch.py` mocks rather than invokes the
-real `claude` subprocess call); `tests/test_repo_lock.py` covers
+real `claude` subprocess call), which is why `do_GET` and `log_message`
+remain the module's only uncovered lines; `tests/test_repo_lock.py` covers
 `lock_file_path`'s naming convention and the `repo_lock` context manager's
 exclusivity and release-on-exit (normal and exception) using real
 `fcntl.flock` calls against a tmp dir, not a mock, since the whole point is

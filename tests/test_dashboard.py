@@ -3,9 +3,13 @@ build_status() — not covered here, mirroring how dispatch.py's actual
 `claude` subprocess call is mocked rather than invoked in test_dispatch.py.
 This file covers the pure log-parsing and status-assembly functions, which
 never touch a socket."""
+import io
+import socket
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from gardener import dashboard, dispatch, garden, merge_allowlist, overnight, state
 
@@ -88,6 +92,32 @@ class TestFindActiveLogs(unittest.TestCase):
         fresh = self._log("tend-1.log", age_seconds=1)
         self._log("overnight-old.log", age_seconds=dashboard.ACTIVE_LOG_WINDOW_SECONDS + 60)
         self.assertEqual(dashboard.find_active_logs(self.logs_dir), [fresh])
+
+    def test_a_log_pruned_mid_scan_is_skipped_not_fatal(self):
+        """`run_log.prune_old_logs` can delete a log between this function's
+        `glob` and its `stat`. The dashboard polls every 4s while pruning
+        runs on a separate process, so this race is routine — losing one log
+        is correct, raising `OSError` at the caller is not."""
+        doomed = self._log("overnight-doomed.log", age_seconds=1)
+        survivor = self._log("tend-alive.log", age_seconds=1)
+
+        real_stat = Path.stat
+
+        def stat_but_the_doomed_one_vanished(self, *args, **kwargs):
+            if self.name == doomed.name:
+                raise OSError(2, "No such file or directory")
+            return real_stat(self, *args, **kwargs)
+
+        # `is_file()` is patched alongside `stat()` on purpose. It calls
+        # `stat()` internally and swallows OSError by returning False, so
+        # patching `stat()` alone makes this test pass via the `is_file()`
+        # guard without ever reaching the `except OSError` branch it is
+        # meant to exercise — a false negative confirmed by coverage
+        # (lines stayed unhit). Forcing `is_file()` True reproduces the real
+        # race: the file existed at the guard and was gone by the `stat()`.
+        with patch.object(Path, "is_file", lambda self: True):
+            with patch.object(Path, "stat", stat_but_the_doomed_one_vanished):
+                self.assertEqual(dashboard.find_active_logs(self.logs_dir), [survivor])
 
     def test_falls_back_to_the_newest_log_when_nothing_is_fresh(self):
         # A finished run's narration is still the most relevant thing to
@@ -553,6 +583,74 @@ class TestRunServerLoopbackEnforcement(unittest.TestCase):
                 dashboard.run_server(host="127.0.0.1", port=19999)
             except KeyboardInterrupt:
                 pass
+
+    def test_unresolvable_host_raises_value_error(self):
+        """The guard's other rejection path. A name that doesn't resolve must
+        fail closed the same way a non-loopback one does — `getaddrinfo`
+        raising must not escape as a bare `socket.gaierror`, which a caller
+        checking for `ValueError` would not catch."""
+        with patch("gardener.dashboard.socket.getaddrinfo", side_effect=socket.gaierror("nope")):
+            with self.assertRaises(ValueError) as ctx:
+                dashboard.run_server(host="not-a-real-host.invalid", port=19999)
+        self.assertIn("could not be resolved", str(ctx.exception))
+
+    def test_no_socket_is_bound_when_the_host_is_rejected(self):
+        """The point of validating before binding: a rejected host must not
+        reach `ThreadingHTTPServer` at all."""
+        with patch("gardener.dashboard.ThreadingHTTPServer") as mock_server:
+            with self.assertRaises(ValueError):
+                dashboard.run_server(host="0.0.0.0", port=19999)
+        mock_server.assert_not_called()
+
+
+class TestRunServerLifecycle(unittest.TestCase):
+    """`run_server`'s serve/shutdown path. The existing loopback tests stop
+    at the validation boundary (they make `ThreadingHTTPServer` itself
+    raise), so nothing previously exercised what happens once a server
+    object exists."""
+
+    def setUp(self):
+        # run_server sets this class attribute; restore it so ordering
+        # between tests can't matter.
+        original = dashboard._DashboardHandler.state_dir
+        self.addCleanup(setattr, dashboard._DashboardHandler, "state_dir", original)
+
+    def test_keyboard_interrupt_is_swallowed_and_the_server_is_closed(self):
+        """Ctrl+C is the documented way to stop the dashboard, so it must
+        exit cleanly rather than surfacing a traceback — and must still
+        release the socket on the way out."""
+        httpd = MagicMock()
+        httpd.serve_forever.side_effect = KeyboardInterrupt
+        with patch("gardener.dashboard.ThreadingHTTPServer", return_value=httpd):
+            with redirect_stderr(io.StringIO()):
+                dashboard.run_server(host="127.0.0.1", port=19999)  # must not raise
+        httpd.serve_forever.assert_called_once()
+        httpd.server_close.assert_called_once()
+
+    def test_server_is_closed_even_if_serve_forever_fails(self):
+        """The `finally` is the load-bearing part — an unexpected error must
+        not leak the bound port."""
+        httpd = MagicMock()
+        httpd.serve_forever.side_effect = RuntimeError("boom")
+        with patch("gardener.dashboard.ThreadingHTTPServer", return_value=httpd):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    dashboard.run_server(host="127.0.0.1", port=19999)
+        httpd.server_close.assert_called_once()
+
+    def test_state_dir_reaches_the_handler_class_before_serving(self):
+        """`http.server` constructs a handler per request, so per-server
+        config can only reach it as a class attribute. Assert the wiring
+        rather than trusting the comment that explains it."""
+        seen = {}
+        httpd = MagicMock()
+        httpd.serve_forever.side_effect = lambda: seen.setdefault(
+            "state_dir", dashboard._DashboardHandler.state_dir
+        )
+        with patch("gardener.dashboard.ThreadingHTTPServer", return_value=httpd):
+            with redirect_stderr(io.StringIO()):
+                dashboard.run_server(host="127.0.0.1", port=19999, state_dir=Path("/tmp/some-state"))
+        self.assertEqual(seen["state_dir"], Path("/tmp/some-state"))
 
 
 if __name__ == "__main__":
