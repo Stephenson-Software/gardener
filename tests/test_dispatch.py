@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from gardener.dispatch import (
     ALLOWED_PERMISSION_MODES,
+    ModeSpec,
     FORBIDDEN_PERMISSION_MODE,
     MERGE_ALLOWED_TOOL,
     MODE_SPECS,
@@ -23,6 +24,63 @@ from gardener.dispatch import (
     run_claude,
     tend_mode_spec,
 )
+
+
+class TestBuildInvocationRuntimeGuard(unittest.TestCase):
+    """The runtime gate in `_build_invocation`, as distinct from the table
+    it guards.
+
+    `TestModeSpecs` below already asserts that no entry in `MODE_SPECS`
+    configures `bypassPermissions` or an unrecognized permission mode. That
+    covers the *table*. It does not cover the *check* — delete the two
+    `raise DispatchError` lines from `_build_invocation` and every one of
+    those tests still passes, because they assert about the data the check
+    is defending, never about the check firing.
+
+    CLAUDE.md is explicit that this redundancy is the point: the runtime
+    check exists "so a future edit to `MODE_SPECS` can't silently regress
+    this", and says not to remove it as "belt and suspenders no one needs".
+    A guard whose own failure is invisible isn't belt and suspenders.
+
+    It is also not hypothetical. `_build_invocation` takes a `mode_spec`
+    override — `run_claude` threads one through, and `tend_mode_spec()`
+    builds one at runtime rather than reading it from the table — so a spec
+    that never appears in `MODE_SPECS` genuinely can reach this code.
+    """
+
+    def _spec(self, permission_mode):
+        return ModeSpec(tools=("Read", "Grep"), permission_mode=permission_mode)
+
+    def test_a_spec_configuring_bypass_permissions_is_refused(self):
+        with self.assertRaises(DispatchError) as ctx:
+            _build_invocation(
+                Mode.REPORT, "prompt", [], mode_spec=self._spec(FORBIDDEN_PERMISSION_MODE)
+            )
+        self.assertIn(FORBIDDEN_PERMISSION_MODE, str(ctx.exception))
+
+    def test_an_unrecognized_permission_mode_is_refused(self):
+        """Fails closed on anything not explicitly allowed, rather than
+        passing an unknown value through to `claude` and trusting it to
+        reject the mode itself."""
+        with self.assertRaises(DispatchError) as ctx:
+            _build_invocation(Mode.REPORT, "prompt", [], mode_spec=self._spec("yolo"))
+        self.assertIn("unrecognized permission mode", str(ctx.exception))
+        self.assertIn("yolo", str(ctx.exception))
+
+    def test_the_forbidden_mode_is_not_also_on_the_allow_list(self):
+        """The two checks are ordered — forbidden first, then allow-list.
+        If `bypassPermissions` were ever added to `ALLOWED_PERMISSION_MODES`
+        the ordering would still save us, but the two constants would be in
+        direct contradiction, which is worth failing on by itself."""
+        self.assertNotIn(FORBIDDEN_PERMISSION_MODE, ALLOWED_PERMISSION_MODES)
+
+    def test_a_valid_override_spec_still_builds(self):
+        """Guards against the guard being over-broad: a legitimate runtime
+        spec (the shape `tend_mode_spec()` produces) must pass through."""
+        argv = _build_invocation(Mode.TEND, "prompt", [], mode_spec=self._spec("default"))
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+        self.assertNotIn(FORBIDDEN_PERMISSION_MODE, argv)
 
 
 class TestModeSpecs(unittest.TestCase):
