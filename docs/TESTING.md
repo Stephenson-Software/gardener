@@ -33,7 +33,13 @@ same-second timestamp tie by row id); `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
-`status --repo` deliberately still accept one), prompt templating, the
+`status --repo` deliberately still accept one), the coupling between the
+parser and `docs/USAGE.md` (every long flag argparse actually *shows* must
+appear in the command reference — flags declared `help=argparse.SUPPRESS`,
+i.e. the path/state overrides and the `--random-seed` test hook, are
+exempt, and a second test asserts those stay suppressed so un-hiding one
+tightens the requirement instead of silently widening the exemption),
+prompt templating, the
 coupling between `Mode`'s values and `state.KNOWN_OUTCOMES` (a successful
 run records `mode.value` verbatim as its outcome, so a new `Mode` that
 isn't a known outcome would go uncounted in `repo_stats`),

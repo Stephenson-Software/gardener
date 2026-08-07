@@ -290,6 +290,65 @@ class TestDashboardArgParsing(unittest.TestCase):
         self.assertEqual(args.port, 9001)
 
 
+class TestUsageDocumentsEveryVisibleFlag(unittest.TestCase):
+    """`docs/USAGE.md` is the command reference, and CLAUDE.md's
+    documentation sources-of-truth table requires its flag claims to match
+    what `cli.py` actually accepts. Adding a flag and forgetting the doc is
+    invisible otherwise, so assert it here rather than relying on a manual
+    sweep to catch it later.
+
+    Scoped to flags argparse actually shows: several path/state overrides
+    (`--state-db`, `--garden-file`, `--cursor-file`, `--allowlist-path`,
+    `--state-dir`) and the `--random-seed` test hook are declared with
+    `help=argparse.SUPPRESS`, i.e. deliberately hidden from `--help`.
+    Documenting those in the user-facing reference would contradict that
+    decision, so suppression is treated as the signal for what belongs in
+    USAGE.md — the same switch, read by both.
+    """
+
+    USAGE_PATH = Path(__file__).resolve().parent.parent / "docs" / "USAGE.md"
+
+    def _visible_flags(self):
+        """Every long option across the parser tree, minus suppressed ones."""
+        found = {}
+
+        def walk(parser, command):
+            for action in parser._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    for name, subparser in action.choices.items():
+                        walk(subparser, f"{command} {name}".strip())
+                    continue
+                if action.help == argparse.SUPPRESS:
+                    continue
+                for opt in action.option_strings:
+                    if opt.startswith("--") and opt != "--help":
+                        found.setdefault(opt, command)
+
+        walk(build_parser(), "")
+        return found
+
+    def test_every_visible_long_flag_appears_in_usage_md(self):
+        usage = self.USAGE_PATH.read_text()
+        undocumented = {
+            flag: command for flag, command in self._visible_flags().items() if flag not in usage
+        }
+        self.assertEqual(
+            undocumented,
+            {},
+            f"flags accepted by the CLI but absent from {self.USAGE_PATH.name}: {undocumented}",
+        )
+
+    def test_suppressed_flags_are_actually_suppressed(self):
+        """Guards the exemption above: if one of these ever becomes visible,
+        it becomes user-facing and the test above must start requiring it.
+        Without this, un-suppressing a flag would silently widen the
+        exemption instead of tightening the requirement."""
+        visible = self._visible_flags()
+        for flag in ("--state-db", "--garden-file", "--cursor-file", "--allowlist-path", "--random-seed"):
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, visible)
+
+
 class TestLogNameWiring(unittest.TestCase):
     """main() only wraps a subcommand's run in a `run_log` when the parser
     set `log_name` for it — the dispatching commands (align/tend/overnight),
