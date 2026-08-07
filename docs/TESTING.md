@@ -14,7 +14,18 @@ Windows (PowerShell):
     $env:PYTHONPATH = "."; python -m unittest discover -s tests -v
 
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
-`subprocess.run` and never actually invokes `claude` — including the
+`subprocess.run` and never actually invokes `claude`. It covers both halves
+of the `bypassPermissions` posture, which are separate things: that no
+entry in `MODE_SPECS` configures a forbidden or unrecognized permission
+mode (the *table*), and that `_build_invocation` actually raises
+`DispatchError` when handed a `ModeSpec` that does (the *check*). The
+second is not implied by the first — delete the two `raise DispatchError`
+lines and every table-level test still passes, since they assert about the
+data the check defends rather than about the check firing. That check is
+reachable in practice, not just in theory: `_build_invocation` accepts a
+`mode_spec` override and `tend_mode_spec()` builds one at runtime rather
+than reading it from the table. A fourth test pins that a *valid* override
+still builds, so the guard can't be over-broad. Coverage also includes the
 device-wide failure classification and retry policy (each of
 `looks_like_auth_failure`/`looks_like_usage_limit`/`looks_like_network_failure`
 matched against the *verbatim* text of a real recorded failure rather than
