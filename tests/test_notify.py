@@ -84,6 +84,22 @@ class TestLoadWebhookUrl(unittest.TestCase):
                 self.assertIsNone(load_webhook_url(cfg))
 
 
+class TestLoadWebhookUrlUnreadableFile(unittest.TestCase):
+    def test_an_unreadable_config_file_returns_none_rather_than_raising(self):
+        """"Not configured" is a normal state; so is a notify.env that
+        exists but cannot be read (wrong owner, bad mode). Neither may
+        propagate to the run being reported on."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "notify.env"
+            cfg.write_text("DISCORD_WEBHOOK_URL=https://example.com/hook\n")
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DISCORD_WEBHOOK_URL", None)
+                with patch("gardener.notify._parse_env_style_file", side_effect=OSError("denied")):
+                    with redirect_stderr(io.StringIO()) as err:
+                        self.assertIsNone(load_webhook_url(cfg))
+                    self.assertIn("could not read", err.getvalue())
+
+
 class TestDiscordNotifier(unittest.TestCase):
     """`DiscordNotifier` resolves its device name at construction, and that
     resolution falls through to reading `$GARDENER_STATE_DIR/notify.env`.
@@ -228,6 +244,24 @@ class TestDiscordNotifier(unittest.TestCase):
                 notifier.notify("t", "m")
                 notifier.notify("t", "m")
         mock_load.assert_called_once()
+
+
+    @patch("gardener.notify.urllib.request.urlopen")
+    def test_a_4xx_response_is_logged_rather_than_raised(self, mock_urlopen):
+        """Distinct from `test_http_error_does_not_raise`, which covers
+        `urlopen` *raising* `HTTPError`. Discord can also return a 4xx as an
+        ordinary response (e.g. a malformed embed), which urllib hands back
+        rather than raising — that path must still report, and still not
+        break the run it is alerting about."""
+        mock_resp = MagicMock()
+        mock_resp.status = 400
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/x/y", device="box")
+        with redirect_stderr(io.StringIO()) as err:
+            notifier.notify("a title", "a message", Level.ERROR)  # must not raise
+        self.assertIn("returned HTTP 400", err.getvalue())
+        self.assertIn("a title", err.getvalue())
 
 
 class TestLoadDeviceName(unittest.TestCase):

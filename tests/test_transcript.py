@@ -404,5 +404,95 @@ class TestPrintTranscript(unittest.TestCase):
             self.assertIn("hi", buf.getvalue())
 
 
+class TestTranscriptEdgeCases(unittest.TestCase):
+    """The defensive branches in transcript parsing and printing. A
+    transcript is a live file another process is appending to, in a format
+    gardener does not own — so "a shape we did not expect" and "the file
+    moved under us" are ordinary conditions, not bugs, and must degrade
+    rather than raise."""
+
+    def test_a_transcript_deleted_mid_scan_is_skipped(self):
+        """`find_new_transcript` globs then stats. Claude Code is writing
+        into this directory concurrently, so a file can vanish between the
+        two — losing that candidate is correct, raising at the caller is
+        not."""
+        with TemporaryDirectory() as d:
+            project_dir = Path(d)
+            doomed = project_dir / "doomed.jsonl"
+            survivor = project_dir / "survivor.jsonl"
+            for f in (doomed, survivor):
+                f.write_text("{}\n")
+
+            real_stat = Path.stat
+
+            def stat_but_doomed_vanished(self, *args, **kwargs):
+                if self.name == doomed.name:
+                    raise OSError(2, "No such file or directory")
+                return real_stat(self, *args, **kwargs)
+
+            with patch.object(Path, "stat", stat_but_doomed_vanished):
+                found = transcript.find_new_transcript(project_dir, after=0.0)
+            self.assertEqual(found, survivor)
+
+    def test_message_content_of_an_unexpected_type_is_skipped(self):
+        """`content` is normally a list, sometimes a bare string (handled by
+        promotion). Anything else — a dict, a number from a future format —
+        must yield None rather than being iterated."""
+        line = json.dumps({"message": {"role": "assistant", "content": {"unexpected": "dict"}}})
+        self.assertIsNone(transcript.format_transcript_line(line))
+
+    def test_non_dict_blocks_inside_content_are_ignored_not_fatal(self):
+        """A malformed block alongside good ones must not lose the good
+        ones."""
+        line = json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": ["a bare string block", {"type": "text", "text": "kept"}],
+                }
+            }
+        )
+        formatted = transcript.format_transcript_line(line)
+        self.assertIsNotNone(formatted)
+        self.assertIn("kept", formatted)
+
+    def test_tool_result_content_of_an_unexpected_type_is_stringified(self):
+        """`_tool_result_text`'s last resort: neither a string nor a list.
+        Showing `str(...)` beats showing nothing, since this is a debugging
+        view."""
+        self.assertEqual(transcript._tool_result_text(42), "42")
+        self.assertEqual(transcript._tool_result_text(None), "None")
+
+    def test_tool_result_list_content_keeps_only_text_blocks(self):
+        self.assertEqual(
+            transcript._tool_result_text(
+                [{"type": "text", "text": "kept"}, {"type": "image", "source": "..."}]
+            ),
+            "kept",
+        )
+
+    def test_a_closed_pipe_exits_zero_rather_than_traceback(self):
+        """`gardener tail-transcript <path> | head` closes the pipe early.
+        That is a normal way to use it, so it must exit 0 — not surface a
+        BrokenPipeError the user did nothing wrong to cause."""
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text(
+                json.dumps({"message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}) + "\n"
+            )
+            with patch.object(transcript, "iter_pretty_lines", side_effect=BrokenPipeError):
+                self.assertEqual(transcript.print_transcript(path, stream=io.StringIO()), 0)
+
+    def test_ctrl_c_out_of_a_follow_session_exits_zero(self):
+        """Ctrl-C is the documented way to stop `-f`."""
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text("{}\n")
+            with patch.object(transcript, "iter_pretty_lines", side_effect=KeyboardInterrupt):
+                self.assertEqual(
+                    transcript.print_transcript(path, follow=True, stream=io.StringIO()), 0
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

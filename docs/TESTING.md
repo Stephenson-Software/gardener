@@ -149,7 +149,20 @@ module docstring, not invented ones), the transcript-file-discovery polling
 loop (real files in a tmp dir, but `time_fn`/`sleep_fn` always injected so
 nothing ever sleeps for a real second), and the pretty-printer's
 line-parsing logic (synthetic JSONL fixtures covering `tool_use`/`text`/
-`tool_result`, malformed JSON, and blank lines); `tests/test_dashboard.py`
+`tool_result`, malformed JSON, and blank lines). It also covers the
+degrade-don't-raise paths, which matter because a transcript is a live file
+another process is appending to in a format gardener doesn't own: a
+`*.jsonl` deleted between `find_new_transcript`'s glob and its stat is
+skipped rather than fatal, a `content` value that is neither a list nor a
+string yields `None` instead of being iterated, a malformed block alongside
+good ones doesn't lose the good ones, `_tool_result_text` falls back to
+`str(...)` for a shape that is neither, and `print_transcript` exits `0` on
+both `BrokenPipeError` (`tail-transcript ... | head`) and
+`KeyboardInterrupt` (Ctrl-C out of `-f`) rather than surfacing a traceback
+for a normal way of using it. `tests/test_notify.py` likewise covers a
+Discord 4xx returned as an ordinary response — distinct from `urlopen`
+raising `HTTPError`, and reached by a different branch — and a `notify.env`
+that exists but can't be read; `tests/test_dashboard.py`
 covers the dashboard's pure log-parsing and status-assembly functions —
 `find_active_log`, `find_active_logs` (the recency window and its exact
 boundary under an injected clock, its newest-log fallback, and that the
