@@ -23,6 +23,13 @@ build/test failures trip none of them, that the retry stops as soon as auth
 recovers and gives up once the backoff is exhausted, and that a usage limit
 is flagged blocked but never retried), always with `sleep_fn` injected so no
 test actually sleeps; `tests/test_state.py`
+also pins the `GARDENER_STATE_DIR` contract across every module that
+resolves it — `state.py`, `garden.py`, `merge_allowlist.py`,
+`overnight.py`, `notify.py`, `run_log.py`, and `repo_lock.py` each carry
+their own private copy of that resolution, so one test asserts all eight
+helpers land under the override and another that they all fall back to
+`~/.local/state/gardener`, filenames asserted verbatim so a rename that
+would orphan a deployed box's on-disk state is caught too. It otherwise
 uses a real sqlite3 file in a tmp dir (including `repo_stats`' all-time
 per-repo aggregates — that every value in `state.KNOWN_OUTCOMES` is
 classified as either a success or an error rather than falling silently

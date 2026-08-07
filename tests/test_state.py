@@ -1,10 +1,12 @@
 """Real sqlite3 against a tmp db file — no mocking the thing this module
 exists to wrap."""
+import os
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
-from gardener import state
+from gardener import garden, merge_allowlist, notify, overnight, repo_lock, run_log, state
 
 
 class TestState(unittest.TestCase):
@@ -201,6 +203,68 @@ class TestRepoStats(unittest.TestCase):
         stats = state.repo_stats(db_path=self.db_path)["owner/a"]
         self.assertEqual((stats.successes, stats.errors), (1, 0))
         self.assertEqual(stats.last_success, "2026-07-01T00:00:00+00:00")
+
+
+class TestStateDirIsHonouredEverywhere(unittest.TestCase):
+    """Eight helpers across seven modules each resolve `GARDENER_STATE_DIR`
+    with their own private copy of the same three lines — `state.py`,
+    `garden.py`, `merge_allowlist.py`, `overnight.py`, `notify.py`,
+    `run_log.py`, and `repo_lock.py`. Nothing makes them agree; they agree
+    only because each was written the same way.
+
+    That matters because they are two halves of the same conversations: the
+    dashboard reads the logs dir `run_log.py` writes, `cmd_overnight` reads
+    the cursor beside the db `state.py` records into, and `repo_lock.py`'s
+    exclusion is only exclusion if every process computes the same lock
+    path. One module drifting doesn't fail loudly — it silently reads or
+    writes somewhere else. Assert the agreement rather than trusting seven
+    copies to stay in sync.
+
+    Filenames are asserted verbatim, not derived, so a rename is also
+    caught: these paths are on-disk state a deployed box already has, and
+    changing one silently orphans real data.
+    """
+
+    #: (label, callable taking no args, expected path relative to the state dir)
+    def _cases(self):
+        return [
+            ("state.default_state_dir", state.default_state_dir, ""),
+            ("state.default_db_path", state.default_db_path, "gardener.sqlite3"),
+            ("garden.default_garden_path", garden.default_garden_path, "garden.json"),
+            (
+                "merge_allowlist.default_allowlist_path",
+                merge_allowlist.default_allowlist_path,
+                "merge_allowlist.json",
+            ),
+            ("notify.default_webhook_config_path", notify.default_webhook_config_path, "notify.env"),
+            ("overnight.default_cursor_path", overnight.default_cursor_path, "overnight_cursor.json"),
+            ("run_log.default_logs_dir", run_log.default_logs_dir, "logs"),
+            ("repo_lock.lock_file_path", lambda: repo_lock.lock_file_path("owner/repo"), "locks/owner__repo.lock"),
+        ]
+
+    def test_every_helper_honours_the_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            with patch.dict("os.environ", {"GARDENER_STATE_DIR": str(base)}, clear=False):
+                for label, fn, relative in self._cases():
+                    with self.subTest(helper=label):
+                        expected = base / relative if relative else base
+                        self.assertEqual(fn(), expected)
+
+    def test_every_helper_falls_back_to_the_same_home_dir(self):
+        """With no override set, all eight must land under
+        `~/.local/state/gardener` — the path `README.md` and `docs/USAGE.md`
+        both tell an operator to look in."""
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = Path(td)
+            expected_base = fake_home / ".local" / "state" / "gardener"
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_STATE_DIR", None)
+                with patch.object(Path, "home", classmethod(lambda cls: fake_home)):
+                    for label, fn, relative in self._cases():
+                        with self.subTest(helper=label):
+                            expected = expected_base / relative if relative else expected_base
+                            self.assertEqual(fn(), expected)
 
 
 if __name__ == "__main__":
