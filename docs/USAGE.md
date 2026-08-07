@@ -6,8 +6,8 @@ gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
-gardener status [--repo <owner/repo>]
-gardener tail-transcript <path> [-f]
+gardener status [--repo <owner/repo>] [--limit N]
+gardener tail-transcript <path> [-f | --follow]
 gardener dashboard [--port N]
 gardener update [--check]
 ```
@@ -234,6 +234,13 @@ available (and, if so, the old/new commit) without applying it.
   `TEND_DEFAULT_TIMEOUT_SECONDS` for the full reasoning. The internal
   `create-dev-loop` dispatch `tend` runs when a repo has no skill yet has
   its own fixed 900s/15min ceiling, not exposed as a flag.
+- `--limit <n>` (`status` only) — how many most-recent runs to show,
+  newest first. Defaults to `20`; pass a larger number to page further
+  back through the run history, or combine with `--repo` to scope the
+  window to one repo.
+- `-f` / `--follow` (`tail-transcript` only) — keep reading as the file
+  grows, like `tail -f`, instead of exiting at EOF. Useful against the
+  transcript path a dispatch logs to stderr while that run is still going.
 - `--conventions-repo <git-url>` (`align` only) — the conventions repo to
   audit against, overriding `$GARDENER_CONVENTIONS_URL`. There is no
   built-in default; with neither set, `align` exits 2 with setup
