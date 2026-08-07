@@ -187,8 +187,18 @@ proving the OS-level exclusion actually holds; `tests/test_selfupdate.py`
 covers `self_update`'s every branch (up to date, a real fast-forward,
 skipped for a dirty tree/detached HEAD/diverged branch, `--check`'s
 update-available report, and a `git` failure/timeout/`OSError` all coming
-back as `ERROR` rather than raising) entirely through the injectable
-`run_fn` — never a real `subprocess.run`, `git`, or network call — plus
+back as `ERROR` rather than raising). The never-raises guarantee is
+asserted against *every* call site rather than one: the suite fails each of
+the eight `git` invocations `self_update` makes in turn — once with a
+`TimeoutExpired`, once with an `OSError` — and requires an `UpdateResult`
+back each time, with a third test asserting the happy path really does
+reach all eight so that list can't silently go stale. The two non-raising
+failures that aren't skips (`git status` exiting non-zero, which is not the
+same as a clean tree despite both printing nothing, and an unresolvable
+`origin/<branch>` after a successful fetch) are covered too. All of it runs
+through the injectable `run_fn` — never a real `subprocess.run`, `git`, or
+network call, which is why `_default_run` itself is the module's one
+deliberately uncovered line — plus
 `find_repo_root`'s upward filesystem walk against a real (but throwaway,
 tmp-dir) directory tree; `tests/test_cli.py` covers `cmd_update` (with
 `selfupdate.self_update` mocked) and `cmd_overnight`'s self-update wiring
