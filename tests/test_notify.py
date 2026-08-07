@@ -85,6 +85,43 @@ class TestLoadWebhookUrl(unittest.TestCase):
 
 
 class TestDiscordNotifier(unittest.TestCase):
+    """`DiscordNotifier` resolves its device name at construction, and that
+    resolution falls through to reading `$GARDENER_STATE_DIR/notify.env`.
+    Without the isolation below, every test in this class would read the
+    operator's real notify.env on a machine where gardener is deployed —
+    `TestNullNotifier`'s and `TestDefaultNotifier`'s siblings already scope
+    `GARDENER_STATE_DIR` to a tmp dir for the same reason."""
+
+    def setUp(self):
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        self.state_dir = Path(state_dir.name)
+
+        env = patch.dict("os.environ", {"GARDENER_STATE_DIR": str(self.state_dir)}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        # Popped inside the patch.dict above, so it is restored on stop.
+        os.environ.pop("GARDENER_DEVICE_NAME", None)
+
+    @patch("gardener.notify.urllib.request.urlopen")
+    def test_device_is_read_from_the_scoped_state_dir_not_the_real_one(self, mock_urlopen):
+        """Guards the isolation in setUp above. Written so that it fails if
+        `GARDENER_STATE_DIR` is not actually being redirected: the expected
+        value exists only in this test's tmp dir, so a notifier that reads
+        the real state dir cannot produce it."""
+        (self.state_dir / "notify.env").write_text("GARDENER_DEVICE_NAME=scoped-tmp-device\n")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/x/y")
+        with redirect_stderr(io.StringIO()):
+            notifier.notify("t", "m")
+
+        embed = json.loads(mock_urlopen.call_args[0][0].data)["embeds"][0]
+        self.assertEqual(embed["footer"], {"text": "scoped-tmp-device"})
+
     def test_not_configured_is_a_silent_no_op(self):
         with tempfile.TemporaryDirectory() as td:
             with patch.dict("os.environ", {"GARDENER_STATE_DIR": td}, clear=False):
