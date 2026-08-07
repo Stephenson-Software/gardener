@@ -106,7 +106,11 @@ the blank-value fall-through at each level and the never-raises
 degradations for an unresolvable hostname and an unreadable config file;
 two further tests assert that every `Level` carries the device footer
 without disturbing the embed's existing fields, and that the device is
-resolved once per notifier rather than on every alert; `tests/test_garden.py` and
+resolved once per notifier rather than on every alert. `TestDiscordNotifier`
+scopes `GARDENER_STATE_DIR` to a tmp dir for every test in the class,
+since constructing a notifier resolves a device name and would otherwise
+read the operator's real `notify.env`; one test guards that redirection by
+asserting a device name that exists only in the tmp dir; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
 with real files in a tmp dir, including `order_by_issue_count` (pure sort
