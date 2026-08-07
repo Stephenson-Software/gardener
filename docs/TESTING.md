@@ -46,6 +46,16 @@ appear in the command reference — flags declared `help=argparse.SUPPRESS`,
 i.e. the path/state overrides and the `--random-seed` test hook, are
 exempt, and a second test asserts those stay suppressed so un-hiding one
 tightens the requirement instead of silently widening the exemption),
+`clone_or_refresh_target_repo`'s pre-flight guards (a malformed `--repo`
+rejected before any subprocess runs, a missing `gh` reported as such rather
+than as a confusing subprocess failure, a failed clone surfacing `gh`'s
+stderr, and — the one that matters most — a cache directory whose `origin`
+doesn't match the requested repo being *refused* rather than re-pointed, so
+a dispatch can't be aimed at the wrong working tree under the right repo's
+name), `_default_branch_name`'s success and both failure shapes (a nonzero
+exit, and `gh` exiting 0 having printed nothing — whose wrapper wording is
+pinned here because `dispatch.py`'s device-global classifier deliberately
+does *not* match it), `current_branch`'s `main` fallback on empty output,
 prompt templating, the
 coupling between `Mode`'s values and `state.KNOWN_OUTCOMES` (a successful
 run records `mode.value` verbatim as its outcome, so a new `Mode` that
