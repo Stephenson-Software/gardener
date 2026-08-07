@@ -99,7 +99,14 @@ with `cmd_align`/`cmd_status` and `run_log.tee_stderr` mocked so no test
 opens a real log file;
 `tests/test_notify.py` mocks `urllib.request.urlopen` so `DiscordNotifier`
 is fully covered — success, a failed POST, and "no webhook configured" —
-without ever making a real HTTP call; `tests/test_garden.py` and
+without ever making a real HTTP call, and covers `load_device_name`'s
+precedence (env var, then `notify.env`, then `socket.gethostname()`, then
+the `unknown-device` sentinel) with `socket.gethostname` patched, including
+the blank-value fall-through at each level and the never-raises
+degradations for an unresolvable hostname and an unreadable config file;
+two further tests assert that every `Level` carries the device footer
+without disturbing the embed's existing fields, and that the device is
+resolved once per notifier rather than on every alert; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
 with real files in a tmp dir, including `order_by_issue_count` (pure sort
@@ -240,5 +247,9 @@ DiscordNotifier().notify('gardener: manual test', 'if you see this in Discord, a
 ```
 
 and confirm the embed shows up in the configured channel with a green
-(`3066993`) color bar. Use a webhook pointed at a private/test channel
-for this, not a shared production alerting channel.
+(`3066993`) color bar, and that its footer names the device it was sent
+from (see [Device provenance](ALERTING.md#device-provenance) — the footer
+is the one part of the embed whose value depends on the box you ran this
+on, so it's worth reading rather than glancing past). Use a webhook
+pointed at a private/test channel for this, not a shared production
+alerting channel.

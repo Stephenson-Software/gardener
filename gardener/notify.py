@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -90,6 +91,14 @@ DISCORD_COLORS: dict[Level, int] = {
 }
 
 DISCORD_WEBHOOK_ENV_VAR = "GARDENER_DISCORD_WEBHOOK_URL"
+DEVICE_NAME_ENV_VAR = "GARDENER_DEVICE_NAME"
+
+# What `load_device_name` returns when it has nothing better. Deliberately
+# a real string rather than None: every alert carries a footer, so an
+# unresolvable hostname shows up as an explicit "we don't know" rather than
+# as a silently absent footer that looks identical to an older gardener
+# that never sent one.
+UNKNOWN_DEVICE_NAME = "unknown-device"
 
 
 def _default_state_dir() -> Path:
@@ -143,6 +152,45 @@ def load_webhook_url(config_path: Optional[Path] = None) -> Optional[str]:
         return None
 
 
+def load_device_name(config_path: Optional[Path] = None) -> str:
+    """Which machine this alert came from.
+
+    Same two-source precedence as `load_webhook_url` above, for the same
+    reason — `GARDENER_DEVICE_NAME` env var first, then
+    `GARDENER_DEVICE_NAME=...` in the notify.env file, since the contexts
+    that most need device provenance (cron, systemd, a `devsrv` session)
+    are exactly the ones where exporting an env var per invocation isn't
+    practical.
+
+    Falls back to `socket.gethostname()`. The override exists because that
+    fallback is frequently useless: a UserLand session's hostname is not a
+    name any operator recognizes, which is the case that motivated this.
+
+    Never raises and never returns an empty string — this is called on the
+    alerting path, which must not be able to break the run it reports on
+    (see `Notifier`). A blank value at any level falls through to the next.
+    """
+    env_val = os.environ.get(DEVICE_NAME_ENV_VAR)
+    if env_val and env_val.strip():
+        return env_val.strip()
+
+    path = config_path or default_webhook_config_path()
+    if path.is_file():
+        try:
+            file_val = _parse_env_style_file(path).get(DEVICE_NAME_ENV_VAR)
+            if file_val and file_val.strip():
+                return file_val.strip()
+        except OSError as e:
+            print(f"notify: could not read {path}: {e}", file=sys.stderr)
+
+    try:
+        hostname = socket.gethostname()
+    except OSError as e:
+        print(f"notify: could not resolve hostname: {e}", file=sys.stderr)
+        return UNKNOWN_DEVICE_NAME
+    return hostname.strip() or UNKNOWN_DEVICE_NAME
+
+
 class DiscordNotifier(Notifier):
     """Posts a Discord embed via a webhook URL. stdlib `urllib.request`
     only — no `requests` dependency, matching gardener's stdlib-only
@@ -153,9 +201,19 @@ class DiscordNotifier(Notifier):
     base class docstring for why that contract matters here specifically:
     an alert about a gardener run must never be able to break that run."""
 
-    def __init__(self, webhook_url: Optional[str] = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        webhook_url: Optional[str] = None,
+        timeout: float = 10.0,
+        device: Optional[str] = None,
+    ):
         self._webhook_url = webhook_url if webhook_url is not None else load_webhook_url()
         self._timeout = timeout
+        # Resolved once per notifier rather than per alert: the answer
+        # cannot change within a process, and re-reading notify.env on
+        # every notification would put a filesystem read on the alerting
+        # path of a loop that alerts once per repo.
+        self._device = device if device is not None else load_device_name()
 
     @property
     def configured(self) -> bool:
@@ -174,6 +232,15 @@ class DiscordNotifier(Notifier):
                         "title": title,
                         "description": message,
                         "color": DISCORD_COLORS.get(level, DISCORD_COLORS[Level.INFO]),
+                        # Provenance goes in the footer, not the title:
+                        # titles are already long and are what the operator
+                        # scans, while "which box was this" is the thing
+                        # you only look for once an alert has your
+                        # attention. Applied here, at presentation time,
+                        # rather than threaded through each call site — so
+                        # every current *and future* alert carries it
+                        # without anyone having to remember.
+                        "footer": {"text": self._device},
                     }
                 ],
             }

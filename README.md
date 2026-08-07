@@ -150,6 +150,18 @@ clean no-op — `gardener align` still works exactly the same, nothing
 prints or fails because of it. See [docs/ALERTING.md](docs/ALERTING.md)
 for how this is implemented.
 
+Every alert carries the name of the device that sent it in the embed's
+footer, so two machines tending overlapping gardens into the same channel
+stay distinguishable. It defaults to the host's `socket.gethostname()`,
+which is often not a name anyone recognizes (a UserLand session's
+hostname, for instance) — override it the same two ways:
+
+```bash
+export GARDENER_DEVICE_NAME="pixel-userland"
+# or, in the same notify.env file as above:
+echo 'GARDENER_DEVICE_NAME=pixel-userland' >> ~/.local/state/gardener/notify.env
+```
+
 ## Usage
 
 ```
