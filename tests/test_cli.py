@@ -26,7 +26,9 @@ from gardener.cli import (
     REPO_RE,
     TendResult,
     clone_or_refresh_target_repo,
+    current_branch,
     _blocking_reason,
+    _default_branch_name,
     _first_blocked_index,
     _notify_run,
     _record_and_notify,
@@ -2353,6 +2355,112 @@ class TestCmdUpdate(unittest.TestCase):
             with patch("sys.stdout", new_callable=io.StringIO):
                 exit_code = cmd_update(argparse.Namespace(check=False))
             self.assertEqual(exit_code, 0, f"{status} should not be a CLI failure")
+
+
+class TestCloneOrRefreshGuards(unittest.TestCase):
+    """The checks `clone_or_refresh_target_repo` makes *before* it will
+    touch a cache clone. Each one is the last thing standing between a
+    dispatch and the wrong working tree, and none were covered — `_run` is
+    mocked throughout, so no real `git`/`gh` process runs."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.cache_dir = Path(self._tmpdir.name)
+        self.dest = self.cache_dir / "owner__repo"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_malformed_repo_is_rejected_before_anything_runs(self):
+        with patch("gardener.cli._run") as mock_run:
+            with self.assertRaises(ValueError) as ctx:
+                clone_or_refresh_target_repo("not-a-repo", self.cache_dir)
+        self.assertIn("owner/name", str(ctx.exception))
+        mock_run.assert_not_called()
+
+    def test_missing_gh_is_a_clear_error_not_a_confusing_subprocess_failure(self):
+        with patch("gardener.cli.shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                clone_or_refresh_target_repo("owner/repo", self.cache_dir)
+        self.assertIn("`gh` not found on PATH", str(ctx.exception))
+
+    def test_a_cache_dir_whose_origin_does_not_match_is_refused(self):
+        """The important one. This directory is named after the repo, so a
+        stale or hand-created clone pointing somewhere else would otherwise
+        be dispatched against under the requested repo's name — Claude
+        reading and potentially writing the wrong project. Refusing beats
+        re-pointing: silently fixing it would hide however it got there."""
+        (self.dest / ".git").mkdir(parents=True)
+
+        def fake(argv, cwd=None, timeout=120):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="https://github.com/someone/else\n", stderr=""
+            )
+
+        with patch("gardener.cli._run", side_effect=fake):
+            with patch("gardener.cli.shutil.which", return_value="/usr/bin/gh"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    clone_or_refresh_target_repo("owner/repo", self.cache_dir, refresh=True)
+        message = str(ctx.exception)
+        self.assertIn("refusing to reuse it", message)
+        self.assertIn("owner/repo", message)
+
+    def test_a_failed_clone_surfaces_ghs_stderr(self):
+        def fake(argv, cwd=None, timeout=120):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="repository not found\n"
+            )
+
+        with patch("gardener.cli._run", side_effect=fake):
+            with patch("gardener.cli.shutil.which", return_value="/usr/bin/gh"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    clone_or_refresh_target_repo("owner/repo", self.cache_dir)
+        self.assertIn("repository not found", str(ctx.exception))
+
+
+class TestDefaultBranchName(unittest.TestCase):
+    """`_default_branch_name`'s failure wording is load-bearing beyond this
+    function: `dispatch.py`'s device-global failure classifier deliberately
+    does *not* match this wrapper sentence, because it is raised both for a
+    transient GitHub outage and for a permanently deleted/renamed repo (see
+    `NETWORK_FAILURE_MARKERS`' comment). Pin the shape so that reasoning
+    stays checkable."""
+
+    def _result(self, returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_returns_the_branch_name_stripped(self):
+        with patch("gardener.cli._run", return_value=self._result(stdout="develop\n")):
+            self.assertEqual(_default_branch_name("owner/repo"), "develop")
+
+    def test_nonzero_exit_raises_with_the_repo_and_stderr(self):
+        with patch("gardener.cli._run", return_value=self._result(returncode=1, stderr="  boom  ")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _default_branch_name("owner/repo")
+        message = str(ctx.exception)
+        self.assertIn("could not determine default branch for owner/repo", message)
+        self.assertIn("boom", message)
+
+    def test_empty_output_with_a_zero_exit_still_raises(self):
+        """`gh` can exit 0 having printed nothing. Returning "" here would
+        produce `git checkout ""` further down rather than a clear error."""
+        with patch("gardener.cli._run", return_value=self._result(returncode=0, stdout="  \n")):
+            with self.assertRaises(RuntimeError):
+                _default_branch_name("owner/repo")
+
+
+class TestCurrentBranch(unittest.TestCase):
+    def test_returns_the_checked_out_branch(self):
+        result = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="feature/x\n", stderr="")
+        with patch("gardener.cli._run", return_value=result):
+            self.assertEqual(current_branch(Path("/tmp/anything")), "feature/x")
+
+    def test_empty_output_falls_back_to_main(self):
+        """A detached HEAD or a failed `rev-parse` yields nothing; the
+        fallback keeps callers from building a branch-less command."""
+        result = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="\n", stderr="")
+        with patch("gardener.cli._run", return_value=result):
+            self.assertEqual(current_branch(Path("/tmp/anything")), "main")
 
 
 class TestCloneOrRefreshClean(unittest.TestCase):
