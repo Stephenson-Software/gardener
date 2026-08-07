@@ -353,6 +353,16 @@ look at what it *doesn't* catch, since a device-wide outage is recognisable
 in that history without any classifier at all: several repos failing within
 the same second or two, each in seconds and at $0.00.
 
+One caveat on every count on this page, including the 2026-08-04 row and the
+"24 recorded failures" below: `state.py`'s sqlite db lives under
+`GARDENER_STATE_DIR` on whichever machine ran the batch, and is never synced
+between devices. Each figure therefore describes *one* device's history, not
+a fleet-wide total, and replaying a different box's db will legitimately
+produce different numbers — the 2026-08-04 pair, for instance, appears in no
+run history but the device that hit it. Quote which device a replay figure
+came from when adding a row here, and read a mismatch as the dbs being
+separate rather than as one of them being wrong.
+
 Also worth stating explicitly, because it is the tempting wrong fix: all 24
 recorded failures of this class share the wrapper sentence `could not
 determine default branch for <repo>`, and that sentence must **not** be a
