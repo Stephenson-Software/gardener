@@ -28,6 +28,48 @@ its own presentation.
   concrete notifiers, for anyone who wants to register more than one
   destination later without touching any call site.
 
+## Device provenance
+
+An alert says what happened; without provenance it never says *where*.
+That is fine with one deployment and stops being fine the moment the same
+garden is tended from more than one device — which
+[Overnight](OVERNIGHT.md) documents wiring recipes for. It matters most
+for the alerts that are about the *box itself* rather than about a repo: a
+"self-update SKIPPED — tending with stale code" warning is only actionable
+if you know which checkout to go fix.
+
+`load_device_name()` resolves it with the same precedence
+`load_webhook_url()` uses, and for the same reason — the contexts that
+most need provenance (cron, systemd, `devsrv`) are the ones where
+exporting an env var per invocation isn't practical:
+
+1. `GARDENER_DEVICE_NAME` env var
+2. `GARDENER_DEVICE_NAME=...` in `notify.env`
+3. `socket.gethostname()`
+4. `unknown-device` (`UNKNOWN_DEVICE_NAME`) if the hostname is
+   unresolvable or blank
+
+It never raises and never returns an empty string — it runs on the
+alerting path, which must not break the run it reports on. A blank value
+at any level falls through to the next.
+
+`DiscordNotifier` renders it as the embed's **footer**, and resolves it
+**once per notifier** rather than per alert (step 2 is a filesystem read,
+and `overnight` alerts once per repo). The footer was chosen over the
+title because titles are already long and are what the operator scans;
+"which box was this" is what you look for only once an alert has your
+attention.
+
+The placement is the load-bearing part: provenance is applied in
+`notify.py` at *presentation* time, not threaded through each call site,
+so every current and future alert carries it by construction rather than
+by everyone remembering to. This is the same `notify.py` owns-*how*,
+callers own-*when/why* split described above — the device is a property of
+the sender, not of any particular outcome, so it belongs on the
+presentation side. `CompositeNotifier` needs no change for this: it only
+fans out `(title, message, level)`, and each concrete notifier renders its
+own provenance in whatever form suits it.
+
 `cli.py` wires this in with `_notify_run(run)`, called via a small
 `_record_and_notify(run, db_path)` wrapper right after each place
 `state.record_run(...)` is called in `cmd_align`/`cmd_tend`. Both the

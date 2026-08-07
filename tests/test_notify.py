@@ -13,11 +13,13 @@ from unittest.mock import MagicMock, patch
 
 from gardener.notify import (
     DISCORD_COLORS,
+    UNKNOWN_DEVICE_NAME,
     CompositeNotifier,
     DiscordNotifier,
     Level,
     NullNotifier,
     default_notifier,
+    load_device_name,
     load_webhook_url,
 )
 
@@ -149,6 +151,114 @@ class TestDiscordNotifier(unittest.TestCase):
 
     def test_colors_are_distinct_per_level(self):
         self.assertEqual(len(set(DISCORD_COLORS.values())), len(DISCORD_COLORS))
+
+    @patch("gardener.notify.urllib.request.urlopen")
+    def test_every_level_carries_the_device_footer(self, mock_urlopen):
+        """Provenance is applied at presentation time, so it must appear on
+        every alert regardless of severity — including any future alert,
+        which is the whole point of putting it here rather than at the call
+        sites."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        for level in Level:
+            with self.subTest(level=level):
+                notifier = DiscordNotifier(
+                    webhook_url="https://discord.com/api/webhooks/x/y",
+                    device="test-box",
+                )
+                with redirect_stderr(io.StringIO()):
+                    notifier.notify("a title", "a message", level)
+                embed = json.loads(mock_urlopen.call_args[0][0].data)["embeds"][0]
+                self.assertEqual(embed["footer"], {"text": "test-box"})
+                # The footer must not have crowded out what was already there.
+                self.assertEqual(embed["title"], "a title")
+                self.assertEqual(embed["color"], DISCORD_COLORS[level])
+
+    @patch("gardener.notify.urllib.request.urlopen")
+    def test_device_is_resolved_once_not_per_alert(self, mock_urlopen):
+        """`load_device_name` reads a file; a loop that alerts once per repo
+        must not re-read it on every notification."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        with patch("gardener.notify.load_device_name", return_value="box") as mock_load:
+            notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/x/y")
+            with redirect_stderr(io.StringIO()):
+                notifier.notify("t", "m")
+                notifier.notify("t", "m")
+                notifier.notify("t", "m")
+        mock_load.assert_called_once()
+
+
+class TestLoadDeviceName(unittest.TestCase):
+    """Mirrors TestLoadWebhookUrl's precedence cases — the two resolvers
+    deliberately share the same env-var-then-notify.env shape."""
+
+    def test_env_var_wins(self):
+        with patch.dict("os.environ", {"GARDENER_DEVICE_NAME": "phone"}):
+            self.assertEqual(load_device_name(), "phone")
+
+    def test_env_var_is_stripped(self):
+        with patch.dict("os.environ", {"GARDENER_DEVICE_NAME": "  phone  "}):
+            self.assertEqual(load_device_name(), "phone")
+
+    def test_blank_env_var_falls_through_to_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "notify.env"
+            cfg.write_text("GARDENER_DEVICE_NAME=from-file\n")
+            with patch.dict("os.environ", {"GARDENER_DEVICE_NAME": "   "}):
+                self.assertEqual(load_device_name(cfg), "from-file")
+
+    def test_reads_from_config_file_when_no_env_var(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "notify.env"
+            cfg.write_text("DISCORD_WEBHOOK_URL=https://example.com/hook\nGARDENER_DEVICE_NAME=wsl-box\n")
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DEVICE_NAME", None)
+                self.assertEqual(load_device_name(cfg), "wsl-box")
+
+    def test_falls_back_to_hostname_when_nothing_configured(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "notify.env"
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DEVICE_NAME", None)
+                with patch("gardener.notify.socket.gethostname", return_value="real-hostname"):
+                    self.assertEqual(load_device_name(missing), "real-hostname")
+
+    def test_blank_hostname_degrades_to_the_unknown_sentinel(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "notify.env"
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DEVICE_NAME", None)
+                with patch("gardener.notify.socket.gethostname", return_value="  "):
+                    self.assertEqual(load_device_name(missing), UNKNOWN_DEVICE_NAME)
+
+    def test_unresolvable_hostname_does_not_raise(self):
+        """This runs on the alerting path, which must never break the run
+        it is reporting on."""
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "notify.env"
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DEVICE_NAME", None)
+                with patch("gardener.notify.socket.gethostname", side_effect=OSError("no hostname")):
+                    with redirect_stderr(io.StringIO()) as err:
+                        self.assertEqual(load_device_name(missing), UNKNOWN_DEVICE_NAME)
+                    self.assertIn("could not resolve hostname", err.getvalue())
+
+    def test_unreadable_config_file_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "notify.env"
+            cfg.write_text("GARDENER_DEVICE_NAME=unreadable\n")
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_DEVICE_NAME", None)
+                with patch("gardener.notify._parse_env_style_file", side_effect=OSError("denied")):
+                    with patch("gardener.notify.socket.gethostname", return_value="fallback-host"):
+                        with redirect_stderr(io.StringIO()) as err:
+                            self.assertEqual(load_device_name(cfg), "fallback-host")
+                        self.assertIn("could not read", err.getvalue())
 
 
 class TestDefaultNotifier(unittest.TestCase):
