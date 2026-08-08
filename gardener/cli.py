@@ -350,6 +350,96 @@ def extract_gap_summary(result_text: str) -> str:
     return (stripped[:200] + "…") if len(stripped) > 200 else stripped
 
 
+# How many distinct denials the two dispatch paths print before collapsing
+# the rest into a count. A dispatched run that is structurally unable to do
+# its job can produce dozens of near-identical denials; the point of the
+# printout is to let an operator recognise *which* actions were blocked at a
+# glance, and the first few distinct ones already do that.
+DENIAL_PRINT_LIMIT = 10
+# Per-line cap on the rendered detail, for the same reason — a denied Bash
+# call can carry a heredoc-sized command.
+DENIAL_DETAIL_MAX_CHARS = 160
+# Keys tried, in order, when rendering a denial's `tool_input`. These are
+# the argument names gardener's own allowed-tool patterns actually scope on
+# (`Bash(git *)`, `Read`/`Edit`/`Write` paths), so hitting one produces the
+# part of the call an operator needs to see. Anything else falls back to the
+# whole input — the structure comes straight from `claude`'s JSON output,
+# which gardener does not own, so nothing here may assume a shape.
+DENIAL_DETAIL_KEYS = ("command", "file_path", "path", "pattern", "url")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _denial_detail(tool_input: object) -> str:
+    """The most informative single string available for one denial's
+    `tool_input`, or "" when there is nothing worth printing."""
+    if isinstance(tool_input, dict):
+        for key in DENIAL_DETAIL_KEYS:
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        if not tool_input:
+            return ""
+        try:
+            return json.dumps(tool_input, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(tool_input)
+    if tool_input is None:
+        return ""
+    return str(tool_input)
+
+
+def format_denial(denial: object) -> str:
+    """Render one `permission_denials` entry as a single log-safe line.
+
+    Entries come straight from `claude`'s `--output-format json` output
+    (see dispatch.py's module docstring), whose structure gardener does not
+    control — every branch here degrades to `str()` rather than assuming
+    keys. Newlines are collapsed too, so a multi-line denied command can't
+    emit a second log line that `dashboard.py`'s progress regexes would
+    then try to read as gardener's own narration.
+    """
+    if isinstance(denial, dict) and isinstance(denial.get("tool_name"), str) and denial["tool_name"]:
+        tool = denial["tool_name"]
+        detail = _denial_detail(denial.get("tool_input"))
+        rendered = f"{tool}({detail})" if detail else tool
+    else:
+        rendered = str(denial)
+    rendered = _WHITESPACE_RUN_RE.sub(" ", rendered).strip()
+    if len(rendered) > DENIAL_DETAIL_MAX_CHARS:
+        rendered = rendered[:DENIAL_DETAIL_MAX_CHARS] + "…"
+    return rendered
+
+
+def denial_report_lines(denials: list, limit: int = DENIAL_PRINT_LIMIT) -> list[str]:
+    """The stderr lines summarising a run's denials — deduplicated, capped,
+    and each prefixed so they read as gardener's own narration without
+    colliding with `dashboard.py`'s `^gardener: tending`/`^gardener:
+    finished tending` markers."""
+    distinct: list[str] = []
+    for denial in denials:
+        rendered = format_denial(denial)
+        if rendered not in distinct:
+            distinct.append(rendered)
+    lines = [f"gardener:   denied: {rendered}" for rendered in distinct[:limit]]
+    remaining = len(distinct) - limit
+    if remaining > 0:
+        lines.append(f"gardener:   denied: … and {remaining} more distinct denial(s)")
+    return lines
+
+
+def _print_denials(denials: list, subject: str) -> None:
+    """Print the denials, then the NOTE that refers to them. The NOTE used
+    to say "see denials above" with nothing above it (issue #99) — these
+    two are printed together so that stays true."""
+    for line in denial_report_lines(denials):
+        print(line, file=sys.stderr)
+    print(
+        f"gardener: NOTE — {subject} attempted action(s) outside this mode's "
+        "pre-approved scope and they were blocked (see denials above)",
+        file=sys.stderr,
+    )
+
+
 def _notify_run(run: state.Run) -> None:
     """Fire an outcome notification for a recorded run. Thin by design —
     this only turns an already-recorded `state.Run` into a (title,
@@ -498,11 +588,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     if result.permission_denials:
-        print(
-            "gardener: NOTE — Claude attempted action(s) outside this mode's "
-            "pre-approved scope and they were blocked (see denials above)",
-            file=sys.stderr,
-        )
+        _print_denials(result.permission_denials, "Claude")
     if result.timed_out:
         print(f"gardener: timed out after {args.timeout}s", file=sys.stderr)
         return 1
@@ -752,11 +838,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
         file=sys.stderr,
     )
     if result.permission_denials:
-        print(
-            "gardener: NOTE — the dispatched run attempted action(s) outside this mode's "
-            "pre-approved scope and they were blocked (see denials above)",
-            file=sys.stderr,
-        )
+        _print_denials(result.permission_denials, "the dispatched run")
     if result.timed_out:
         print(f"gardener: timed out after {args.timeout}s", file=sys.stderr)
 

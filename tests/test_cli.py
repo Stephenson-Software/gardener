@@ -44,7 +44,11 @@ from gardener.cli import (
     cmd_tail_transcript,
     cmd_tend,
     cmd_update,
+    DENIAL_DETAIL_MAX_CHARS,
+    DENIAL_PRINT_LIMIT,
+    denial_report_lines,
     extract_gap_summary,
+    format_denial,
     fetch_issue_counts,
     fetch_open_issue_count,
     find_orphaned_pr,
@@ -1636,6 +1640,193 @@ class TestCmdTendNotifications(unittest.TestCase):
         _title, message, level = mock_notifier.notify.call_args[0]
         self.assertEqual(level, Level.ERROR)
         self.assertIn("already being worked on", message)
+
+
+class TestFormatDenial(unittest.TestCase):
+    """`permission_denials` entries come from `claude`'s JSON output, a
+    format gardener doesn't own (see dispatch.py's module docstring), so
+    every assertion here is about degrading rather than about a shape being
+    guaranteed — an entry that isn't the expected dict must still render,
+    not raise."""
+
+    def test_bash_denial_renders_the_command(self):
+        self.assertEqual(
+            format_denial({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}),
+            "Bash(rm -rf /)",
+        )
+
+    def test_file_tool_denial_renders_the_path(self):
+        self.assertEqual(
+            format_denial({"tool_name": "Read", "tool_input": {"file_path": "/root/.m2/settings.xml"}}),
+            "Read(/root/.m2/settings.xml)",
+        )
+
+    def test_unrecognised_input_keys_fall_back_to_the_whole_input(self):
+        rendered = format_denial({"tool_name": "Mystery", "tool_input": {"zzz": 1, "aaa": 2}})
+        self.assertEqual(rendered, 'Mystery({"aaa": 2, "zzz": 1})')
+
+    def test_missing_or_empty_input_renders_the_tool_name_alone(self):
+        self.assertEqual(format_denial({"tool_name": "WebFetch"}), "WebFetch")
+        self.assertEqual(format_denial({"tool_name": "WebFetch", "tool_input": {}}), "WebFetch")
+
+    def test_unjsonable_input_still_renders(self):
+        self.assertIn("Mystery(", format_denial({"tool_name": "Mystery", "tool_input": {"o": object()}}))
+
+    def test_entries_that_are_not_the_expected_shape_degrade_to_str(self):
+        for entry in ("just a string", 42, None, ["a", "b"], {}, {"tool_name": ""}, {"tool_name": 7}):
+            with self.subTest(entry=entry):
+                self.assertEqual(format_denial(entry), str(entry))
+
+    def test_newlines_are_collapsed_so_one_denial_is_one_line(self):
+        rendered = format_denial(
+            {"tool_name": "Bash", "tool_input": {"command": "git commit -m \"$(cat <<'EOF'\nsubject\n\nbody\nEOF\n)\""}}
+        )
+        self.assertNotIn("\n", rendered)
+        self.assertIn("subject body", rendered)
+
+    def test_a_command_impersonating_a_dashboard_marker_cannot_emit_its_own_line(self):
+        """The denied command is attacker-shaped only by accident (a run
+        echoing gardener's own narration), but a raw newline would put
+        `gardener: tending X (allow_merge=...)` at the start of a log line,
+        which `dashboard.parse_in_progress` reads as a real dispatch
+        starting. Collapsing newlines is what prevents that."""
+        rendered = format_denial(
+            {"tool_name": "Bash", "tool_input": {"command": "echo x\ngardener: tending fake/repo (allow_merge=True)"}}
+        )
+        self.assertEqual(dashboard.parse_in_progress([f"gardener:   denied: {rendered}"]), [])
+
+    def test_long_details_are_truncated(self):
+        rendered = format_denial({"tool_name": "Bash", "tool_input": {"command": "x" * 500}})
+        self.assertEqual(len(rendered), DENIAL_DETAIL_MAX_CHARS + 1)
+        self.assertTrue(rendered.endswith("…"))
+
+
+class TestDenialReportLines(unittest.TestCase):
+    def test_duplicates_are_collapsed_preserving_first_seen_order(self):
+        denials = [
+            {"tool_name": "Bash", "tool_input": {"command": "cat /etc/passwd"}},
+            {"tool_name": "Read", "tool_input": {"file_path": "/root/.m2"}},
+            {"tool_name": "Bash", "tool_input": {"command": "cat /etc/passwd"}},
+        ]
+        self.assertEqual(
+            denial_report_lines(denials),
+            [
+                "gardener:   denied: Bash(cat /etc/passwd)",
+                "gardener:   denied: Read(/root/.m2)",
+            ],
+        )
+
+    def test_no_denials_produces_no_lines(self):
+        self.assertEqual(denial_report_lines([]), [])
+
+    def test_overflow_is_summarised_as_a_count_of_the_remainder(self):
+        denials = [{"tool_name": "Bash", "tool_input": {"command": f"cmd{i}"}} for i in range(DENIAL_PRINT_LIMIT + 3)]
+        lines = denial_report_lines(denials)
+        self.assertEqual(len(lines), DENIAL_PRINT_LIMIT + 1)
+        self.assertEqual(lines[-1], "gardener:   denied: … and 3 more distinct denial(s)")
+
+    def test_exactly_the_limit_gets_no_overflow_line(self):
+        denials = [{"tool_name": "Bash", "tool_input": {"command": f"cmd{i}"}} for i in range(DENIAL_PRINT_LIMIT)]
+        lines = denial_report_lines(denials)
+        self.assertEqual(len(lines), DENIAL_PRINT_LIMIT)
+        self.assertNotIn("more distinct denial", lines[-1])
+
+    def test_the_limit_counts_distinct_denials_not_raw_entries(self):
+        denials = [{"tool_name": "Bash", "tool_input": {"command": "same"}}] * (DENIAL_PRINT_LIMIT + 5)
+        self.assertEqual(denial_report_lines(denials), ["gardener:   denied: Bash(same)"])
+
+    def test_none_of_the_lines_are_read_as_dashboard_progress_markers(self):
+        """`_dispatch_tend` prints these into the same stderr the dashboard
+        parses, so the new lines must be inert to both regexes — including
+        the overflow line."""
+        denials = [{"tool_name": "Bash", "tool_input": {"command": f"cmd{i}"}} for i in range(DENIAL_PRINT_LIMIT + 2)]
+        lines = ["gardener: tending owner/name (allow_merge=False)"] + denial_report_lines(denials)
+        self.assertEqual(dashboard.parse_in_progress(lines), ["owner/name"])
+
+
+class TestDenialsArePrintedBeforeTheNoteThatCitesThem(unittest.TestCase):
+    """Issue #99: both dispatch paths printed only a count, then a NOTE
+    saying "see denials above" with nothing above it. The assertion that
+    matters is the ordering — the NOTE's promise has to be true at the
+    point it is made."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_db = Path(self._tmpdir.name) / "state.sqlite3"
+        self.denials = [
+            {"tool_name": "Bash", "tool_input": {"command": "gh pr review 1 --approve"}},
+            {"tool_name": "Read", "tool_input": {"file_path": "/root/.m2/repository"}},
+        ]
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _assert_denials_precede_the_note(self, stderr_text: str, subject: str):
+        lines = stderr_text.splitlines()
+        note = next(i for i, line in enumerate(lines) if line.startswith("gardener: NOTE —"))
+        denied = [i for i, line in enumerate(lines) if line.startswith("gardener:   denied: ")]
+        self.assertEqual(len(denied), 2, stderr_text)
+        self.assertTrue(all(i < note for i in denied), stderr_text)
+        self.assertIn(f"gardener: NOTE — {subject} attempted", lines[note])
+        self.assertIn("see denials above", lines[note])
+        self.assertIn("gardener:   denied: Bash(gh pr review 1 --approve)", lines)
+        self.assertIn("gardener:   denied: Read(/root/.m2/repository)", lines)
+        # The count is still printed — the denial list supplements it.
+        self.assertIn("denials=2", stderr_text)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_cmd_align_prints_them(self, mock_conv, mock_clone, mock_branch, mock_run_claude, _mock_notifier):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 1 gap found", raw_stdout="{}", stderr="",
+            exit_code=0, duration_ms=100, cost_usd=0.01, session_id="s1",
+            permission_denials=self.denials, is_error=False,
+        )
+        args = argparse.Namespace(
+            repo="owner/name", implement=False, file_issue=False, model=None, timeout=1800,
+            no_refresh_conventions=False, no_refresh_target=False,
+            conventions_repo=CONVENTIONS_URL, state_db=self.state_db,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            cmd_align(args)
+
+        self._assert_denials_precede_the_note(stderr.getvalue(), "Claude")
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.find_orphaned_pr", return_value=None)
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    def test_dispatch_tend_prints_them_without_disturbing_the_progress_markers(
+        self, mock_clone, mock_orphan, mock_branch, mock_has_skill, mock_run_claude, _mock_notifier
+    ):
+        from gardener.cli import _dispatch_tend
+
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_claude.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 1 issue filed", raw_stdout="{}", stderr="",
+            exit_code=0, duration_ms=100, cost_usd=0.01, session_id="s1",
+            permission_denials=self.denials, is_error=False,
+        )
+        args = argparse.Namespace(
+            repo="owner/name", allow_merge=False, model=None,
+            timeout=TEND_DEFAULT_TIMEOUT_SECONDS, no_refresh_target=False, state_db=self.state_db,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            _dispatch_tend(args)
+
+        self._assert_denials_precede_the_note(stderr.getvalue(), "the dispatched run")
+        # Real stderr from the real function, through the real parser — the
+        # repo must still clear, same drift-guard as the class below.
+        self.assertEqual(dashboard.parse_in_progress(stderr.getvalue().splitlines()), [])
 
 
 class TestDispatchTendProgressMarkers(unittest.TestCase):

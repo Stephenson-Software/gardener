@@ -343,3 +343,39 @@ the `notify: sent to Discord: ...` line instead, which meant an operator
 with no webhook configured (a supported setup — notifications are then a
 no-op) never cleared a single repo: the panel accumulated every repo the
 run had ever touched instead of showing what was actually running.
+
+### Blocked out-of-scope attempts
+
+When a dispatched run tries something outside its mode's pre-approved
+scope, `claude` blocks it and reports it back in the JSON result's
+`permission_denials` (see [SAFETY.md](SAFETY.md)). `align` and `tend` both
+print those to stderr, one per line, immediately before the NOTE that
+refers to them:
+
+```
+gardener:   denied: Bash(gh pr review 12 --comment --body-file -)
+gardener:   denied: Read(/root/.m2/repository)
+gardener: NOTE — the dispatched run attempted action(s) outside this mode's pre-approved scope and they were blocked (see denials above)
+```
+
+The list is deduplicated and capped at `cli.DENIAL_PRINT_LIMIT` (10)
+distinct entries, with any remainder collapsed to a count, so a run that
+retries the same blocked call fifty times can't flood the log. Each entry
+renders as `ToolName(the argument the allow-list scopes on)` — the command
+for `Bash`, the path for a file tool — truncated to
+`cli.DENIAL_DETAIL_MAX_CHARS` and with newlines collapsed, so one denial is
+always exactly one line. The `denials=N` count on the summary line above is
+unchanged; these supplement it.
+
+The point is telling a benign denial from a disabling one at a glance.
+Several denials per repo per night are normal and expected — a dev-loop
+skill instructed to post a real Review object hits the deliberate `gh pr
+review`/`gh api` exclusion every time — but the same count can also mean a
+run was structurally unable to do its job, and before these lines existed
+distinguishing the two meant opening the session transcript by hand.
+Because `run_log.py` tees stderr, they land in the dashboard's log view
+too.
+
+The entries come from `claude`'s output, whose structure gardener doesn't
+control, so rendering degrades to `str()` rather than assuming keys — an
+unrecognised shape prints as itself instead of breaking the run.
