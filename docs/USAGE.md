@@ -358,10 +358,11 @@ gardener:   denied: Read(/root/.m2/repository)
 gardener: NOTE — the dispatched run attempted action(s) outside this mode's pre-approved scope and they were blocked (see denials above)
 ```
 
-The list is deduplicated and capped at `cli.DENIAL_PRINT_LIMIT` (10)
-distinct entries, with any remainder collapsed to a count, so a run that
-retries the same blocked call fifty times can't flood the log. Each entry
-renders as `ToolName(the argument the allow-list scopes on)` — the command
+Two limits keep this from flooding the log. The list is deduplicated first,
+which is what absorbs a run retrying one blocked call fifty times, and then
+capped at `cli.DENIAL_PRINT_LIMIT` (10) *distinct* entries with any
+remainder collapsed to a count, which is what absorbs a run blocked on
+fifty different things. Each entry renders as `ToolName(the argument the allow-list scopes on)` — the command
 for `Bash`, the path for a file tool — truncated to
 `cli.DENIAL_MAX_CHARS` and with newlines collapsed, so one denial is
 always exactly one line. The `denials=N` count on the summary line above is
