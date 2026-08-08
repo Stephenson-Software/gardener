@@ -95,7 +95,17 @@ dashboard reads them with), the same drift guard applied to
 `_dispatch_tend`'s own progress markers (the *real* function's captured
 stderr fed through the *real* `dashboard.parse_in_progress`, down each of
 its four return paths plus a `KeyboardInterrupt`, with the notifier silent
-so the no-webhook case is what's actually asserted), and its
+so the no-webhook case is what's actually asserted), the denial reporting
+both dispatch paths print (`format_denial`/`denial_report_lines` directly —
+that an entry which isn't the expected `{"tool_name", "tool_input"}` dict
+degrades to `str()` rather than raising, since that structure comes from
+`claude`'s output and gardener doesn't own it; that duplicates collapse and
+the overflow becomes a count; and that newlines are collapsed, asserted by
+feeding a denied command containing a verbatim `gardener: tending ...`
+marker through `dashboard.parse_in_progress` and getting nothing back —
+plus, through the real `cmd_align`/`_dispatch_tend`, that the denials are
+printed *before* the NOTE whose "see denials above" refers to them, which
+is the whole of issue #99), and its
 `--strategy` selection (`issue-count` with `fetch_issue_counts` mocked,
 `random` with an injected `--random-seed` for a deterministic shuffle, both
 asserting the repo-name-keyed resume cursor advances correctly across two
