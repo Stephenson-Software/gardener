@@ -378,6 +378,24 @@ REAL_GRAPHQL_EOF_TEXT = (
     'could not determine default branch for owner/repo: Post '
     '"https://api.github.com/graphql": unexpected EOF'
 )
+# The same outage class in a third wording, which nothing matched until
+# 2026-08-05: two repos failed in the same second on 2026-08-04 with Go's
+# http2 transport error rather than either string above, so both were
+# charged to the repo they happened to hit and the cursor advanced past
+# them.
+REAL_HTTP2_TEXT = (
+    'could not determine default branch for owner/repo: Post '
+    '"https://api.github.com/graphql": http2: client conn could not be established'
+)
+# The wrapper all three share. Deliberately NOT a marker: `cli.py`'s
+# `_default_branch_name` raises it for a deleted/renamed/permission-denied
+# repo too, and treating that as device-global would abort the batch nightly
+# on a repo that is permanently gone.
+DEFAULT_BRANCH_WRAPPER_ONLY_TEXT = (
+    "could not determine default branch for owner/deleted-repo: "
+    "GraphQL: Could not resolve to a Repository with the name "
+    "'owner/deleted-repo'. (repository)"
+)
 
 
 class TestLooksLikeUsageLimit(unittest.TestCase):
@@ -403,8 +421,30 @@ class TestLooksLikeNetworkFailure(unittest.TestCase):
     def test_matches_the_real_graphql_eof_text(self):
         self.assertTrue(looks_like_network_failure(REAL_GRAPHQL_EOF_TEXT, ""))
 
+    def test_matches_the_real_http2_transport_text(self):
+        self.assertTrue(looks_like_network_failure(REAL_HTTP2_TEXT, ""))
+
+    def test_matches_sibling_http2_conn_wordings(self):
+        """The marker is a broad substring on purpose — Go emits several
+        `http2: client conn ...` variants and none of them is a contract."""
+        for text in (
+            'Post "https://api.github.com/graphql": http2: client conn is closed',
+            'Post "https://api.github.com/graphql": http2: client conn has been closed',
+        ):
+            with self.subTest(text=text[-40:]):
+                self.assertTrue(looks_like_network_failure(text, ""))
+
     def test_ordinary_failure_text_is_not_a_network_failure(self):
         self.assertFalse(looks_like_network_failure("tests failed: 3 assertions", ""))
+
+    def test_the_default_branch_wrapper_alone_is_not_a_network_failure(self):
+        """A repo that is genuinely gone raises the same wrapper sentence as
+        every recorded outage. Only the transport error `gh` appends to it
+        may classify — matching the wrapper would make one dead repo abort
+        the garden every night."""
+        self.assertFalse(
+            looks_like_network_failure(DEFAULT_BRANCH_WRAPPER_ONLY_TEXT, "")
+        )
 
 
 class TestIsDeviceGlobalFailure(unittest.TestCase):
@@ -418,6 +458,7 @@ class TestIsDeviceGlobalFailure(unittest.TestCase):
             REAL_USAGE_LIMIT_TEXT,
             REAL_NETWORK_TEXT,
             REAL_GRAPHQL_EOF_TEXT,
+            REAL_HTTP2_TEXT,
         ):
             with self.subTest(text=text[:40]):
                 self.assertTrue(is_device_global_failure(text))
@@ -429,6 +470,7 @@ class TestIsDeviceGlobalFailure(unittest.TestCase):
             "tests failed: 3 assertions in test_foo.py",
             "PR #12 opened; 2 issues filed",
             "build failed: compilation error in Main.java",
+            DEFAULT_BRANCH_WRAPPER_ONLY_TEXT,
         ):
             with self.subTest(text=text[:40]):
                 self.assertFalse(is_device_global_failure(text))
