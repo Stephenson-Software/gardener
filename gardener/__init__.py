@@ -12,4 +12,4 @@ Claude Code CLI invocation. See README.md for the full picture, including
 the "Conventions repo" section on authoring the repo `align` reads.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0.dev20260808"
