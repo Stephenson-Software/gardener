@@ -356,9 +356,10 @@ def extract_gap_summary(result_text: str) -> str:
 # printout is to let an operator recognise *which* actions were blocked at a
 # glance, and the first few distinct ones already do that.
 DENIAL_PRINT_LIMIT = 10
-# Per-line cap on the rendered detail, for the same reason — a denied Bash
-# call can carry a heredoc-sized command.
-DENIAL_DETAIL_MAX_CHARS = 160
+# Cap on one rendered denial (tool name and detail together, before the
+# `gardener:   denied: ` prefix), for the same reason — a denied Bash call
+# can carry a heredoc-sized command.
+DENIAL_MAX_CHARS = 160
 # Keys tried, in order, when rendering a denial's `tool_input`. These are
 # the argument names gardener's own allowed-tool patterns actually scope on
 # (`Bash(git *)`, `Read`/`Edit`/`Write` paths), so hitting one produces the
@@ -405,8 +406,8 @@ def format_denial(denial: object) -> str:
     else:
         rendered = str(denial)
     rendered = _WHITESPACE_RUN_RE.sub(" ", rendered).strip()
-    if len(rendered) > DENIAL_DETAIL_MAX_CHARS:
-        rendered = rendered[:DENIAL_DETAIL_MAX_CHARS] + "…"
+    if len(rendered) > DENIAL_MAX_CHARS:
+        rendered = rendered[:DENIAL_MAX_CHARS] + "…"
     return rendered
 
 
@@ -416,9 +417,13 @@ def denial_report_lines(denials: list, limit: int = DENIAL_PRINT_LIMIT) -> list[
     colliding with `dashboard.py`'s `^gardener: tending`/`^gardener:
     finished tending` markers."""
     distinct: list[str] = []
+    seen: set[str] = set()  # Membership set, not `in distinct` — a run that
+    # loops on a blocked call can produce thousands of entries, and this is
+    # on the path of every dispatch that had any denial at all.
     for denial in denials:
         rendered = format_denial(denial)
-        if rendered not in distinct:
+        if rendered not in seen:
+            seen.add(rendered)
             distinct.append(rendered)
     lines = [f"gardener:   denied: {rendered}" for rendered in distinct[:limit]]
     remaining = len(distinct) - limit

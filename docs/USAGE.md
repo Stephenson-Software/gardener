@@ -363,7 +363,7 @@ distinct entries, with any remainder collapsed to a count, so a run that
 retries the same blocked call fifty times can't flood the log. Each entry
 renders as `ToolName(the argument the allow-list scopes on)` — the command
 for `Bash`, the path for a file tool — truncated to
-`cli.DENIAL_DETAIL_MAX_CHARS` and with newlines collapsed, so one denial is
+`cli.DENIAL_MAX_CHARS` and with newlines collapsed, so one denial is
 always exactly one line. The `denials=N` count on the summary line above is
 unchanged; these supplement it.
 

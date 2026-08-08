@@ -44,7 +44,7 @@ from gardener.cli import (
     cmd_tail_transcript,
     cmd_tend,
     cmd_update,
-    DENIAL_DETAIL_MAX_CHARS,
+    DENIAL_MAX_CHARS,
     DENIAL_PRINT_LIMIT,
     denial_report_lines,
     extract_gap_summary,
@@ -1697,7 +1697,7 @@ class TestFormatDenial(unittest.TestCase):
 
     def test_long_details_are_truncated(self):
         rendered = format_denial({"tool_name": "Bash", "tool_input": {"command": "x" * 500}})
-        self.assertEqual(len(rendered), DENIAL_DETAIL_MAX_CHARS + 1)
+        self.assertEqual(len(rendered), DENIAL_MAX_CHARS + 1)
         self.assertTrue(rendered.endswith("…"))
 
 
