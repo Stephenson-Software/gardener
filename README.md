@@ -118,12 +118,22 @@ incomplete rubric, so gardener refuses rather than reporting a
 confidently-wrong result. Stub files are fine while you're building the set
 out.
 
-The checkout is cached at `~/.cache/gardener/conventions` (override with
-`$GARDENER_CACHE_DIR`) and refreshed each run — `--no-refresh-conventions`
+The checkout is cached at `~/.cache/gardener/conventions` and refreshed
+each run — `--no-refresh-conventions`
 reuses it as-is. Pointing gardener at a different conventions repo
 re-points and refreshes that cache even under `--no-refresh-conventions`,
 since reusing the previous repo's checkout would produce a wrong answer
 rather than a stale one. gardener never commits or pushes into this cache.
+
+`$GARDENER_CACHE_DIR` overrides the cache root — gardener's whole cache,
+not just the conventions checkout. Setting it to `/somewhere/else` moves
+both `conventions/` above and the target-repo clones at
+`~/.cache/gardener/repos/<owner>__<repo>` (see
+[docs/USAGE.md](docs/USAGE.md#gardener-tend--dispatching-a-target-repos-own-dev-loop))
+to `/somewhere/else/conventions` and `/somewhere/else/repos`. Worth setting
+if `~/.cache` isn't where this machine's free space is: a garden of any
+size accumulates a full checkout per repo, dependency caches included (see
+`cli.py`'s `PRESERVED_DEPENDENCY_DIRS`).
 
 ### Alerting (optional)
 
