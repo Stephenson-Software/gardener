@@ -68,7 +68,10 @@ same way every other mode
 in this file is. This is for a "tend to my garden overnight" use case:
 several repos, dispatched one after another, nobody watching.
 
-1. Clones/refreshes `owner/repo` into gardener's cache, exactly like
+1. Clones/refreshes `owner/repo` into gardener's cache
+   (`~/.cache/gardener/repos/<owner>__<repo>`, relocated along with the
+   rest of the cache root by `$GARDENER_CACHE_DIR` — see
+   [Conventions repo](../README.md#conventions-repo)), exactly like
    `align` does.
 2. Derives the skill slug from the repo's actual name (`owner/repo` ->
    `repo-dev-loop`, matching the naming every generated

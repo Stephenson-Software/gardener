@@ -165,7 +165,14 @@ over an already-fetched count mapping), `random_order` (injectable
 cursor's cycle-completion and reset logic); `tests/test_conventions.py`
 covers `ConventionsSource.verify_complete()`'s missing-doc detection and
 `ensure_conventions()`'s clone/fetch-reset/no-refresh branches, with
-`_run_git`/`subprocess.run` mocked so no real `git` process ever runs;
+`_run_git`/`subprocess.run` mocked so no real `git` process ever runs, and
+pins the `GARDENER_CACHE_DIR` contract the same way `test_state.py` pins
+the state-dir one — `conventions.default_cache_dir` and
+`cli.default_repos_cache_dir` each carry their own private copy of that
+resolution, so one test asserts both land under the override and another
+that both fall back to `~/.cache/gardener`, the `conventions`/`repos`
+suffixes asserted verbatim so a rename that would orphan a deployed box's
+on-disk cache is caught too;
 `tests/test_transcript.py` covers the encoding rule
 (against the two real, empirically-confirmed examples in `transcript.py`'s
 module docstring, not invented ones), the transcript-file-discovery polling

@@ -8,12 +8,14 @@ Every test that reaches `ensure_conventions` passes an explicit `url=`, so
 none of them depend on whatever `$GARDENER_CONVENTIONS_URL` happens to be
 set to in the environment running the suite (`TestResolveUrl` clears it
 explicitly, since that is the thing it is actually asserting about)."""
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from gardener import cli
 from gardener.conventions import (
     CONVENTIONS_URL_ENV,
     REQUIRED_DOCS,
@@ -193,16 +195,52 @@ class TestEnsureConventions(unittest.TestCase):
         mock_run_git.assert_not_called()
 
 
-class TestDefaultCacheDir(unittest.TestCase):
-    def test_override_env_var_wins(self):
-        with patch.dict("os.environ", {"GARDENER_CACHE_DIR": "/tmp/somewhere"}):
-            self.assertEqual(default_cache_dir(), Path("/tmp/somewhere") / "conventions")
+class TestCacheDirIsHonouredEverywhere(unittest.TestCase):
+    """Two helpers in two modules each resolve `GARDENER_CACHE_DIR` with
+    their own private copy of the same lines — `conventions.py`'s
+    `default_cache_dir` (the conventions checkout) and `cli.py`'s
+    `default_repos_cache_dir` (every target-repo clone). Nothing makes them
+    agree; they agree only because each was written the same way.
 
-    def test_falls_back_to_home_cache_dir_when_unset(self):
-        with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(
-                default_cache_dir(), Path.home() / ".cache" / "gardener" / "conventions"
-            )
+    The same reasoning `test_state.py`'s `TestStateDirIsHonouredEverywhere`
+    records for `GARDENER_STATE_DIR` applies here, and the failure mode is
+    the same kind of quiet: an operator setting the override to move
+    gardener's cache onto other storage would get the conventions checkout
+    relocated and every target-repo clone left behind under
+    `~/.cache/gardener/repos`, with nothing raised and nothing printed.
+
+    Suffixes are asserted verbatim, not derived, so a rename is caught too —
+    these are on-disk directories a deployed box already has, and changing
+    one silently orphans a real (and, for `repos`, potentially very large)
+    cache."""
+
+    #: (label, callable taking no args, expected path relative to the cache root)
+    def _cases(self):
+        return [
+            ("conventions.default_cache_dir", default_cache_dir, "conventions"),
+            ("cli.default_repos_cache_dir", cli.default_repos_cache_dir, "repos"),
+        ]
+
+    def test_every_helper_honours_the_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            with patch.dict("os.environ", {"GARDENER_CACHE_DIR": str(base)}, clear=False):
+                for label, fn, relative in self._cases():
+                    with self.subTest(helper=label):
+                        self.assertEqual(fn(), base / relative)
+
+    def test_every_helper_falls_back_to_the_same_home_cache_dir(self):
+        """With no override set, both must land under `~/.cache/gardener` —
+        the path `README.md` tells an operator to look in."""
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = Path(td)
+            expected_base = fake_home / ".cache" / "gardener"
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("GARDENER_CACHE_DIR", None)
+                with patch.object(Path, "home", classmethod(lambda cls: fake_home)):
+                    for label, fn, relative in self._cases():
+                        with self.subTest(helper=label):
+                            self.assertEqual(fn(), expected_base / relative)
 
 
 class TestConventionsSourcePaths(unittest.TestCase):

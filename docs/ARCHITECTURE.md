@@ -58,9 +58,12 @@ gardener/
                        build_garden_rows() joins the first three into the
                        garden view's table/plant-plot rows
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
-  tests/             — unit tests (state, cli parsing/templating/notify-severity,
-                       mocked dispatch, notify, garden, overnight, transcript,
-                       run_log, dashboard, selfupdate)
+  tests/             — unit tests, one test_<module>.py per module above
+                       that has runtime logic (state, cli parsing/templating/
+                       notify-severity, mocked dispatch, dev_loop,
+                       merge_allowlist, garden, overnight, conventions,
+                       repo_lock, notify, transcript, run_log, dashboard,
+                       selfupdate)
 ```
 
 ## Relationship to a conventions repo
