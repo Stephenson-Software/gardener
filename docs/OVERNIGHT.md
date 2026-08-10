@@ -229,8 +229,18 @@ set -uo pipefail
 export PATH="/root/.local/bin:$PATH"
 GARDENER_BIN="/root/.venvs/gardener/bin/gardener"
 HOURS="${GARDENER_OVERNIGHT_HOURS:-8}"
-"$GARDENER_BIN" overnight --hours "$HOURS"
+CONCURRENCY="${GARDENER_OVERNIGHT_CONCURRENCY:-4}"
+"$GARDENER_BIN" overnight --hours "$HOURS" --concurrency "$CONCURRENCY"
 ```
+
+Both knobs are env-overridable so a single night can be re-tuned from the
+Task Scheduler action without editing tracked code. The concurrency default
+here is deliberately `4` rather than `cmd_overnight`'s own `2`: the flag's
+default stays conservative for anyone invoking `gardener overnight` by hand
+on an unknown machine, whereas this script is device-specific — it only
+runs on the one WSL2 box whose headroom for four parallel `claude -p`
+dispatches has actually been exercised. Raising it further remains the
+CPU/RAM tradeoff described in step 2 above, not a free speedup.
 
 Two gotchas confirmed the hard way against a real scheduled failure, both
 now baked into the script above rather than left as tribal knowledge:
