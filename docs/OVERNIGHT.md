@@ -238,9 +238,15 @@ Task Scheduler action without editing tracked code. The concurrency default
 here is deliberately `4` rather than `cmd_overnight`'s own `2`: the flag's
 default stays conservative for anyone invoking `gardener overnight` by hand
 on an unknown machine, whereas this script is device-specific — it only
-runs on the one WSL2 box whose headroom for four parallel `claude -p`
-dispatches has actually been exercised. Raising it further remains the
-CPU/RAM tradeoff described in step 2 above, not a free speedup.
+ever runs on this one WSL2 box, at an operator's explicit request for a
+wider nightly run. Note that `4` is a step above the highest concurrency
+this project had previously exercised unattended end-to-end (`3`, and on
+the Android/UserLand device rather than this one — see
+[Manual/end-to-end verification](TESTING.md#manualend-to-end-verification)); the
+upper bound at which CPU/RAM contention starts degrading dispatches on
+*any* device is still unmeasured, so raising this further remains the
+tradeoff described in step 2 of the `gardener overnight` walkthrough at the
+top of this document, not a free speedup.
 
 Two gotchas confirmed the hard way against a real scheduled failure, both
 now baked into the script above rather than left as tribal knowledge:
