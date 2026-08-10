@@ -324,6 +324,22 @@ raised on this device before real CPU/RAM contention starts degrading
 dispatches, which is why the default is a conservative `2` rather than
 the `3` that run happened to use.
 
+**`--concurrency 4` on the WSL2 device** was then exercised the same way on
+2026-08-09, when an operator asked for a wider nightly run: `gardener
+overnight --hours 8 --concurrency 4` against the 61-repo garden. The first
+four-wide batch (`Fiefs`, `AlternateAccountFinder`, `Democracy`,
+`Dans-Essentials`) completed with all four `ok=True`, and each repo's
+recorded `state.Run` summary was confirmed against GitHub to name that
+repo's own artifacts — `Fiefs` PR #172 and `AlternateAccountFinder` PR #91
+both exist and are merged in their respective repos, `Dans-Essentials` #142
+is a real issue there — so the swap/corruption failure mode above did not
+appear at four either. Contention was measurable but not degrading: the
+batch's dispatches took 482/631/704/936s against 764/770s for a
+concurrency-2 batch immediately prior on the same box, i.e. the slowest
+dispatch stretched by roughly a fifth while per-repo throughput improved
+from about 6.4 to 3.9 minutes. The upper bound is still unmeasured — four
+is now a verified floor for this device, not a demonstrated ceiling.
+
 **Alerting**: `DiscordNotifier` is covered by mocked unit tests (see
 above) rather than a real Discord send in the automated suite — same
 reasoning as the rest of this section, a real send is an environment
