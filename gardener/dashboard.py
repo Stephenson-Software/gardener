@@ -625,6 +625,7 @@ PAGE_HTML = """<!doctype html>
         <ul>
           <li><b>Height &amp; leaves</b> — successful tends, all-time</li>
           <li><b>Colour &amp; droop</b> — days since the last successful tend</li>
+          <li><b>Short brown stem, one drooping leaf</b> — dispatched before, but never successfully</li>
           <li><b>Blossom</b> — on the merge allow-list, so a tend may merge its own PR</li>
           <li><b>Fallen brown leaves</b> — recorded errors</li>
           <li><b>Soil mound</b> — dollars spent tending it</li>
@@ -661,8 +662,13 @@ PAGE_HTML = """<!doctype html>
   </div>
 </main>
 <script>
+// Quotes are escaped as well as &<> because this helper is used for
+// attribute values (the plot's `title=`), not just text nodes — &<>
+// alone would let a name containing a quote close the attribute early.
+// Escaping them is harmless in text context, so one helper covers both.
 function esc(s) {
-  return (s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  return (s ?? "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c]));
 }
 function fmtCost(c) { return c == null ? "—" : "$" + c.toFixed(2); }
 function fmtDur(ms) { return ms == null ? "—" : (ms / 1000).toFixed(0) + "s"; }
@@ -1007,8 +1013,16 @@ async function refresh() {
   if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
+// Every poll costs a sqlite aggregate over the whole run history plus a
+// tail read of every live log, so a tab left in the background for a
+// whole overnight run would compete for CPU and I/O with the dispatched
+// runs the page exists to watch. The payload is a full snapshot with no
+// incremental state, so skipping polls while hidden loses nothing as
+// long as one fires the moment the tab is looked at again.
+function tick() { if (!document.hidden) refresh(); }
 refresh();
-setInterval(refresh, 4000);
+setInterval(tick, 4000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
 </body>
 </html>
