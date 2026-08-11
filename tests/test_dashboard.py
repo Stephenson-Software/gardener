@@ -563,6 +563,49 @@ class TestBuildStatusGardenRows(unittest.TestCase):
         self.assertEqual(dashboard.build_status(state_dir=self.state_dir)["garden_rows"], [])
 
 
+class TestPageHtmlInvariants(unittest.TestCase):
+    """The page's in-page JavaScript has no test runner here (stdlib-only
+    Python means no JS toolchain), so these assert the two properties of it
+    that are load-bearing and silently regressible, at the level the Python
+    side can actually see: the emitted source text. They are deliberately
+    narrow — they check that a specific mechanism is present, not that the
+    JavaScript as a whole behaves. Anything about how the plot *looks* is
+    still verified by rendering it, per CLAUDE.md."""
+
+    def test_esc_escapes_quotes_because_it_builds_an_attribute_value(self):
+        """`esc` output is interpolated into the plot's `title="..."`
+        attribute, so &<> alone would let a repo name containing a quote
+        close the attribute early. Both quote characters must be in the
+        character class and in the replacement map."""
+        self.assertIn(
+            r'''.replace(/[&<>"']/g''',
+            dashboard.PAGE_HTML,
+        )
+        self.assertIn(r'"\"":"&quot;"', dashboard.PAGE_HTML)
+        self.assertIn(r'''"'":"&#39;"''', dashboard.PAGE_HTML)
+
+    def test_the_tooltip_attribute_is_built_through_esc(self):
+        """The reason the assertion above matters: this is the attribute
+        context. If the tooltip ever stops going through `esc`, escaping
+        quotes in `esc` no longer protects anything."""
+        self.assertIn('title="${esc(title)}"', dashboard.PAGE_HTML)
+
+    def test_the_poll_loop_is_gated_on_tab_visibility(self):
+        """Every poll costs a sqlite aggregate plus a tail read of every
+        live log, so a backgrounded tab must not keep polling. The interval
+        must run the visibility-checking wrapper, never `refresh` directly."""
+        self.assertIn("function tick() { if (!document.hidden) refresh(); }", dashboard.PAGE_HTML)
+        self.assertIn("setInterval(tick, 4000)", dashboard.PAGE_HTML)
+        self.assertNotIn("setInterval(refresh", dashboard.PAGE_HTML)
+
+    def test_becoming_visible_refreshes_immediately(self):
+        """Skipping polls while hidden is only safe because the payload is a
+        full snapshot: a single refresh on becoming visible restores the
+        page. Without this listener the tab shows stale data for up to 4 s
+        at exactly the moment it is looked at."""
+        self.assertIn('addEventListener("visibilitychange"', dashboard.PAGE_HTML)
+
+
 class TestRunServerLoopbackEnforcement(unittest.TestCase):
     def test_non_loopback_host_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:
