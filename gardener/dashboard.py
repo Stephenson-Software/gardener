@@ -65,6 +65,25 @@ listed in the page's own legend; none of it is invented. Growth is drawn
 from *all-time* stats, not the `run_limit` window the Recent runs table
 uses, so a plant's size means "how much tending this repo has had," not
 "how recently it appeared in the log tail."
+
+Each plant is a `<button>` opening a detail card under the plot, not a
+`<div>` carrying its facts in a `title=` tooltip: this page is written
+phone-first (see the `max-width: 720px` block), and a hover tooltip is the
+one interaction a touch device cannot perform, so on the default view of
+the layout's target device every per-repo fact was unreachable (issue
+#114). The card is also where `last_run`/`last_outcome` surface — the two
+`build_garden_rows` fields no view rendered at all.
+
+## Saying so when the page is no longer live
+
+A poll that fails leaves every panel rendering the last good snapshot,
+which is the failure mode most likely to happen during an unattended
+overnight run (server OOM-killed, phone off the network) and the hardest
+to notice. `refresh` therefore checks `res.ok` explicitly — a 2xx with an
+unparseable body used to be indistinguishable from a dead server — and a
+failure marks `<body class="stale">`, dimming the content and replacing
+the header heartbeat with the *age* of what's on screen rather than a
+static caption (issue #116).
 """
 from __future__ import annotations
 
@@ -485,6 +504,12 @@ PAGE_HTML = """<!doctype html>
     height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 0.4rem;
   }
   .progress-bar > div { height: 100%; background: var(--accent); }
+  /* A poll that fails must not render as a healthy dashboard. Everything
+     below the header is dimmed and desaturated so "last known" can never
+     be mistaken for "live"; the header keeps full contrast because it is
+     the part carrying the explanation and the snapshot's age. */
+  body.stale main { opacity: 0.42; filter: grayscale(0.7); }
+  body.stale #updated { color: var(--warn); }
 
   /* ---- Garden panel (plot + table) ---- */
   .toolbar {
@@ -528,6 +553,42 @@ PAGE_HTML = """<!doctype html>
   .plant .meta { font-size: 0.62rem; color: var(--muted); font-variant-numeric: tabular-nums; }
   .plant.live { border-color: var(--accent); }
   .plant.live .nm { color: var(--accent); }
+  /* A plant is a real button, not a div with a click handler: every fact
+     about a repo except its short name used to live only in `title=`, a
+     hover tooltip, on a layout deliberately tuned for a phone (issue
+     #114). Tapping one opens the detail card below the plot instead;
+     `title` is kept because it costs nothing for pointer users. */
+  button.plant {
+    font: inherit; color: inherit; width: 100%; display: block; cursor: pointer;
+  }
+  /* After .plant.live so a selected in-flight plant reads as selected —
+     same specificity, so source order is what decides. */
+  .plant.selected {
+    border-color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .plant:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .plant-detail {
+    margin-top: 0.8rem; border: 1px solid var(--accent); border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .plant-detail .pd-head {
+    display: flex; align-items: baseline; gap: 0.5rem; justify-content: space-between;
+  }
+  .plant-detail .pd-head b {
+    font-family: var(--mono); font-size: 0.85rem; overflow-wrap: anywhere;
+  }
+  .pd-close {
+    font: inherit; background: transparent; color: var(--muted);
+    border: 0; cursor: pointer; padding: 0 0.3rem; line-height: 1;
+  }
+  .plant-detail dl {
+    margin: 0.5rem 0 0; display: grid; grid-template-columns: auto 1fr;
+    gap: 0.15rem 0.75rem; font-size: 0.8rem;
+  }
+  .plant-detail dt { color: var(--muted); }
+  .plant-detail dd { margin: 0; }
   /* The glow halo is the only animated thing on the page; refresh()
      re-renders the plot only when the data actually changed, so this
      animation isn't restarted from zero on every 4 s poll. */
@@ -612,14 +673,17 @@ PAGE_HTML = """<!doctype html>
   <div class="panel wide garden-panel">
     <h2 id="garden-heading">Garden</h2>
     <div class="toolbar">
-      <div class="tabs" role="tablist">
-        <button class="tab" id="tab-plot" role="tab" aria-selected="true">🌿 Plot</button>
-        <button class="tab" id="tab-table" role="tab" aria-selected="false">▤ Table</button>
+      <div class="tabs" role="tablist" aria-label="Garden view">
+        <button class="tab" id="tab-plot" role="tab" aria-selected="true"
+                aria-controls="plot-view" tabindex="0">🌿 Plot</button>
+        <button class="tab" id="tab-table" role="tab" aria-selected="false"
+                aria-controls="table-view" tabindex="-1">▤ Table</button>
       </div>
       <span class="sub" id="garden-summary"></span>
     </div>
-    <div id="plot-view">
+    <div id="plot-view" role="tabpanel" aria-labelledby="tab-plot" tabindex="0">
       <div class="plot" id="plot"></div>
+      <div id="plant-detail" class="plant-detail" aria-live="polite" hidden></div>
       <details class="legend">
         <summary>How a plant is drawn</summary>
         <ul>
@@ -634,7 +698,7 @@ PAGE_HTML = """<!doctype html>
         </ul>
       </details>
     </div>
-    <div id="table-view" hidden>
+    <div id="table-view" role="tabpanel" aria-labelledby="tab-table" tabindex="0" hidden>
       <table class="garden-table">
         <thead><tr>
           <th data-sort="repo">Repo</th>
@@ -855,6 +919,22 @@ function plantSvg(row, maxCost) {
 let gardenSort = {key: "repo", dir: 1};
 let gardenRows = [];
 let lastPlotSig = null;
+// Which plant's detail card is open, by repo name rather than by element:
+// the plot's innerHTML is rebuilt whenever its signature changes, so an
+// element reference wouldn't survive a re-render.
+let selectedPlant = null;
+
+// Seconds/minutes granularity, unlike fmtAge's days — this describes how
+// old the snapshot on screen is during a run of failed 4 s polls, where
+// "just now" would be wrong within half a minute.
+function fmtSince(iso) {
+  const t = Date.parse(iso ?? "");
+  if (isNaN(t)) return "unknown age";
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  return Math.round(s / 3600) + "h ago";
+}
 
 function sortedGardenRows() {
   const k = gardenSort.key;
@@ -917,28 +997,125 @@ function renderGarden(rows) {
       const cls = ["plant", r.in_flight ? "live" : "", r.in_garden ? "" : "potted"].filter(Boolean).join(" ");
       const title = `${r.repo} — ${h.label}, ${r.successes} tend(s), ${r.errors} error(s), `
         + `last tended ${age}, ${fmtCost(r.cost_usd)}${r.can_merge ? ", may merge" : ""}`;
-      return `<div class="${cls}" title="${esc(title)}">
+      // A button, not a div: it must be focusable, activatable with
+      // Enter/Space, and carry an accessible name, since the SVG inside
+      // it is aria-hidden and the visible text is only the leaf name.
+      return `<button type="button" class="${cls}" data-repo="${esc(r.repo)}" title="${esc(title)}"
+        aria-label="${esc(title)}" aria-expanded="false" aria-controls="plant-detail">
         ${plantSvg(r, maxCost)}
         <div class="nm">${esc(r.repo.split("/").pop())}</div>
         <div class="meta">${r.successes}✓${r.errors ? " " + r.errors + "✗" : ""} · ${esc(age)}</div>
-      </div>`;
+      </button>`;
     }).join("") || `<div class="empty">nothing planted yet</div>`;
   }
 
+  // Unconditional, even when the plot itself didn't re-render: the detail
+  // card shows fields (last_run, last_outcome) that aren't part of the
+  // plot signature, so they'd otherwise freeze at whatever they were when
+  // the drawing last changed.
+  if (selectedPlant && !gardenRows.some(r => r.repo === selectedPlant)) selectedPlant = null;
+  syncPlantSelection();
+
   renderGardenTable();
+}
+
+// The plot's per-plant detail. Everything here is already in the row the
+// plot is drawn from; before this it was reachable only as a `title`
+// tooltip, i.e. not at all on a touch device (issue #114).
+function renderPlantDetail() {
+  const el = document.getElementById("plant-detail");
+  const r = gardenRows.find(x => x.repo === selectedPlant);
+  if (!r) { el.hidden = true; el.innerHTML = ""; return; }
+  const h = HEALTH[healthOf(r)];
+  const lastAttempt = r.last_run
+    ? fmtAge(daysSince(r.last_run)) + (r.last_outcome ? " · " + r.last_outcome : "")
+    : "never dispatched";
+  // `last_run`/`last_outcome` were the two row fields no view rendered.
+  // "the most recent attempt errored" is a different fact from "the last
+  // success was three days ago", and the more urgent of the two.
+  const facts = [
+    ["Health", r.in_flight ? "tending now" : h.label, r.in_flight ? "outcome-tend" : ""],
+    ["Tends", `${r.successes} of ${r.runs} run(s)`, ""],
+    ["Errors", String(r.errors), r.errors ? "outcome-error" : "muted"],
+    ["Last tended", fmtAge(daysSince(r.last_success)), ""],
+    ["Last attempt", lastAttempt, r.last_outcome === "error" ? "outcome-error" : ""],
+    ["Cost", fmtCost(r.cost_usd), ""],
+    ["Merge", r.can_merge ? "allow-listed — a tend may merge its own PR" : "not allow-listed", ""],
+    ["Planted", r.in_garden ? "in the garden" : "allow-listed, but not in the garden", ""],
+  ];
+  el.innerHTML = `<div class="pd-head"><b>${esc(r.repo)}</b>`
+    + `<button type="button" class="pd-close" data-close="1" aria-label="Close details">✕</button></div>`
+    + `<dl>${facts.map(([k, v, cls]) =>
+        `<dt>${esc(k)}</dt><dd class="${cls}">${esc(v)}</dd>`).join("")}</dl>`;
+  el.hidden = false;
+}
+
+function syncPlantSelection() {
+  for (const el of document.querySelectorAll("#plot .plant[data-repo]")) {
+    const on = el.dataset.repo === selectedPlant;
+    el.setAttribute("aria-expanded", String(on));
+    el.classList.toggle("selected", on);
+  }
+  renderPlantDetail();
+}
+
+// Delegated, because both the plot and the detail card are replaced
+// wholesale by innerHTML — a listener bound to a plant would be discarded
+// on the next re-render.
+document.getElementById("plot").addEventListener("click", ev => {
+  const btn = ev.target.closest(".plant[data-repo]");
+  if (!btn) return;
+  selectedPlant = selectedPlant === btn.dataset.repo ? null : btn.dataset.repo;
+  syncPlantSelection();
+});
+document.getElementById("plant-detail").addEventListener("click", ev => {
+  if (!ev.target.closest("[data-close]")) return;
+  const previous = selectedPlant;
+  selectedPlant = null;
+  syncPlantSelection();
+  // Focus goes back to the plant that opened the card, not to the top of
+  // the document — closing a disclosure shouldn't lose the reader's place.
+  // Matched by walking the plants rather than by an attribute selector, so
+  // a repo name never has to be escaped into a selector string.
+  for (const el of document.querySelectorAll("#plot .plant[data-repo]")) {
+    if (el.dataset.repo === previous) { el.focus(); break; }
+  }
+});
+
+// Roving tabindex: only the selected tab is in the page's tab order, so
+// Tab steps past the whole tablist and Left/Right move within it. That,
+// plus aria-controls/role="tabpanel" in the markup, is what the declared
+// role="tablist" was promising and not implementing (issue #116).
+function setTabState(el, selected) {
+  el.setAttribute("aria-selected", String(selected));
+  el.tabIndex = selected ? 0 : -1;
 }
 
 function showGardenView(view) {
   const isPlot = view !== "table";
   document.getElementById("plot-view").hidden = !isPlot;
   document.getElementById("table-view").hidden = isPlot;
-  document.getElementById("tab-plot").setAttribute("aria-selected", String(isPlot));
-  document.getElementById("tab-table").setAttribute("aria-selected", String(!isPlot));
+  setTabState(document.getElementById("tab-plot"), isPlot);
+  setTabState(document.getElementById("tab-table"), !isPlot);
   try { localStorage.setItem("gardenView", isPlot ? "plot" : "table"); } catch (e) {}
 }
 
-document.getElementById("tab-plot").addEventListener("click", () => showGardenView("plot"));
-document.getElementById("tab-table").addEventListener("click", () => showGardenView("table"));
+const GARDEN_TABS = [
+  {id: "tab-plot", view: "plot"},
+  {id: "tab-table", view: "table"},
+];
+GARDEN_TABS.forEach((tab, i) => {
+  const el = document.getElementById(tab.id);
+  el.addEventListener("click", () => showGardenView(tab.view));
+  el.addEventListener("keydown", ev => {
+    const targets = {ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: GARDEN_TABS.length - 1};
+    if (!(ev.key in targets)) return;
+    ev.preventDefault();
+    const next = GARDEN_TABS[(targets[ev.key] + GARDEN_TABS.length) % GARDEN_TABS.length];
+    showGardenView(next.view);
+    document.getElementById(next.id).focus();
+  });
+});
 for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
   th.addEventListener("click", () => {
     const key = th.dataset.sort;
@@ -948,17 +1125,47 @@ for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
 }
 try { showGardenView(localStorage.getItem("gardenView") || "plot"); } catch (e) { showGardenView("plot"); }
 
+// The header caption is the page's only claim about its own liveness, so
+// a failed poll has to change more than that one string: every panel goes
+// on rendering the last good snapshot, and a dashboard whose server died
+// used to look like a healthy one with a small caption (issue #116).
+let lastGoodAt = null;
+let consecutiveFailures = 0;
+
+function markFresh(generatedAt) {
+  lastGoodAt = generatedAt;
+  consecutiveFailures = 0;
+  document.body.classList.remove("stale");
+  document.getElementById("updated").textContent =
+    "updated " + new Date(generatedAt).toLocaleTimeString();
+}
+
+function markStale(reason) {
+  consecutiveFailures++;
+  document.body.classList.add("stale");
+  const failed = consecutiveFailures + " failed poll" + (consecutiveFailures > 1 ? "s" : "");
+  document.getElementById("updated").textContent =
+    (lastGoodAt === null
+      ? "no data yet"
+      : "stale — showing data from " + fmtSince(lastGoodAt))
+    + " · " + reason + " (" + failed + ")";
+}
+
 async function refresh() {
   let data;
   try {
     const res = await fetch("/api/status");
+    // Checked explicitly rather than left to res.json() throwing on the
+    // error body: that route happened to catch a 500, but a 2xx carrying
+    // a bad body was indistinguishable from a dead server.
+    if (!res.ok) { markStale("server returned " + res.status); return; }
     data = await res.json();
   } catch (e) {
-    document.getElementById("updated").textContent = "fetch failed — retrying…";
+    markStale("fetch failed");
     return;
   }
 
-  document.getElementById("updated").textContent = "updated " + new Date(data.generated_at).toLocaleTimeString();
+  markFresh(data.generated_at);
 
   document.getElementById("stats").innerHTML = `
     <div class="stat"><div class="n">${data.stats.recent_run_count}</div><div class="l">recent runs</div></div>

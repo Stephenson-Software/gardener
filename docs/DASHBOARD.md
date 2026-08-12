@@ -40,6 +40,18 @@ remembered in `localStorage`):
   | Terracotta pot instead of soil | Allow-listed but not in the garden |
   | Pulsing glow | Being tended right now (from the same best-effort log parse the "Currently tending" panel uses) |
 
+  Each plant is a button. Tapping or activating one opens a detail card
+  under the plot with that repo's full `owner/name`, health, tends out of
+  total runs, errors, last successful tend, **last attempt and its
+  outcome**, cost, merge eligibility and whether it is actually in the
+  garden. The last-attempt pair (`last_run`/`last_outcome`) appears
+  nowhere else on the page, and "the most recent attempt errored" is a
+  different fact from "the last success was three days ago". The card is
+  the only way any of this is reachable on a touch device: the equivalent
+  `title` tooltip is kept for pointer users, but a hover is the one
+  interaction a phone cannot perform, and the plot is the view the page
+  defaults to.
+
   Each plant's lean, leaf jitter, grass tufts and flower colour are
   decoration, deterministic per repo name (an FNV-1a hash seeding a small
   LCG, never `Math.random()`), so a plant keeps its shape between refreshes
@@ -52,3 +64,22 @@ remembered in `localStorage`):
   this repo has had", not "how recently it appeared in the log tail". That's
   why `state.repo_stats()` exists as its own aggregate query instead of the
   dashboard folding `list_runs()` in Python.
+
+## When the page stops being live
+
+Every panel on the page renders whatever the last successful poll
+returned, so a failed poll that only changed the header caption left a
+dead server looking like a healthy dashboard — the failure mode most
+likely to occur during an unattended overnight run (the server
+OOM-killed, the phone off the network) and the hardest to spot.
+
+A poll now fails loudly. `res.ok` is checked before the body is parsed at
+all, so a 500 is detected as a 500 rather than as "the error body didn't
+parse", and a 2xx carrying a bad body is no longer indistinguishable from
+a dead server. Either failure marks the whole page stale: the content
+below the header is dimmed and desaturated, and the heartbeat caption is
+replaced with the *age* of the snapshot on screen (from the payload's own
+`generated_at`) plus the reason and a count of consecutive failures. The
+first successful poll clears all of it, and the existing
+`visibilitychange` listener is still the fast path back.
+
