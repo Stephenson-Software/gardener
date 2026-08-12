@@ -1,4 +1,9 @@
-# The garden view
+# The dashboard
+
+Covers the garden view — the panel the dashboard is mostly *for* — and what
+the page does when it can no longer reach the server behind it.
+
+## The garden view
 
 `gardener dashboard` (see [Usage](USAGE.md)) renders a garden panel over
 `dashboard.build_garden_rows()`'s joined view of the garden list, the merge
