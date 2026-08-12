@@ -73,13 +73,28 @@ dead server looking like a healthy dashboard — the failure mode most
 likely to occur during an unattended overnight run (the server
 OOM-killed, the phone off the network) and the hardest to spot.
 
-A poll now fails loudly. `res.ok` is checked before the body is parsed at
-all, so a 500 is detected as a 500 rather than as "the error body didn't
-parse", and a 2xx carrying a bad body is no longer indistinguishable from
-a dead server. Either failure marks the whole page stale: the content
-below the header is dimmed and desaturated, and the heartbeat caption is
-replaced with the *age* of the snapshot on screen (from the payload's own
-`generated_at`) plus the reason and a count of consecutive failures. The
-first successful poll clears all of it, and the existing
-`visibilitychange` listener is still the fast path back.
+A poll now fails loudly, and the four ways it can fail are told apart
+rather than collapsed into one caption:
+
+| Failure | Reason shown |
+|---|---|
+| The request never completed | `fetch failed` |
+| A non-2xx response (`res.ok`, checked before the body is parsed at all, so a 500 is detected as a 500 rather than as "the error body didn't parse") | `server returned 500` |
+| A 2xx whose body doesn't parse | `bad response body` |
+| A payload that throws while being rendered | `render failed` |
+
+Any of them marks the whole page stale: the content below the header is
+desaturated, and the heartbeat caption is replaced with the *age* of the
+snapshot on screen (from the payload's own `generated_at`) plus the
+reason and a count of consecutive failures. Desaturation rather than
+heavy dimming is the deliberate choice — when the server has died
+mid-overnight, the stale snapshot is the only data there is, so it has to
+stay readable while still being unmistakably not live.
+
+The page is marked fresh only once every panel has actually rendered the
+new snapshot, never on receipt of it. Polls don't overlap either: a slow
+request against a restarting server could otherwise resolve *after* a
+later successful one and re-mark a live page stale. The first successful
+poll clears all of it, and the existing `visibilitychange` listener is
+still the fast path back.
 

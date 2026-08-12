@@ -641,9 +641,14 @@ class TestPageHtmlInvariants(unittest.TestCase):
         """The plot's `innerHTML` is replaced wholesale whenever its
         signature changes, which during a run is often. Now that a plant is
         focusable, that would drop the keyboard to the document unless focus
-        is captured before the rebuild and restored after it."""
+        is captured before the rebuild and restored after it.
+
+        With `preventScroll`, because the rebuild is driven by a poll
+        rather than by the reader: without it, a poll would scroll the
+        garden panel back into view under someone reading the log tail."""
         self.assertIn('focused.matches("#plot .plant[data-repo]")', dashboard.PAGE_HTML)
-        self.assertIn("if (refocus) focusPlant(refocus);", dashboard.PAGE_HTML)
+        self.assertIn("if (refocus) focusPlant(refocus, true);", dashboard.PAGE_HTML)
+        self.assertIn("el.focus({preventScroll: !!preventScroll})", dashboard.PAGE_HTML)
 
     def test_the_tablist_wires_up_what_it_declares(self):
         """`role="tablist"` promises an association between each tab and
@@ -682,6 +687,40 @@ class TestPageHtmlInvariants(unittest.TestCase):
         before the body is parsed at all."""
         self.assertIn("if (!res.ok)", dashboard.PAGE_HTML)
         self.assertIn("markStale(\"server returned \" + res.status)", dashboard.PAGE_HTML)
+
+    def test_each_way_a_poll_can_fail_names_itself(self):
+        """`docs/DASHBOARD.md` tabulates four distinct reasons. Collapsing
+        any two of them back into one caption would put the doc and the page
+        out of step, and would make an unparseable 2xx body read on screen
+        as a dead server again."""
+        for reason in ("fetch failed", "server returned ", "bad response body", "render failed"):
+            self.assertIn(reason, dashboard.PAGE_HTML)
+
+    def test_a_render_that_throws_still_marks_the_page_stale(self):
+        """The page is marked fresh only after every panel has rendered, so
+        an exception part-way through would otherwise leave *neither* mark
+        set: the caption frozen at the last good time, no staleness class,
+        and half the panels un-updated — the exact state this is for."""
+        self.assertIn("renderStatus(data);", dashboard.PAGE_HTML)
+        self.assertIn('markStale("render failed")', dashboard.PAGE_HTML)
+
+    def test_polls_do_not_overlap(self):
+        """Both `setInterval` and the `visibilitychange` listener start
+        polls. Against a restarting server a slow, doomed request can
+        resolve *after* a later successful one and re-mark a live page
+        stale; the payload is a whole snapshot, so skipping a poll that
+        starts while one is in flight loses nothing."""
+        self.assertIn("if (pollInFlight) return;", dashboard.PAGE_HTML)
+        self.assertIn("pollInFlight = false;", dashboard.PAGE_HTML)
+
+    def test_the_plot_signature_includes_the_age_string_it_renders(self):
+        """The plot is re-rendered only when its signature changes, and the
+        age is visible text on every plant as well as its button's
+        accessible name. Keyed on `healthOf` alone (2/5/10-day buckets) a
+        plot left open overnight keeps reading "just now" while the table
+        view, re-rendered unconditionally, reads "3h ago" for the same
+        repo."""
+        self.assertIn("healthOf(r), fmtAge(daysSince(r.last_success))]", dashboard.PAGE_HTML)
 
     def test_the_stale_caption_reports_the_snapshot_age_not_a_static_string(self):
         """The point of the staleness treatment is answering "how old is

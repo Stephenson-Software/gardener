@@ -79,11 +79,14 @@ the layout's target device every per-repo fact was unreachable (issue
 A poll that fails leaves every panel rendering the last good snapshot,
 which is the failure mode most likely to happen during an unattended
 overnight run (server OOM-killed, phone off the network) and the hardest
-to notice. `refresh` therefore checks `res.ok` explicitly — a 2xx with an
-unparseable body used to be indistinguishable from a dead server — and a
-failure marks `<body class="stale">`, dimming the content and replacing
-the header heartbeat with the *age* of what's on screen rather than a
-static caption (issue #116).
+to notice. `refresh` therefore separates the four ways a poll can fail —
+the fetch itself, a non-2xx status (`res.ok`, checked rather than left to
+`res.json()` throwing on the error body), an unparseable body, and a
+render that throws — and each marks `<body class="stale">` under its own
+name, desaturating the content and replacing the header heartbeat with
+the *age* of what's on screen rather than a static caption (issue #116).
+Only once every panel has actually rendered the new snapshot is the page
+marked fresh again.
 """
 from __future__ import annotations
 
@@ -505,10 +508,17 @@ PAGE_HTML = """<!doctype html>
   }
   .progress-bar > div { height: 100%; background: var(--accent); }
   /* A poll that fails must not render as a healthy dashboard. Everything
-     below the header is dimmed and desaturated so "last known" can never
-     be mistaken for "live"; the header keeps full contrast because it is
-     the part carrying the explanation and the snapshot's age. */
-  body.stale main { opacity: 0.42; filter: grayscale(0.7); }
+     below the header is desaturated so "last known" can never be mistaken
+     for "live"; the header keeps full contrast because it is the part
+     carrying the explanation and the snapshot's age.
+
+     Desaturation, not heavy dimming, is what carries the signal: the
+     colour on this page (live pills, the progress bar, a plot of green
+     plants) all drains at once, which is unmissable. The opacity is
+     deliberately mild, because when the server has died mid-overnight
+     this snapshot is the only data there is — muted text at 0.4 opacity
+     would drop below readable contrast and hide it. */
+  body.stale main { opacity: 0.78; filter: grayscale(1); }
   body.stale #updated { color: var(--warn); }
 
   /* ---- Garden panel (plot + table) ---- */
@@ -986,8 +996,14 @@ function renderGarden(rows) {
   // Re-render the plot only when something it draws actually changed —
   // otherwise the 4 s poll would restart the in-flight glow animation
   // from zero every time, and rebuild 32 SVGs for nothing.
+  // The rendered age string is in the signature, not just healthOf's
+  // 2/5/10-day buckets: the age is visible text on every plant, and is
+  // also its button's accessible name now, so a plot left open overnight
+  // would otherwise keep saying "just now" hours later while the table
+  // view — re-rendered unconditionally — said "3h ago" for the same repo.
   const sig = JSON.stringify(gardenRows.map(r =>
-    [r.repo, r.successes, r.errors, r.cost_usd, r.can_merge, r.in_garden, r.in_flight, healthOf(r)]));
+    [r.repo, r.successes, r.errors, r.cost_usd, r.can_merge, r.in_garden, r.in_flight,
+     healthOf(r), fmtAge(daysSince(r.last_success))]));
   if (sig !== lastPlotSig) {
     lastPlotSig = sig;
     // The plot is rebuilt wholesale, so a plant that currently has the
@@ -1013,7 +1029,10 @@ function renderGarden(rows) {
         <div class="meta">${r.successes}✓${r.errors ? " " + r.errors + "✗" : ""} · ${esc(age)}</div>
       </button>`;
     }).join("") || `<div class="empty">nothing planted yet</div>`;
-    if (refocus) focusPlant(refocus);
+    // preventScroll: the rebuild is driven by a poll, not by the reader.
+    // Scrolling the garden panel back into view under someone who has
+    // scrolled down to the log tail would be the poll stealing the page.
+    if (refocus) focusPlant(refocus, true);
   }
 
   // Unconditional, even when the plot itself didn't re-render: the detail
@@ -1028,9 +1047,9 @@ function renderGarden(rows) {
 
 // Matched by walking the plants rather than by an attribute selector, so
 // a repo name never has to be escaped into a selector string.
-function focusPlant(repo) {
+function focusPlant(repo, preventScroll) {
   for (const el of document.querySelectorAll("#plot .plant[data-repo]")) {
-    if (el.dataset.repo === repo) { el.focus(); return; }
+    if (el.dataset.repo === repo) { el.focus({preventScroll: !!preventScroll}); return; }
   }
 }
 
@@ -1072,8 +1091,16 @@ function renderPlantDetail() {
   // 4 s poll, so an unconditional innerHTML would take focus off the
   // close button once a poll and restart any transition on the card.
   if (html !== lastDetailHtml) {
+    // It does still change on its own — `in_flight` flips when a tend
+    // starts or ends, and the counts move when one finishes — so the
+    // close button has to be put back if it was where the keyboard was.
+    const hadFocus = el.contains(document.activeElement);
     el.innerHTML = html;
     lastDetailHtml = html;
+    if (hadFocus) {
+      const close = el.querySelector("[data-close]");
+      if (close) close.focus({preventScroll: true});
+    }
   }
   el.hidden = false;
 }
@@ -1180,20 +1207,54 @@ function markStale(reason) {
     + " · " + reason + " (" + failed + ")";
 }
 
-async function refresh() {
-  let data;
-  try {
-    const res = await fetch("/api/status");
-    // Checked explicitly rather than left to res.json() throwing on the
-    // error body: that route happened to catch a 500, but a 2xx carrying
-    // a bad body was indistinguishable from a dead server.
-    if (!res.ok) { markStale("server returned " + res.status); return; }
-    data = await res.json();
-  } catch (e) {
-    markStale("fetch failed");
-    return;
-  }
+let pollInFlight = false;
 
+async function refresh() {
+  // One poll at a time. Both the interval and the visibilitychange
+  // listener call this, so a slow request against a restarting server
+  // could otherwise land *after* a later successful one and re-mark a
+  // live page stale. The payload is a whole snapshot, so dropping a poll
+  // that starts while another is still running loses nothing.
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
+    let res;
+    try {
+      res = await fetch("/api/status");
+    } catch (e) {
+      markStale("fetch failed");
+      return;
+    }
+    // Checked explicitly rather than left to res.json() throwing on the
+    // error body: that route happened to catch a 500, and a 2xx with an
+    // unparseable body reached the same branch as a dead server and said
+    // the same thing. Each of the three now names itself.
+    if (!res.ok) { markStale("server returned " + res.status); return; }
+    let data;
+    try {
+      data = await res.json();
+    } catch (e) {
+      markStale("bad response body");
+      return;
+    }
+    try {
+      renderStatus(data);
+    } catch (e) {
+      // Without this the page would end up in neither state: the caption
+      // frozen at the last good time, no staleness class, nothing in the
+      // panels updated — exactly the "looks live but isn't" case.
+      markStale("render failed");
+      return;
+    }
+    // Last, not first: the heartbeat claims every panel is showing this
+    // snapshot, so it is only claimed once they actually are.
+    markFresh(data.generated_at);
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+function renderStatus(data) {
   document.getElementById("stats").innerHTML = `
     <div class="stat"><div class="n">${data.stats.recent_run_count}</div><div class="l">recent runs</div></div>
     <div class="stat"><div class="n">${fmtCost(data.stats.recent_cost_usd)}</div><div class="l">recent cost</div></div>
@@ -1245,10 +1306,6 @@ async function refresh() {
   const wasAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   logEl.textContent = data.log_tail.join("\\n") || "(no active log)";
   if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
-
-  // Last, not first: the heartbeat claims every panel above is showing
-  // this snapshot, so it must only be claimed once they actually are.
-  markFresh(data.generated_at);
 }
 
 // Every poll costs a sqlite aggregate over the whole run history plus a
