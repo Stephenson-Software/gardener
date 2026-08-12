@@ -630,6 +630,21 @@ class TestPageHtmlInvariants(unittest.TestCase):
         self.assertIn('document.getElementById("plot").addEventListener("click"', dashboard.PAGE_HTML)
         self.assertIn('document.getElementById("plant-detail").addEventListener("click"', dashboard.PAGE_HTML)
 
+    def test_the_detail_card_is_only_rewritten_when_it_changed(self):
+        """`renderGarden` runs on every 4 s poll and the detail card is
+        re-rendered with it, so an unconditional `innerHTML` would take
+        focus off the card's own close button once a poll — the one control
+        a keyboard user is most likely to be sitting on while it's open."""
+        self.assertIn("if (html !== lastDetailHtml)", dashboard.PAGE_HTML)
+
+    def test_a_focused_plant_survives_the_plot_being_rebuilt(self):
+        """The plot's `innerHTML` is replaced wholesale whenever its
+        signature changes, which during a run is often. Now that a plant is
+        focusable, that would drop the keyboard to the document unless focus
+        is captured before the rebuild and restored after it."""
+        self.assertIn('focused.matches("#plot .plant[data-repo]")', dashboard.PAGE_HTML)
+        self.assertIn("if (refocus) focusPlant(refocus);", dashboard.PAGE_HTML)
+
     def test_the_tablist_wires_up_what_it_declares(self):
         """`role="tablist"` promises an association between each tab and
         its panel, and arrow-key navigation within the list. Declaring the

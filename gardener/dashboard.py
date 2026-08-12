@@ -683,7 +683,7 @@ PAGE_HTML = """<!doctype html>
     </div>
     <div id="plot-view" role="tabpanel" aria-labelledby="tab-plot" tabindex="0">
       <div class="plot" id="plot"></div>
-      <div id="plant-detail" class="plant-detail" aria-live="polite" hidden></div>
+      <div id="plant-detail" class="plant-detail" hidden></div>
       <details class="legend">
         <summary>How a plant is drawn</summary>
         <ul>
@@ -990,6 +990,12 @@ function renderGarden(rows) {
     [r.repo, r.successes, r.errors, r.cost_usd, r.can_merge, r.in_garden, r.in_flight, healthOf(r)]));
   if (sig !== lastPlotSig) {
     lastPlotSig = sig;
+    // The plot is rebuilt wholesale, so a plant that currently has the
+    // keyboard would drop focus to the document every time any repo's
+    // drawn data changed — which during a run is often.
+    const focused = document.activeElement;
+    const refocus = focused && focused.matches && focused.matches("#plot .plant[data-repo]")
+      ? focused.dataset.repo : null;
     const maxCost = gardenRows.reduce((m, r) => Math.max(m, r.cost_usd), 0);
     document.getElementById("plot").innerHTML = gardenRows.map(r => {
       const h = HEALTH[healthOf(r)];
@@ -1007,6 +1013,7 @@ function renderGarden(rows) {
         <div class="meta">${r.successes}✓${r.errors ? " " + r.errors + "✗" : ""} · ${esc(age)}</div>
       </button>`;
     }).join("") || `<div class="empty">nothing planted yet</div>`;
+    if (refocus) focusPlant(refocus);
   }
 
   // Unconditional, even when the plot itself didn't re-render: the detail
@@ -1019,13 +1026,27 @@ function renderGarden(rows) {
   renderGardenTable();
 }
 
+// Matched by walking the plants rather than by an attribute selector, so
+// a repo name never has to be escaped into a selector string.
+function focusPlant(repo) {
+  for (const el of document.querySelectorAll("#plot .plant[data-repo]")) {
+    if (el.dataset.repo === repo) { el.focus(); return; }
+  }
+}
+
 // The plot's per-plant detail. Everything here is already in the row the
 // plot is drawn from; before this it was reachable only as a `title`
 // tooltip, i.e. not at all on a touch device (issue #114).
+let lastDetailHtml = null;
 function renderPlantDetail() {
   const el = document.getElementById("plant-detail");
   const r = gardenRows.find(x => x.repo === selectedPlant);
-  if (!r) { el.hidden = true; el.innerHTML = ""; return; }
+  if (!r) {
+    el.hidden = true;
+    el.innerHTML = "";
+    lastDetailHtml = null;
+    return;
+  }
   const h = HEALTH[healthOf(r)];
   const lastAttempt = r.last_run
     ? fmtAge(daysSince(r.last_run)) + (r.last_outcome ? " · " + r.last_outcome : "")
@@ -1043,10 +1064,17 @@ function renderPlantDetail() {
     ["Merge", r.can_merge ? "allow-listed — a tend may merge its own PR" : "not allow-listed", ""],
     ["Planted", r.in_garden ? "in the garden" : "allow-listed, but not in the garden", ""],
   ];
-  el.innerHTML = `<div class="pd-head"><b>${esc(r.repo)}</b>`
+  const html = `<div class="pd-head"><b>${esc(r.repo)}</b>`
     + `<button type="button" class="pd-close" data-close="1" aria-label="Close details">✕</button></div>`
     + `<dl>${facts.map(([k, v, cls]) =>
         `<dt>${esc(k)}</dt><dd class="${cls}">${esc(v)}</dd>`).join("")}</dl>`;
+  // Rewritten only when it actually changed. renderGarden runs on every
+  // 4 s poll, so an unconditional innerHTML would take focus off the
+  // close button once a poll and restart any transition on the card.
+  if (html !== lastDetailHtml) {
+    el.innerHTML = html;
+    lastDetailHtml = html;
+  }
   el.hidden = false;
 }
 
@@ -1075,11 +1103,7 @@ document.getElementById("plant-detail").addEventListener("click", ev => {
   syncPlantSelection();
   // Focus goes back to the plant that opened the card, not to the top of
   // the document — closing a disclosure shouldn't lose the reader's place.
-  // Matched by walking the plants rather than by an attribute selector, so
-  // a repo name never has to be escaped into a selector string.
-  for (const el of document.querySelectorAll("#plot .plant[data-repo]")) {
-    if (el.dataset.repo === previous) { el.focus(); break; }
-  }
+  focusPlant(previous);
 });
 
 // Roving tabindex: only the selected tab is in the page's tab order, so
@@ -1108,10 +1132,15 @@ GARDEN_TABS.forEach((tab, i) => {
   const el = document.getElementById(tab.id);
   el.addEventListener("click", () => showGardenView(tab.view));
   el.addEventListener("keydown", ev => {
-    const targets = {ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: GARDEN_TABS.length - 1};
-    if (!(ev.key in targets)) return;
+    // A Map, not an object literal: `ev.key in {...}` would also match
+    // every inherited Object.prototype name.
+    const targets = new Map([
+      ["ArrowLeft", i - 1], ["ArrowRight", i + 1],
+      ["Home", 0], ["End", GARDEN_TABS.length - 1],
+    ]);
+    if (!targets.has(ev.key)) return;
     ev.preventDefault();
-    const next = GARDEN_TABS[(targets[ev.key] + GARDEN_TABS.length) % GARDEN_TABS.length];
+    const next = GARDEN_TABS[(targets.get(ev.key) + GARDEN_TABS.length) % GARDEN_TABS.length];
     showGardenView(next.view);
     document.getElementById(next.id).focus();
   });
@@ -1165,8 +1194,6 @@ async function refresh() {
     return;
   }
 
-  markFresh(data.generated_at);
-
   document.getElementById("stats").innerHTML = `
     <div class="stat"><div class="n">${data.stats.recent_run_count}</div><div class="l">recent runs</div></div>
     <div class="stat"><div class="n">${fmtCost(data.stats.recent_cost_usd)}</div><div class="l">recent cost</div></div>
@@ -1218,6 +1245,10 @@ async function refresh() {
   const wasAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   logEl.textContent = data.log_tail.join("\\n") || "(no active log)";
   if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
+
+  // Last, not first: the heartbeat claims every panel above is showing
+  // this snapshot, so it must only be claimed once they actually are.
+  markFresh(data.generated_at);
 }
 
 // Every poll costs a sqlite aggregate over the whole run history plus a
