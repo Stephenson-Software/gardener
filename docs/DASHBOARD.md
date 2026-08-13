@@ -102,4 +102,3 @@ request against a restarting server could otherwise resolve *after* a
 later successful one and re-mark a live page stale. The first successful
 poll clears all of it, and the existing `visibilitychange` listener is
 still the fast path back.
-
