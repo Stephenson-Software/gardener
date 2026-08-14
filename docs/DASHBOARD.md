@@ -1,4 +1,9 @@
-# The garden view
+# The dashboard
+
+Covers the garden view — the panel the dashboard is mostly *for* — and what
+the page does when it can no longer reach the server behind it.
+
+## The garden view
 
 `gardener dashboard` (see [Usage](USAGE.md)) renders a garden panel over
 `dashboard.build_garden_rows()`'s joined view of the garden list, the merge
@@ -40,6 +45,18 @@ remembered in `localStorage`):
   | Terracotta pot instead of soil | Allow-listed but not in the garden |
   | Pulsing glow | Being tended right now (from the same best-effort log parse the "Currently tending" panel uses) |
 
+  Each plant is a button. Tapping or activating one opens a detail card
+  under the plot with that repo's full `owner/name`, health, tends out of
+  total runs, errors, last successful tend, **last attempt and its
+  outcome**, cost, merge eligibility and whether it is actually in the
+  garden. The last-attempt pair (`last_run`/`last_outcome`) appears
+  nowhere else on the page, and "the most recent attempt errored" is a
+  different fact from "the last success was three days ago". The card is
+  the only way any of this is reachable on a touch device: the equivalent
+  `title` tooltip is kept for pointer users, but a hover is the one
+  interaction a phone cannot perform, and the plot is the view the page
+  defaults to.
+
   Each plant's lean, leaf jitter, grass tufts and flower colour are
   decoration, deterministic per repo name (an FNV-1a hash seeding a small
   LCG, never `Math.random()`), so a plant keeps its shape between refreshes
@@ -52,3 +69,36 @@ remembered in `localStorage`):
   this repo has had", not "how recently it appeared in the log tail". That's
   why `state.repo_stats()` exists as its own aggregate query instead of the
   dashboard folding `list_runs()` in Python.
+
+## When the page stops being live
+
+Every panel on the page renders whatever the last successful poll
+returned, so a failed poll that only changed the header caption left a
+dead server looking like a healthy dashboard — the failure mode most
+likely to occur during an unattended overnight run (the server
+OOM-killed, the phone off the network) and the hardest to spot.
+
+A poll now fails loudly, and the four ways it can fail are told apart
+rather than collapsed into one caption:
+
+| Failure | Reason shown |
+|---|---|
+| The request never completed | `fetch failed` |
+| A non-2xx response (`res.ok`, checked before the body is parsed at all, so a 500 is detected as a 500 rather than as "the error body didn't parse") | `server returned 500` |
+| A 2xx whose body doesn't parse | `bad response body` |
+| A payload that throws while being rendered | `render failed` |
+
+Any of them marks the whole page stale: the content below the header is
+desaturated, and the heartbeat caption is replaced with the *age* of the
+snapshot on screen (from the payload's own `generated_at`) plus the
+reason and a count of consecutive failures. Desaturation rather than
+heavy dimming is the deliberate choice — when the server has died
+mid-overnight, the stale snapshot is the only data there is, so it has to
+stay readable while still being unmistakably not live.
+
+The page is marked fresh only once every panel has actually rendered the
+new snapshot, never on receipt of it. Polls don't overlap either: a slow
+request against a restarting server could otherwise resolve *after* a
+later successful one and re-mark a live page stale. The first successful
+poll clears all of it, and the existing `visibilitychange` listener is
+still the fast path back.

@@ -565,7 +565,7 @@ class TestBuildStatusGardenRows(unittest.TestCase):
 
 class TestPageHtmlInvariants(unittest.TestCase):
     """The page's in-page JavaScript has no test runner here (stdlib-only
-    Python means no JS toolchain), so these assert the two properties of it
+    Python means no JS toolchain), so these assert the properties of it
     that are load-bearing and silently regressible, at the level the Python
     side can actually see: the emitted source text. They are deliberately
     narrow — they check that a specific mechanism is present, not that the
@@ -604,6 +604,132 @@ class TestPageHtmlInvariants(unittest.TestCase):
         page. Without this listener the tab shows stale data for up to 4 s
         at exactly the moment it is looked at."""
         self.assertIn('addEventListener("visibilitychange"', dashboard.PAGE_HTML)
+
+    def test_a_plant_is_a_button_not_a_div(self):
+        """The plot's per-repo facts are only reachable on a touch device
+        because a plant is a real control: focusable, activatable with
+        Enter/Space, and carrying an accessible name (the SVG inside it is
+        aria-hidden, and the only visible text is the leaf name). A `div`
+        with a click handler would satisfy none of that."""
+        self.assertIn('<button type="button" class="${cls}" data-repo="${esc(r.repo)}"', dashboard.PAGE_HTML)
+        self.assertIn('aria-label="${esc(title)}" aria-expanded="false" aria-controls="plant-detail"', dashboard.PAGE_HTML)
+
+    def test_the_detail_card_renders_the_two_otherwise_unrendered_row_fields(self):
+        """`build_garden_rows` emits `last_run` and `last_outcome`, and
+        before the detail card no view rendered either — "the most recent
+        attempt errored" was a question the payload could answer and the
+        page could not."""
+        self.assertIn("r.last_run", dashboard.PAGE_HTML)
+        self.assertIn("r.last_outcome", dashboard.PAGE_HTML)
+
+    def test_plot_and_detail_listeners_are_delegated(self):
+        """Both the plot and the detail card are replaced wholesale by
+        `innerHTML` on re-render, so a listener bound to an individual plant
+        would be silently discarded. The listeners must be on the
+        containers, which are never replaced."""
+        self.assertIn('document.getElementById("plot").addEventListener("click"', dashboard.PAGE_HTML)
+        self.assertIn('document.getElementById("plant-detail").addEventListener("click"', dashboard.PAGE_HTML)
+
+    def test_the_detail_card_is_only_rewritten_when_it_changed(self):
+        """`renderGarden` runs on every 4 s poll and the detail card is
+        re-rendered with it, so an unconditional `innerHTML` would take
+        focus off the card's own close button once a poll — the one control
+        a keyboard user is most likely to be sitting on while it's open."""
+        self.assertIn("if (html !== lastDetailHtml)", dashboard.PAGE_HTML)
+
+    def test_a_focused_plant_survives_the_plot_being_rebuilt(self):
+        """The plot's `innerHTML` is replaced wholesale whenever its
+        signature changes, which during a run is often. Now that a plant is
+        focusable, that would drop the keyboard to the document unless focus
+        is captured before the rebuild and restored after it.
+
+        With `preventScroll`, because the rebuild is driven by a poll
+        rather than by the reader: without it, a poll would scroll the
+        garden panel back into view under someone reading the log tail."""
+        self.assertIn('focused.matches("#plot .plant[data-repo]")', dashboard.PAGE_HTML)
+        self.assertIn("if (refocus) focusPlant(refocus, true);", dashboard.PAGE_HTML)
+        self.assertIn("el.focus({preventScroll: !!preventScroll})", dashboard.PAGE_HTML)
+
+    def test_the_tablist_wires_up_what_it_declares(self):
+        """`role="tablist"` promises an association between each tab and
+        its panel, and arrow-key navigation within the list. Declaring the
+        roles without `aria-controls`/`role="tabpanel"`/`aria-labelledby`
+        asserts a relationship to assistive tech that isn't there."""
+        self.assertIn('aria-controls="plot-view"', dashboard.PAGE_HTML)
+        self.assertIn('aria-controls="table-view"', dashboard.PAGE_HTML)
+        self.assertIn('id="plot-view" role="tabpanel" aria-labelledby="tab-plot"', dashboard.PAGE_HTML)
+        self.assertIn('id="table-view" role="tabpanel" aria-labelledby="tab-table"', dashboard.PAGE_HTML)
+        for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+            self.assertIn(key, dashboard.PAGE_HTML)
+
+    def test_only_the_selected_tab_is_in_the_tab_order(self):
+        """The roving tabindex is the other half of the tab pattern: with
+        both tabs at tabindex 0, Tab walks through the tablist and the
+        arrow keys are redundant. `setTabState` must set it from the same
+        selected flag it sets `aria-selected` from, so the two can't
+        disagree."""
+        self.assertIn("el.setAttribute(\"aria-selected\", String(selected));", dashboard.PAGE_HTML)
+        self.assertIn("el.tabIndex = selected ? 0 : -1;", dashboard.PAGE_HTML)
+
+    def test_a_failed_poll_marks_the_whole_page_stale(self):
+        """Every panel keeps rendering the last good snapshot after a failed
+        poll, so changing only the header caption renders a dead server as a
+        healthy dashboard. The failure path must set the body-level staleness
+        class, and the success path must clear it."""
+        self.assertIn('document.body.classList.add("stale")', dashboard.PAGE_HTML)
+        self.assertIn('document.body.classList.remove("stale")', dashboard.PAGE_HTML)
+        self.assertIn("body.stale main", dashboard.PAGE_HTML)
+
+    def test_a_non_ok_response_is_detected_without_relying_on_a_parse_error(self):
+        """A 500 only reached the failure branch by way of `res.json()`
+        throwing on its error body, and a 2xx with an unparseable body was
+        indistinguishable from a dead server. `res.ok` must be checked
+        before the body is parsed at all."""
+        self.assertIn("if (!res.ok)", dashboard.PAGE_HTML)
+        self.assertIn("markStale(\"server returned \" + res.status)", dashboard.PAGE_HTML)
+
+    def test_each_way_a_poll_can_fail_names_itself(self):
+        """`docs/DASHBOARD.md` tabulates four distinct reasons. Collapsing
+        any two of them back into one caption would put the doc and the page
+        out of step, and would make an unparseable 2xx body read on screen
+        as a dead server again."""
+        for reason in ("fetch failed", "server returned ", "bad response body", "render failed"):
+            self.assertIn(reason, dashboard.PAGE_HTML)
+
+    def test_a_render_that_throws_still_marks_the_page_stale(self):
+        """The page is marked fresh only after every panel has rendered, so
+        an exception part-way through would otherwise leave *neither* mark
+        set: the caption frozen at the last good time, no staleness class,
+        and half the panels un-updated — the exact state this is for."""
+        self.assertIn("renderStatus(data);", dashboard.PAGE_HTML)
+        self.assertIn('markStale("render failed")', dashboard.PAGE_HTML)
+
+    def test_polls_do_not_overlap(self):
+        """Both `setInterval` and the `visibilitychange` listener start
+        polls. Against a restarting server a slow, doomed request can
+        resolve *after* a later successful one and re-mark a live page
+        stale; the payload is a whole snapshot, so skipping a poll that
+        starts while one is in flight loses nothing."""
+        self.assertIn("if (pollInFlight) return;", dashboard.PAGE_HTML)
+        self.assertIn("pollInFlight = false;", dashboard.PAGE_HTML)
+
+    def test_the_plot_signature_includes_the_age_string_it_renders(self):
+        """The plot is re-rendered only when its signature changes, and the
+        age is visible text on every plant as well as its button's
+        accessible name. Keyed on `healthOf` alone (2/5/10-day buckets) a
+        plot left open overnight keeps reading "just now" while the table
+        view, re-rendered unconditionally, reads "3h ago" for the same
+        repo."""
+        self.assertIn("healthOf(r), fmtAge(daysSince(r.last_success))]", dashboard.PAGE_HTML)
+
+    def test_the_stale_caption_reports_the_snapshot_age_not_a_static_string(self):
+        """The point of the staleness treatment is answering "how old is
+        what I'm looking at". `generated_at` is already in the payload, so
+        the caption is built from it via the seconds-granularity formatter
+        rather than `fmtAge`, whose smallest bucket ("just now") covers the
+        first hour."""
+        self.assertIn("fmtSince(lastGoodAt)", dashboard.PAGE_HTML)
+        self.assertNotIn("fetch failed — retrying…", dashboard.PAGE_HTML)
 
 
 class TestRunServerLoopbackEnforcement(unittest.TestCase):

@@ -207,7 +207,21 @@ must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
 `overnight.py`, not just `state.py`'s own db path, and that a newer
 manual-`tend` log does not hide the concurrent `overnight` run's in-flight
-repos or batch bar). `find_active_logs` additionally covers the prune race
+repos or batch bar). The page's in-page JavaScript has no test runner here
+— stdlib-only Python means no JS toolchain — so `TestPageHtmlInvariants`
+asserts it at the only level the Python side can see: the emitted source
+text of `PAGE_HTML`. Those are deliberately narrow "this mechanism is still
+present" checks over the properties that are load-bearing and silently
+regressible — `esc` escaping quotes because it builds an attribute value,
+the poll loop running through the visibility-gated wrapper, a plant being a
+real `<button>` with an accessible name, the detail card rendering
+`last_run`/`last_outcome`, the plot and card listeners being delegated
+because both are replaced wholesale, the tablist's `aria-controls`/
+`role="tabpanel"`/roving-`tabindex` wiring, focus surviving a rebuild of
+either, the rendered age being part of the plot signature, and each of the
+four poll-failure reasons marking the page stale. Anything about how the
+plot *looks* is still verified by rendering it and looking at it, per
+CLAUDE.md. `find_active_logs` additionally covers the prune race
 (a log deleted between the `glob` and the `stat` is skipped, not fatal) —
 that test patches `Path.is_file` as well as `Path.stat`, because `is_file`
 calls `stat` internally and swallows `OSError`, so patching `stat` alone

@@ -199,7 +199,8 @@ per-device wiring recipes it's actually been deployed with), see
 **[docs/OVERNIGHT.md](docs/OVERNIGHT.md)**.
 
 For the dashboard's garden view (the table/plant-plot of every repo's
-health), see **[docs/DASHBOARD.md](docs/DASHBOARD.md)**.
+health) and how the page reports that it has stopped being live, see
+**[docs/DASHBOARD.md](docs/DASHBOARD.md)**.
 
 ## Support
 
