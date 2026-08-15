@@ -1,7 +1,9 @@
 """Real sqlite3 against a tmp db file — no mocking the thing this module
 exists to wrap."""
 import os
+import sqlite3
 import unittest
+from contextlib import closing
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
@@ -203,6 +205,124 @@ class TestRepoStats(unittest.TestCase):
         stats = state.repo_stats(db_path=self.db_path)["owner/a"]
         self.assertEqual((stats.successes, stats.errors), (1, 0))
         self.assertEqual(stats.last_success, "2026-07-01T00:00:00+00:00")
+
+
+class TestSessionStats(unittest.TestCase):
+    """`session_stats` is what the dashboard's headline panel is scoped to,
+    so what it must get right is the *boundary*: a previous night's errors
+    and dollars counted as this night's is the bug it exists to fix (issue
+    #105)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _record(self, timestamp, outcome="tend", cost=None, repo="owner/a"):
+        state.record_run(
+            state.Run(
+                repo=repo, mode="tend", outcome=outcome,
+                timestamp=timestamp, cost_usd=cost,
+            ),
+            db_path=self.db_path,
+        )
+
+    def test_missing_db_is_a_zeroed_session_not_an_error(self):
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual((got.runs, got.errors, got.cost_usd), (0, 0, 0.0))
+        self.assertIsNone(got.started_at)
+        self.assertIsNone(got.ended_at)
+
+    def test_existing_db_with_no_rows_is_a_zeroed_session(self):
+        # Distinct from the missing-db case above: the file exists (log
+        # pruning and a manual DELETE both leave one behind), so the early
+        # return doesn't cover it — the walk itself has to survive.
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
+            conn.executescript(state.SCHEMA)
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual(got.runs, 0)
+        self.assertIsNone(got.started_at)
+
+    def test_runs_within_the_gap_are_one_session(self):
+        self._record("2026-08-09T01:00:00+00:00", cost=1.0)
+        self._record("2026-08-09T03:00:00+00:00", outcome="error", cost=0.5)
+        self._record("2026-08-09T04:30:00+00:00", cost=0.25)
+
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual((got.runs, got.errors, got.cost_usd), (3, 1, 1.75))
+        self.assertEqual(got.started_at, "2026-08-09T01:00:00+00:00")
+        self.assertEqual(got.ended_at, "2026-08-09T04:30:00+00:00")
+
+    def test_a_previous_nights_runs_are_excluded(self):
+        # The exact shape of the reported bug: a 40-row window spanning two
+        # dates attributed the older night's error and spend to this one.
+        self._record("2026-08-08T02:34:00+00:00", outcome="error", cost=9.0)
+        self._record("2026-08-08T03:00:00+00:00", cost=9.0)
+        self._record("2026-08-09T02:00:00+00:00", cost=1.0)
+        self._record("2026-08-09T02:30:00+00:00", cost=2.0)
+
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual((got.runs, got.errors, got.cost_usd), (2, 0, 3.0))
+        self.assertEqual(got.started_at, "2026-08-09T02:00:00+00:00")
+
+    def test_the_gap_boundary_is_exact(self):
+        # Exactly the threshold still counts as the same session; one
+        # second more does not.
+        self._record("2026-08-09T00:00:00+00:00")
+        self._record("2026-08-09T06:00:00+00:00")
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 2)
+
+        self._record("2026-08-09T12:00:01+00:00")
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 1)
+
+    def test_gap_seconds_is_injectable(self):
+        self._record("2026-08-09T01:00:00+00:00")
+        self._record("2026-08-09T02:00:00+00:00")
+        self.assertEqual(
+            state.session_stats(db_path=self.db_path, gap_seconds=60).runs, 1
+        )
+
+    def test_null_costs_sum_to_zero_rather_than_none(self):
+        self._record("2026-08-09T01:00:00+00:00", cost=None)
+        self._record("2026-08-09T02:00:00+00:00", cost=1.25)
+        self.assertEqual(state.session_stats(db_path=self.db_path).cost_usd, 1.25)
+
+    def test_a_session_spans_every_repo_not_just_one(self):
+        # A concurrent batch records two repos inside the same window; the
+        # panel this feeds is garden-wide, unlike repo_stats.
+        self._record("2026-08-09T01:00:00+00:00", repo="owner/a")
+        self._record("2026-08-09T01:05:00+00:00", repo="owner/b")
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 2)
+
+    def test_an_unreadable_timestamp_ends_the_session_rather_than_joining_it(self):
+        self._record("2026-08-09T01:00:00+00:00")
+        self._record("not a timestamp")
+        self._record("2026-08-09T02:00:00+00:00")
+
+        # The two readable runs either side of the unreadable one are not
+        # silently merged across it — the walk stops where it can no longer
+        # reason about the gap.
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual(got.runs, 1)
+        self.assertEqual(got.started_at, "2026-08-09T02:00:00+00:00")
+
+    def test_an_unreadable_newest_timestamp_does_not_swallow_the_history(self):
+        self._record("2026-08-09T01:00:00+00:00")
+        self._record("")
+
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual(got.runs, 1)
+        self.assertEqual(got.started_at, "")
+
+    def test_naive_and_zulu_timestamps_are_read_as_utc(self):
+        # Nothing gardener writes looks like either, but the db is a plain
+        # file an operator can edit, and mixing naive with aware datetimes
+        # would raise on the subtraction rather than degrade.
+        self._record("2026-08-09T01:00:00")
+        self._record("2026-08-09T02:00:00Z")
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 2)
 
 
 class TestStateDirIsHonouredEverywhere(unittest.TestCase):

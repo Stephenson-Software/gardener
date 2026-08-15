@@ -49,7 +49,13 @@ classified as either a success or an error rather than falling silently
 between the two, that a successful `align --implement`/`--file-issue` run
 and a `created_incomplete` bootstrap all count as successes, that a later
 `error` never overwrites `last_success`, and that `last_outcome` breaks a
-same-second timestamp tie by row id); `tests/test_cli.py` covers argument
+same-second timestamp tie by row id). `session_stats` — the
+newest-contiguous-burst window the dashboard's headline panel is scoped to
+— is covered there too, on the boundary rather than the arithmetic: that a
+previous night's runs are excluded, that the gap threshold is exact at the
+edge and injectable, that a session spans every repo rather than one, and
+that an unreadable timestamp ends the session instead of silently folding
+two nights together. `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
@@ -205,9 +211,10 @@ garden/allow-list/history join behind [the garden view](DASHBOARD.md),
 including the allow-listed-but-not-planted row the folded-together panel
 must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
-`overnight.py`, not just `state.py`'s own db path, and that a newer
+`overnight.py`, not just `state.py`'s own db path, that a newer
 manual-`tend` log does not hide the concurrent `overnight` run's in-flight
-repos or batch bar). The page's in-page JavaScript has no test runner here
+repos or batch bar, and that its stat tiles are scoped to the session
+rather than to the `run_limit` row window the Recent runs table keeps). The page's in-page JavaScript has no test runner here
 — stdlib-only Python means no JS toolchain — so `TestPageHtmlInvariants`
 asserts it at the only level the Python side can see: the emitted source
 text of `PAGE_HTML`. Those are deliberately narrow "this mechanism is still
@@ -218,7 +225,11 @@ real `<button>` with an accessible name, the detail card rendering
 `last_run`/`last_outcome`, the plot and card listeners being delegated
 because both are replaced wholesale, the tablist's `aria-controls`/
 `role="tabpanel"`/roving-`tabindex` wiring, focus surviving a rebuild of
-either, the rendered age being part of the plot signature, and each of the
+either, the rendered age being part of the plot signature, every sortable
+column header being a real `<button>` with the sort listener bound to it
+rather than to the `<th>` around it, the sorted column and direction being
+written back into the `<thead>` from the same state the body is sorted
+from, the session panel naming the window it shows, and each of the
 four poll-failure reasons marking the page stale. Anything about how the
 plot *looks* is still verified by rendering it and looking at it, per
 CLAUDE.md. `find_active_logs` additionally covers the prune race

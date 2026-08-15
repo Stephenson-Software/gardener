@@ -9,10 +9,11 @@ nowhere else. Whoever launched the process sees them; nothing else can.
 `dashboard.py` was written to read exactly these lines back out of the
 active log files (see its `find_active_logs`/`parse_in_progress`), but no
 such file was ever written: gardener's own state dir had no `logs/`
-directory in it, so the dashboard's live panels ("Tonight", "Currently
-tending", "Live log") were permanently empty for a run launched any way
-other than a terminal someone was already watching — which is every
-unattended run, i.e. the entire case the dashboard exists for.
+directory in it, so the dashboard's live panels ("Latest session",
+"Currently tending", "Live log") were permanently empty for a run
+launched any way other than a terminal someone was already watching —
+which is every unattended run, i.e. the entire case the dashboard exists
+for.
 
 The fix is deliberately gardener-local: gardener writes its own log, to a
 path gardener owns, and the dashboard reads it. It would have been fewer

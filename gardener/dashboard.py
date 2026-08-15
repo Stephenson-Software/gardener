@@ -52,6 +52,21 @@ overnight run it was running alongside vanished with no indication (issue
 raw narrations would be unreadable, but the payload names the others so
 the page can say how many it isn't showing.
 
+## The headline panel names its own window
+
+The page's first panel — runs, cost, errors, in flight — is scoped by
+`state.session_stats()` to the newest run plus every run contiguous with
+it, a session being whatever activity is unbroken by a gap longer than
+`state.SESSION_GAP_SECONDS`. It was previously headed "Tonight" over the
+most recent `run_limit` (40) rows, which is not a night and never claimed
+to be: `state.list_runs()` applies no time predicate at all, so with a
+garden of ~32 repos filling most of that window in one cycle, the panel
+routinely reported a previous night's failures and dollars as this night's
+(issue #105). Its error count is the page's most glanceable failure
+signal, so it is the number that could least afford an implied window.
+The Recent runs table keeps the row window — there "the last 40 runs" is
+exactly what the table says it is.
+
 ## The garden view
 
 The garden and the merge allow-list used to be two panels of bare repo
@@ -372,8 +387,13 @@ def build_status(
         if batch is not None:
             break
 
-    recent_cost = sum(r.cost_usd for r in runs if r.cost_usd)
-    recent_error_count = sum(1 for r in runs if r.outcome == "error")
+    # Scoped to the newest contiguous burst of runs, not to the `run_limit`
+    # slice above: the panel these feed is the one read to answer "how did
+    # tonight go", and a fixed row count reaches back however far it has to,
+    # so it routinely reports a previous night's errors and spend as this
+    # night's (issue #105). The Recent runs table keeps the row window —
+    # there "the last 40" is exactly what it claims to be.
+    session = state.session_stats(db_path=db_path)
 
     garden_repos = _safe_list(lambda: garden.list_garden(path=base / "garden.json"))
     allowed_repos = _safe_list(
@@ -409,10 +429,16 @@ def build_status(
             }
             for r in runs
         ],
+        # Named `session_*` rather than the `recent_*` these replaced: the
+        # numbers now mean a different window, and a renamed key breaks a
+        # `curl /api/status | jq` check loudly, where a silently
+        # re-scoped one under the old name would not.
         "stats": {
-            "recent_run_count": len(runs),
-            "recent_cost_usd": round(recent_cost, 2),
-            "recent_error_count": recent_error_count,
+            "session_run_count": session.runs,
+            "session_cost_usd": round(session.cost_usd, 2),
+            "session_error_count": session.errors,
+            "session_started_at": session.started_at,
+            "session_ended_at": session.ended_at,
         },
         # `garden`/`merge_allowlist` stay in the payload as the raw lists
         # they always were — `garden_rows` is the joined view the UI
@@ -479,6 +505,10 @@ PAGE_HTML = """<!doctype html>
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em;
     color: var(--muted); margin: 0 0 0.75rem;
   }
+  /* The session panel's window caption lives inside its heading, so it has
+     to opt out of the heading's uppercase label treatment — it's a
+     timestamp, not a label. */
+  .panel h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
   .wide { grid-column: 1 / -1; }
   /* A grid rather than a flex row: four stats wrapped by flex leave a
      ragged last line on a phone, where an even 2x2 reads as one block. */
@@ -610,8 +640,28 @@ PAGE_HTML = """<!doctype html>
   .legend ul { margin: 0.5rem 0 0; padding-left: 1.1rem; }
   .legend li { margin-bottom: 0.15rem; }
   .legend b { color: var(--text); font-weight: 600; }
-  .garden-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
-  .garden-table th[data-sort]:hover { color: var(--text); }
+  /* A real <button> inside the th, not a click handler on the th itself: a
+     <th> is not focusable and has no activation behaviour, so the sort was
+     reachable by mouse only and by nothing else (issue #106). The button
+     takes over the cell's padding so the whole header cell stays the hit
+     target it was. */
+  .garden-table th[data-sort] { padding: 0; white-space: nowrap; }
+  .garden-table th[data-sort] button {
+    font: inherit; color: inherit; background: transparent; border: 0;
+    cursor: pointer; user-select: none; width: 100%;
+    padding: 0.4rem 0.5rem;
+    /* All three are inherited properties that a UA button stylesheet
+       resets, so the header keeps looking like a header. */
+    text-align: inherit; text-transform: inherit; letter-spacing: inherit;
+  }
+  .garden-table th[data-sort] button:hover { color: var(--text); }
+  .garden-table th[data-sort] button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px;
+  }
+  /* Sits beside the label of whichever column is sorted; aria-sort on the
+     th carries the same fact for a screen reader. */
+  .garden-table th .sort-ind { color: var(--accent); margin-left: 0.25rem; }
+  .garden-table th[aria-sort="none"] .sort-ind { visibility: hidden; }
   .garden-table td.num, .garden-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .dot {
     display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%;
@@ -672,7 +722,7 @@ PAGE_HTML = """<!doctype html>
 </header>
 <main>
   <div class="panel">
-    <h2>Tonight</h2>
+    <h2>Latest session <span class="sub" id="session-window"></span></h2>
     <div class="stats" id="stats"></div>
     <div id="batch"></div>
   </div>
@@ -711,13 +761,13 @@ PAGE_HTML = """<!doctype html>
     <div id="table-view" role="tabpanel" aria-labelledby="tab-table" tabindex="0" hidden>
       <table class="garden-table">
         <thead><tr>
-          <th data-sort="repo">Repo</th>
-          <th data-sort="health">Health</th>
-          <th data-sort="successes" class="num">Tends</th>
-          <th data-sort="errors" class="num">Errors</th>
-          <th data-sort="last_success">Last tended</th>
-          <th data-sort="cost_usd" class="num">Cost</th>
-          <th data-sort="can_merge">Merge</th>
+          <th data-sort="repo" aria-sort="none"><button type="button">Repo<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="health" aria-sort="none"><button type="button">Health<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="successes" aria-sort="none" class="num"><button type="button">Tends<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="errors" aria-sort="none" class="num"><button type="button">Errors<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="last_success" aria-sort="none"><button type="button">Last tended<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="cost_usd" aria-sort="none" class="num"><button type="button">Cost<span class="sort-ind" aria-hidden="true">▲</span></button></th>
+          <th data-sort="can_merge" aria-sort="none"><button type="button">Merge<span class="sort-ind" aria-hidden="true">▲</span></button></th>
         </tr></thead>
         <tbody id="garden-rows"></tbody>
       </table>
@@ -962,7 +1012,25 @@ function sortedGardenRows() {
   });
 }
 
+// The <thead> is static markup that renderGardenTable never used to touch,
+// so nothing on the page said which column produced the order on screen —
+// and `dir` toggles on every repeat click, so "sort Health to find what
+// needs water" silently produced the exact inverse on the second click
+// (issue #106). aria-sort carries it for a screen reader, the caret for
+// everyone else. The caret is present but hidden on the inactive columns
+// rather than absent, so sorting doesn't shift the header widths.
+function renderGardenSortHeaders() {
+  for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
+    const active = th.dataset.sort === gardenSort.key;
+    const ascending = gardenSort.dir === 1;
+    th.setAttribute("aria-sort", !active ? "none" : ascending ? "ascending" : "descending");
+    const ind = th.querySelector(".sort-ind");
+    if (ind) ind.textContent = active && !ascending ? "▼" : "▲";
+  }
+}
+
 function renderGardenTable() {
+  renderGardenSortHeaders();
   const rows = sortedGardenRows();
   document.getElementById("garden-rows").innerHTML = rows.map(r => {
     const h = HEALTH[healthOf(r)];
@@ -1172,13 +1240,22 @@ GARDEN_TABS.forEach((tab, i) => {
     document.getElementById(next.id).focus();
   });
 });
+// Bound to the button inside each header cell, not to the cell: the button
+// is what brings focusability and Enter/Space activation with it, which a
+// bare <th> has neither of.
 for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
-  th.addEventListener("click", () => {
+  const button = th.querySelector("button");
+  if (!button) continue;
+  button.addEventListener("click", () => {
     const key = th.dataset.sort;
     gardenSort = {key, dir: gardenSort.key === key ? -gardenSort.dir : 1};
     renderGardenTable();
   });
 }
+// The header has to state the default sort before the first poll lands,
+// not only once a click has happened — `{key: "repo", dir: 1}` is as much
+// a sort as any other, and was equally unlabelled.
+renderGardenSortHeaders();
 try { showGardenView(localStorage.getItem("gardenView") || "plot"); } catch (e) { showGardenView("plot"); }
 
 // The header caption is the page's only claim about its own liveness, so
@@ -1254,11 +1331,28 @@ async function refresh() {
   }
 }
 
+// A session can start on a previous calendar day — an overnight run begun
+// at 23:00 and read at 02:00 is one session — so a bare clock time would be
+// ambiguous in exactly the case this panel exists for.
+function sessionStart(iso) {
+  const t = Date.parse(iso ?? "");
+  if (isNaN(t)) return "";
+  const d = new Date(t);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return (sameDay ? "" : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " ")
+    + shortTime(iso);
+}
+
 function renderStatus(data) {
+  // The window is stated, never implied: this panel used to be headed
+  // "Tonight" over whatever the last 40 rows happened to span (issue #105).
+  const st = data.stats;
+  document.getElementById("session-window").textContent =
+    st.session_run_count ? "since " + sessionStart(st.session_started_at) : "";
   document.getElementById("stats").innerHTML = `
-    <div class="stat"><div class="n">${data.stats.recent_run_count}</div><div class="l">recent runs</div></div>
-    <div class="stat"><div class="n">${fmtCost(data.stats.recent_cost_usd)}</div><div class="l">recent cost</div></div>
-    <div class="stat"><div class="n">${data.stats.recent_error_count}</div><div class="l">errors</div></div>
+    <div class="stat"><div class="n">${st.session_run_count}</div><div class="l">runs</div></div>
+    <div class="stat"><div class="n">${fmtCost(st.session_cost_usd)}</div><div class="l">cost</div></div>
+    <div class="stat"><div class="n">${st.session_error_count}</div><div class="l">errors</div></div>
     <div class="stat"><div class="n">${data.in_progress.length}</div><div class="l">in flight</div></div>
   `;
 
