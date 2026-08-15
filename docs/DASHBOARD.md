@@ -1,7 +1,50 @@
 # The dashboard
 
-Covers the garden view — the panel the dashboard is mostly *for* — and what
-the page does when it can no longer reach the server behind it.
+Covers the headline session panel, the garden view — the panel the
+dashboard is mostly *for* — and what the page does when it can no longer
+reach the server behind it.
+
+## The Latest session panel
+
+The page's headline panel — runs, cost, errors, in flight — is scoped to
+one **session**: the newest run in the history plus every run contiguous
+with it, where "contiguous" means no quiet gap longer than
+`state.SESSION_GAP_SECONDS` (6 hours). `state.session_stats()` walks the
+history newest-first and stops at the first such gap.
+
+Six hours is picked from what the history actually looks like rather than
+rounded off: inside one `overnight` batch the gap between two recorded runs
+is at most a single dispatch, well under an hour, while the gap between one
+night's run and the next is most of a waking day. So a session is one
+night's rotation, or one manual `tend`.
+
+The gap rule alone would chain, though — an `overnight` ending at 03:00 and
+a manual `tend` at 08:30 are inside the threshold, and every further run
+under it extends the window — so a session is additionally capped at
+`state.MAX_SESSION_SPAN_SECONDS` (24 hours), measured back from the newest
+run. A panel headed "Latest session" can then never be showing three days,
+which is the exact failure it was rescoped to remove, and the walk gains a
+ceiling on the rows it reads per poll.
+
+The heading states the window it is showing — `20:45 – 03:36`, dated when
+an end falls on a day other than today — rather than leaving it implied.
+Both ends, not only the start: a session that finished this morning would
+otherwise read as one still running, beside an "in flight" tile counting
+something else entirely.
+
+This panel used to be headed **Tonight** over the most recent
+`run_limit` (40) rows of history, which is not a night and does not claim
+to be — `state.list_runs()` applies no time predicate at all. With a garden
+of ~32 repos one full cycle already fills most of that window, so the panel
+routinely straddled two or more nights and reported a previous night's
+failures and dollars as this one's. The error count there is the page's
+most glanceable failure signal and the first thing read when deciding
+whether an overnight run went badly, so it is the one number that most
+needed a window it could actually name.
+
+The **Recent runs** table further down keeps the row window — "the last 40
+runs" is exactly what that table claims to be, so no rescoping is owed
+there.
 
 ## The garden view
 
@@ -28,7 +71,11 @@ remembered in `localStorage`):
 
 - **Table** — repo, health, tends, errors, last tended, cost, merge. Every
   column header sorts; sorting Health ascending puts the repos that need
-  attention first.
+  attention first. Each header is a real `<button>`, so the sort is
+  reachable by keyboard and not only by mouse, and the active column
+  carries both `aria-sort` and a `▲`/`▼` caret — repeat-activating a column
+  toggles the direction, and without the caret the inverse order was
+  indistinguishable from the one asked for.
 - **Plot** — each repo drawn as a plant, in SVG, generated in the page from
   the same row. This is the "look at the garden" view rather than the "read
   the garden" one:

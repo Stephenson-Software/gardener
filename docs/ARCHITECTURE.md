@@ -35,7 +35,9 @@ gardener/
     conventions.py   — resolves the configured conventions repo URL (no
                        built-in default) and clones/refreshes its local cache
     state.py         — SQLite-backed run history, plus repo_stats()'s
-                       all-time per-repo aggregates for the garden view
+                       all-time per-repo aggregates for the garden view and
+                       session_stats()' newest-contiguous-burst window for
+                       the dashboard's headline panel
     repo_lock.py     — cross-process, per-repo fcntl.flock exclusion so two
                        gardener invocations never clone/checkout/dispatch
                        against the same shared clone directory at once (see

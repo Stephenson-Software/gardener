@@ -308,7 +308,7 @@ tending <repo>` / `overnight dispatching ... (N-M/T candidates this run
 ...)` progress lines back out of the active logs, and before this existed
 no such file was ever written — so for any run not launched in a terminal
 someone was already watching (i.e. every unattended run, the entire case
-the dashboard exists for) "Tonight", "Currently tending", and "Live log"
+the dashboard exists for) "Latest session", "Currently tending", and "Live log"
 were permanently empty while "Recent runs" kept working off the SQLite
 history.
 

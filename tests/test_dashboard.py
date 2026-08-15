@@ -385,7 +385,7 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["merge_allowlist"], ["owner/repo"])
         self.assertEqual(result["overnight_next_index"], 3)
 
-    def test_includes_recorded_runs_and_recent_cost(self):
+    def test_includes_recorded_runs_and_session_cost(self):
         run = state.Run(
             repo="owner/repo", mode="tend", outcome="tend",
             timestamp="2026-07-19T00:00:00+00:00",
@@ -396,8 +396,45 @@ class TestBuildStatus(unittest.TestCase):
         result = dashboard.build_status(state_dir=self.state_dir)
         self.assertEqual(len(result["runs"]), 1)
         self.assertEqual(result["runs"][0]["repo"], "owner/repo")
-        self.assertEqual(result["stats"]["recent_cost_usd"], 1.5)
-        self.assertEqual(result["stats"]["recent_run_count"], 1)
+        self.assertEqual(result["stats"]["session_cost_usd"], 1.5)
+        self.assertEqual(result["stats"]["session_run_count"], 1)
+        self.assertEqual(result["stats"]["session_started_at"], "2026-07-19T00:00:00+00:00")
+        self.assertEqual(result["stats"]["session_ended_at"], "2026-07-19T00:00:00+00:00")
+
+    def test_stats_cover_the_session_not_the_run_limit_window(self):
+        """The panel these feed names the window it shows, so the numbers
+        have to be that window: a fixed row count reaches back into a
+        previous night and reports its errors and spend as this night's
+        (issue #105). The Recent runs table keeps the row window."""
+        db_path = self.state_dir / "gardener.sqlite3"
+        for timestamp, outcome, cost in [
+            ("2026-08-08T02:00:00+00:00", "error", 4.0),
+            ("2026-08-08T03:00:00+00:00", "tend", 4.0),
+            ("2026-08-09T02:00:00+00:00", "tend", 1.0),
+            ("2026-08-09T02:40:00+00:00", "error", 0.5),
+        ]:
+            state.record_run(
+                state.Run(
+                    repo="owner/repo", mode="tend", outcome=outcome,
+                    timestamp=timestamp, cost_usd=cost,
+                ),
+                db_path=db_path,
+            )
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["stats"]["session_run_count"], 2)
+        self.assertEqual(result["stats"]["session_error_count"], 1)
+        self.assertEqual(result["stats"]["session_cost_usd"], 1.5)
+        self.assertEqual(result["stats"]["session_started_at"], "2026-08-09T02:00:00+00:00")
+        # …while the runs table still carries the whole history it asked for.
+        self.assertEqual(len(result["runs"]), 4)
+
+    def test_empty_history_reports_a_zeroed_session(self):
+        stats = dashboard.build_status(state_dir=self.state_dir)["stats"]
+        self.assertEqual(stats["session_run_count"], 0)
+        self.assertEqual(stats["session_error_count"], 0)
+        self.assertEqual(stats["session_cost_usd"], 0.0)
+        self.assertIsNone(stats["session_started_at"])
 
     def test_active_log_drives_in_progress_and_batch_progress(self):
         logs_dir = self.state_dir / "logs"
@@ -670,6 +707,62 @@ class TestPageHtmlInvariants(unittest.TestCase):
         disagree."""
         self.assertIn("el.setAttribute(\"aria-selected\", String(selected));", dashboard.PAGE_HTML)
         self.assertIn("el.tabIndex = selected ? 0 : -1;", dashboard.PAGE_HTML)
+
+    def test_every_sortable_header_is_a_real_button(self):
+        """A `<th>` is not focusable and has no activation behaviour, so a
+        click handler on one is a mouse-only control with no keyboard path
+        at all (issue #106). Every sortable column must carry a real button,
+        and the listener must be bound to that button rather than to the
+        cell around it — binding it back to the `<th>` would restore the
+        original bug while leaving the markup looking fixed."""
+        for key in ("repo", "health", "successes", "errors", "last_success",
+                    "cost_usd", "can_merge"):
+            self.assertIn(f'<th data-sort="{key}" aria-sort="none"', dashboard.PAGE_HTML)
+        self.assertEqual(
+            dashboard.PAGE_HTML.count('<button type="button">'),
+            7,
+            "one activation control per sortable column",
+        )
+        self.assertIn('const button = th.querySelector("button");', dashboard.PAGE_HTML)
+        self.assertIn('button.addEventListener("click"', dashboard.PAGE_HTML)
+
+    def test_the_sorted_column_and_direction_are_rendered_into_the_header(self):
+        """`gardenSort` tracks both a key and a direction and used to render
+        neither: the rows reordered with nothing saying which column caused
+        it or which way it pointed, and `dir` toggles on a repeat click, so
+        the exact inverse of the requested order looked identical. The
+        header render must run from the same sort state the body does — it
+        is called by `renderGardenTable`, so the two can't disagree."""
+        self.assertIn("function renderGardenSortHeaders()", dashboard.PAGE_HTML)
+        self.assertIn(
+            'th.setAttribute("aria-sort", !active ? "none" : ascending ? "ascending" : "descending");',
+            dashboard.PAGE_HTML,
+        )
+        self.assertIn("function renderGardenTable() {\n  renderGardenSortHeaders();", dashboard.PAGE_HTML)
+
+    def test_the_session_panel_states_the_window_it_shows(self):
+        """The panel was headed "Tonight" over whatever the last 40 rows
+        happened to span (issue #105). The heading now carries the session's
+        own start, so the stat tiles must be fed from the session-scoped
+        payload keys rather than the row-window ones they replaced."""
+        self.assertIn('<span class="sub" id="session-window">', dashboard.PAGE_HTML)
+        self.assertIn("st.session_run_count ? sessionWindow(st) : \"\"", dashboard.PAGE_HTML)
+        for key in ("session_run_count", "session_cost_usd", "session_error_count"):
+            self.assertIn("st." + key, dashboard.PAGE_HTML)
+        self.assertNotIn("recent_run_count", dashboard.PAGE_HTML)
+        self.assertNotIn(">Tonight<", dashboard.PAGE_HTML)
+
+    def test_the_session_caption_shows_both_ends_and_degrades_to_neither(self):
+        """A session that finished hours ago would read as one still running
+        if only its start were shown — beside an "in flight" tile counting
+        something else, that is two windows in one panel. And an unreadable
+        timestamp is a case `state.session_stats` deliberately survives, so
+        the caption must degrade to an empty string rather than to a
+        dangling preposition."""
+        self.assertIn("function sessionWindow(stats)", dashboard.PAGE_HTML)
+        self.assertIn("stats.session_ended_at", dashboard.PAGE_HTML)
+        self.assertIn("if (!start) return end;", dashboard.PAGE_HTML)
+        self.assertIn("if (!end || end === start) return start;", dashboard.PAGE_HTML)
 
     def test_a_failed_poll_marks_the_whole_page_stale(self):
         """Every panel keeps rendering the last good snapshot after a failed

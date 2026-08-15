@@ -115,6 +115,49 @@ class RepoStats:
     duration_ms: int = 0
 
 
+#: How long a quiet gap has to be before the runs either side of it count
+#: as separate sessions. Six hours is chosen from what the run history
+#: actually looks like, not picked round: inside one `overnight` batch the
+#: gap between two recorded runs is at most one dispatch
+#: (`dispatch.TEND_DEFAULT_TIMEOUT_SECONDS`, well under an hour), while the
+#: gap between one night's run and the next is most of a waking day. Any
+#: threshold between those two separates nights without splitting one.
+SESSION_GAP_SECONDS = 6 * 3600
+
+#: The longest a session may span in total, however unbroken it is. The gap
+#: rule alone chains: an `overnight` rotation ending at 03:00 and a manual
+#: `tend` at 08:30 are under the threshold apart, so they fold together,
+#: and every further sub-gap run extends the chain — which is the
+#: multi-night straddle this window exists to remove, arrived at the long
+#: way round. A day is the outer bound because "Latest session" can then
+#: never mean "the last three days"; it also bounds the walk below, which
+#: would otherwise have no ceiling on the rows it reads per poll.
+MAX_SESSION_SPAN_SECONDS = 24 * 3600
+
+
+@dataclass
+class SessionStats:
+    """The most recent unbroken burst of activity in the run history.
+
+    Deliberately *not* the `list_runs(limit=N)` window: the dashboard panel
+    these feed is the one an operator reads to answer "how did tonight go",
+    and a fixed row count routinely straddles two nights, attributing a
+    previous night's failures and spend to this one (issue #105). A gap of
+    `SESSION_GAP_SECONDS` with nothing recorded in it ends the session, so
+    the window is however long the activity actually was — one repo tended
+    by hand, or a full overnight rotation.
+
+    `started_at`/`ended_at` are the raw timestamp strings of the oldest and
+    newest run in the window, so a caller can say *which* window it is
+    showing rather than leaving the reader to assume."""
+
+    runs: int = 0
+    errors: int = 0
+    cost_usd: float = 0.0
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+
+
 @dataclass
 class Run:
     repo: str
@@ -202,6 +245,89 @@ def list_runs(
         )
         for r in rows
     ]
+
+
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """A recorded `timestamp` as an aware datetime, or None if it can't be
+    read as one.
+
+    Every timestamp gardener writes comes from `now_iso()` and is UTC and
+    aware, but this parses defensively: the db is a plain file an operator
+    can edit, and a single unreadable row must not take the dashboard down.
+    A naive value is read as UTC rather than rejected, since that is what
+    every writer in this repo means by one — and mixing naive with aware
+    would raise on the subtraction in `session_stats` rather than degrade."""
+    if not value:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def session_stats(
+    db_path: Optional[Path] = None,
+    gap_seconds: float = SESSION_GAP_SECONDS,
+    max_span_seconds: float = MAX_SESSION_SPAN_SECONDS,
+) -> SessionStats:
+    """Aggregate of the newest run and every run contiguous with it.
+
+    Walks the history newest-first and stops at the first gap longer than
+    `gap_seconds`, or once the window would span more than
+    `max_span_seconds` in total — the rows are streamed rather than
+    fetched, and the walk breaks out, so this reads at most a day's rows
+    rather than the whole table even though the query has no LIMIT (the
+    ordering is on the primary key, so there is no sort to pay for either).
+
+    An empty or missing db is a zeroed `SessionStats`, not an error: the
+    dashboard renders before anything has ever been dispatched."""
+    db_path = db_path or default_db_path()
+    stats = SessionStats()
+    if not db_path.exists():
+        return stats
+    newest: Optional[datetime] = None
+    previous: Optional[datetime] = None
+    with closing(_connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT timestamp, outcome, cost_usd FROM runs ORDER BY id DESC"
+        ):
+            current = _parse_timestamp(row["timestamp"])
+            # Measured from the newest run rather than from the previous
+            # one: unbroken activity is still capped, so a chain of runs
+            # each inside the gap can't quietly grow into a multi-day
+            # window under a heading that says "session".
+            if (
+                newest is not None
+                and current is not None
+                and (newest - current).total_seconds() > max_span_seconds
+            ):
+                break
+            # An unreadable timestamp ends the session rather than joining
+            # it: with no time there is no way to tell which side of a gap
+            # the row belongs on, and guessing would silently fold a
+            # previous night's numbers into this one — the exact failure
+            # this function exists to fix.
+            if stats.runs and (
+                current is None
+                or previous is None
+                or (previous - current).total_seconds() > gap_seconds
+            ):
+                break
+            stats.runs += 1
+            if row["outcome"] == ERROR_OUTCOME:
+                stats.errors += 1
+            stats.cost_usd += row["cost_usd"] or 0.0
+            # Newest row first, so the last one seen is the oldest.
+            stats.started_at = row["timestamp"]
+            if stats.ended_at is None:
+                stats.ended_at = row["timestamp"]
+                newest = current
+            previous = current
+    stats.cost_usd = round(stats.cost_usd, 4)
+    return stats
 
 
 def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
