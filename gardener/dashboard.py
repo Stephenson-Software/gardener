@@ -57,7 +57,8 @@ the page can say how many it isn't showing.
 The page's first panel — runs, cost, errors, in flight — is scoped by
 `state.session_stats()` to the newest run plus every run contiguous with
 it, a session being whatever activity is unbroken by a gap longer than
-`state.SESSION_GAP_SECONDS`. It was previously headed "Tonight" over the
+`state.SESSION_GAP_SECONDS` and no longer in total than
+`state.MAX_SESSION_SPAN_SECONDS`. It was previously headed "Tonight" over the
 most recent `run_limit` (40) rows, which is not a night and never claimed
 to be: `state.list_runs()` applies no time predicate at all, so with a
 garden of ~32 repos filling most of that window in one cycle, the panel
@@ -1334,7 +1335,7 @@ async function refresh() {
 // A session can start on a previous calendar day — an overnight run begun
 // at 23:00 and read at 02:00 is one session — so a bare clock time would be
 // ambiguous in exactly the case this panel exists for.
-function sessionStart(iso) {
+function sessionTime(iso) {
   const t = Date.parse(iso ?? "");
   if (isNaN(t)) return "";
   const d = new Date(t);
@@ -1343,12 +1344,27 @@ function sessionStart(iso) {
     + shortTime(iso);
 }
 
+// Both ends, not just the start. A session that finished hours ago would
+// otherwise read as one still running — "since 1:00 AM" over this
+// morning's numbers, beside an "in flight" tile counting tonight's — which
+// is two windows in one panel, the thing this panel was rescoped to stop
+// doing. An unreadable timestamp yields "" rather than a dangling
+// preposition: `session_stats` deliberately survives one, so the page has
+// to as well.
+function sessionWindow(stats) {
+  const start = sessionTime(stats.session_started_at);
+  const end = sessionTime(stats.session_ended_at);
+  if (!start) return end;
+  if (!end || end === start) return start;
+  return start + " – " + end;
+}
+
 function renderStatus(data) {
   // The window is stated, never implied: this panel used to be headed
   // "Tonight" over whatever the last 40 rows happened to span (issue #105).
   const st = data.stats;
   document.getElementById("session-window").textContent =
-    st.session_run_count ? "since " + sessionStart(st.session_started_at) : "";
+    st.session_run_count ? sessionWindow(st) : "";
   document.getElementById("stats").innerHTML = `
     <div class="stat"><div class="n">${st.session_run_count}</div><div class="l">runs</div></div>
     <div class="stat"><div class="n">${fmtCost(st.session_cost_usd)}</div><div class="l">cost</div></div>

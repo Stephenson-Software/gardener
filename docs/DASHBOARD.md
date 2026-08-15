@@ -16,9 +16,21 @@ Six hours is picked from what the history actually looks like rather than
 rounded off: inside one `overnight` batch the gap between two recorded runs
 is at most a single dispatch, well under an hour, while the gap between one
 night's run and the next is most of a waking day. So a session is one
-night's rotation, or one manual `tend`, and the panel's heading states the
-window it is showing (`since 23:04`, dated when the session started on a
-previous day) rather than leaving it implied.
+night's rotation, or one manual `tend`.
+
+The gap rule alone would chain, though — an `overnight` ending at 03:00 and
+a manual `tend` at 08:30 are inside the threshold, and every further run
+under it extends the window — so a session is additionally capped at
+`state.MAX_SESSION_SPAN_SECONDS` (24 hours), measured back from the newest
+run. A panel headed "Latest session" can then never be showing three days,
+which is the exact failure it was rescoped to remove, and the walk gains a
+ceiling on the rows it reads per poll.
+
+The heading states the window it is showing — `20:45 – 03:36`, dated when
+an end falls on a day other than today — rather than leaving it implied.
+Both ends, not only the start: a session that finished this morning would
+otherwise read as one still running, beside an "in flight" tile counting
+something else entirely.
 
 This panel used to be headed **Tonight** over the most recent
 `run_limit` (40) rows of history, which is not a night and does not claim

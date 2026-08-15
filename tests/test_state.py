@@ -277,6 +277,36 @@ class TestSessionStats(unittest.TestCase):
         self._record("2026-08-09T12:00:01+00:00")
         self.assertEqual(state.session_stats(db_path=self.db_path).runs, 1)
 
+    def test_unbroken_activity_is_still_capped_at_the_max_span(self):
+        # The gap rule alone chains: runs every five hours are each inside
+        # the threshold, so without a cap a week of them would be one
+        # "session" — the multi-day window this scoping exists to remove,
+        # arrived at from the other direction.
+        for hour in range(0, 40, 5):
+            day, rest = divmod(hour, 24)
+            self._record(f"2026-08-{9 + day:02d}T{rest:02d}:00:00+00:00")
+
+        # Newest is 2026-08-10T11:00; the cap admits everything back to
+        # 2026-08-09T15:00 and stops one row short of a second day.
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual(got.ended_at, "2026-08-10T11:00:00+00:00")
+        self.assertEqual(got.started_at, "2026-08-09T15:00:00+00:00")
+        self.assertEqual(got.runs, 5)
+
+    def test_the_span_cap_is_measured_from_the_newest_run(self):
+        self._record("2026-08-09T00:00:00+00:00")
+        self._record("2026-08-10T00:00:00+00:00")
+        # Exactly the cap, so still one session.
+        self.assertEqual(
+            state.session_stats(db_path=self.db_path, gap_seconds=48 * 3600).runs, 2
+        )
+        self.assertEqual(
+            state.session_stats(
+                db_path=self.db_path, gap_seconds=48 * 3600, max_span_seconds=86399
+            ).runs,
+            1,
+        )
+
     def test_gap_seconds_is_injectable(self):
         self._record("2026-08-09T01:00:00+00:00")
         self._record("2026-08-09T02:00:00+00:00")

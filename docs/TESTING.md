@@ -53,9 +53,11 @@ same-second timestamp tie by row id). `session_stats` — the
 newest-contiguous-burst window the dashboard's headline panel is scoped to
 — is covered there too, on the boundary rather than the arithmetic: that a
 previous night's runs are excluded, that the gap threshold is exact at the
-edge and injectable, that a session spans every repo rather than one, and
-that an unreadable timestamp ends the session instead of silently folding
-two nights together. `tests/test_cli.py` covers argument
+edge and injectable, that unbroken sub-threshold activity is still capped
+at the maximum span (measured back from the newest run, so a chain of runs
+can't grow into a multi-day window), that a session spans every repo rather
+than one, and that an unreadable timestamp ends the session instead of
+silently folding two nights together. `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
@@ -229,8 +231,9 @@ either, the rendered age being part of the plot signature, every sortable
 column header being a real `<button>` with the sort listener bound to it
 rather than to the `<th>` around it, the sorted column and direction being
 written back into the `<thead>` from the same state the body is sorted
-from, the session panel naming the window it shows, and each of the
-four poll-failure reasons marking the page stale. Anything about how the
+from, the session panel naming both ends of the window it shows (and
+degrading to no caption at all rather than to a dangling preposition), and
+each of the four poll-failure reasons marking the page stale. Anything about how the
 plot *looks* is still verified by rendering it and looking at it, per
 CLAUDE.md. `find_active_logs` additionally covers the prune race
 (a log deleted between the `glob` and the `stat` is skipped, not fatal) —

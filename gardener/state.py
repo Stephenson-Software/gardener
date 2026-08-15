@@ -124,6 +124,16 @@ class RepoStats:
 #: threshold between those two separates nights without splitting one.
 SESSION_GAP_SECONDS = 6 * 3600
 
+#: The longest a session may span in total, however unbroken it is. The gap
+#: rule alone chains: an `overnight` rotation ending at 03:00 and a manual
+#: `tend` at 08:30 are under the threshold apart, so they fold together,
+#: and every further sub-gap run extends the chain — which is the
+#: multi-night straddle this window exists to remove, arrived at the long
+#: way round. A day is the outer bound because "Latest session" can then
+#: never mean "the last three days"; it also bounds the walk below, which
+#: would otherwise have no ceiling on the rows it reads per poll.
+MAX_SESSION_SPAN_SECONDS = 24 * 3600
+
 
 @dataclass
 class SessionStats:
@@ -260,14 +270,16 @@ def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
 def session_stats(
     db_path: Optional[Path] = None,
     gap_seconds: float = SESSION_GAP_SECONDS,
+    max_span_seconds: float = MAX_SESSION_SPAN_SECONDS,
 ) -> SessionStats:
     """Aggregate of the newest run and every run contiguous with it.
 
     Walks the history newest-first and stops at the first gap longer than
-    `gap_seconds` — the rows are streamed rather than fetched, and the walk
-    breaks out, so this reads a night's worth of rows rather than the whole
-    table even though the query has no LIMIT (the ordering is on the
-    primary key, so there is no sort to pay for either).
+    `gap_seconds`, or once the window would span more than
+    `max_span_seconds` in total — the rows are streamed rather than
+    fetched, and the walk breaks out, so this reads at most a day's rows
+    rather than the whole table even though the query has no LIMIT (the
+    ordering is on the primary key, so there is no sort to pay for either).
 
     An empty or missing db is a zeroed `SessionStats`, not an error: the
     dashboard renders before anything has ever been dispatched."""
@@ -275,6 +287,7 @@ def session_stats(
     stats = SessionStats()
     if not db_path.exists():
         return stats
+    newest: Optional[datetime] = None
     previous: Optional[datetime] = None
     with closing(_connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -282,6 +295,16 @@ def session_stats(
             "SELECT timestamp, outcome, cost_usd FROM runs ORDER BY id DESC"
         ):
             current = _parse_timestamp(row["timestamp"])
+            # Measured from the newest run rather than from the previous
+            # one: unbroken activity is still capped, so a chain of runs
+            # each inside the gap can't quietly grow into a multi-day
+            # window under a heading that says "session".
+            if (
+                newest is not None
+                and current is not None
+                and (newest - current).total_seconds() > max_span_seconds
+            ):
+                break
             # An unreadable timestamp ends the session rather than joining
             # it: with no time there is no way to tell which side of a gap
             # the row belongs on, and guessing would silently fold a
@@ -301,6 +324,7 @@ def session_stats(
             stats.started_at = row["timestamp"]
             if stats.ended_at is None:
                 stats.ended_at = row["timestamp"]
+                newest = current
             previous = current
     stats.cost_usd = round(stats.cost_usd, 4)
     return stats

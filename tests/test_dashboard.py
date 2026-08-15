@@ -746,11 +746,23 @@ class TestPageHtmlInvariants(unittest.TestCase):
         own start, so the stat tiles must be fed from the session-scoped
         payload keys rather than the row-window ones they replaced."""
         self.assertIn('<span class="sub" id="session-window">', dashboard.PAGE_HTML)
-        self.assertIn('"since " + sessionStart(st.session_started_at)', dashboard.PAGE_HTML)
+        self.assertIn("st.session_run_count ? sessionWindow(st) : \"\"", dashboard.PAGE_HTML)
         for key in ("session_run_count", "session_cost_usd", "session_error_count"):
             self.assertIn("st." + key, dashboard.PAGE_HTML)
         self.assertNotIn("recent_run_count", dashboard.PAGE_HTML)
         self.assertNotIn(">Tonight<", dashboard.PAGE_HTML)
+
+    def test_the_session_caption_shows_both_ends_and_degrades_to_neither(self):
+        """A session that finished hours ago would read as one still running
+        if only its start were shown — beside an "in flight" tile counting
+        something else, that is two windows in one panel. And an unreadable
+        timestamp is a case `state.session_stats` deliberately survives, so
+        the caption must degrade to an empty string rather than to a
+        dangling preposition."""
+        self.assertIn("function sessionWindow(stats)", dashboard.PAGE_HTML)
+        self.assertIn("stats.session_ended_at", dashboard.PAGE_HTML)
+        self.assertIn("if (!start) return end;", dashboard.PAGE_HTML)
+        self.assertIn("if (!end || end === start) return start;", dashboard.PAGE_HTML)
 
     def test_a_failed_poll_marks_the_whole_page_stale(self):
         """Every panel keeps rendering the last good snapshot after a failed
