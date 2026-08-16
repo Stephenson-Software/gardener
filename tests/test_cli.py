@@ -2379,8 +2379,9 @@ class TestCmdOvernightSelfUpdate(unittest.TestCase):
             cmd_overnight(args)
         mock_self_update.assert_called_once_with()
 
+    @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.selfupdate.self_update")
-    def test_a_raising_self_update_never_aborts_the_run(self, mock_self_update):
+    def test_a_raising_self_update_never_aborts_the_run(self, mock_self_update, _mock_notifier):
         mock_self_update.side_effect = RuntimeError("boom")
         with redirect_stderr(io.StringIO()) as stderr:
             exit_code = cmd_overnight(self._args())

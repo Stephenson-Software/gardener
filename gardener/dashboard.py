@@ -112,6 +112,7 @@ import re
 import socket
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -152,10 +153,22 @@ def find_active_log(logs_dir: Path) -> Optional[Path]:
     starts writing."""
     if not logs_dir.exists():
         return None
-    logs = [p for p in logs_dir.glob("*.log") if p.is_file()]
-    if not logs:
+    # Guarded the same way `find_active_logs` guards its own stat, and for
+    # the same reason: `run_log.prune_old_logs` runs at the start of every
+    # dispatching run and can delete a log between this glob and the stat
+    # below. Unguarded, that raced `OSError` propagated all the way out of
+    # `do_GET` (issue #121) — and this is the path every poll takes once
+    # no log is fresh enough to be "active", i.e. all day.
+    dated = []
+    for path in logs_dir.glob("*.log"):
+        try:
+            if path.is_file():
+                dated.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    if not dated:
         return None
-    return max(logs, key=lambda p: p.stat().st_mtime)
+    return max(dated, key=lambda d: d[0])[1]
 
 
 def find_active_logs(
@@ -328,9 +341,12 @@ def build_garden_rows(
     mismatch is worth seeing — it means something is permitted to merge
     that `overnight` will never dispatch.
 
-    Rows are sorted by repo name, matching `gardener garden list` — a
-    stable order matters more than a clever one here, because the plot
-    view draws a plant per row and re-renders every 4 s poll."""
+    Rows are sorted by repo name, matching `gardener garden list`. This is
+    the payload's canonical order, not necessarily the drawn one: the plot
+    view re-orders client-side to put the repos needing attention first
+    (issue #132), and the table view sorts by whichever column the reader
+    picked. Keeping the wire order stable and alphabetical is what lets
+    both of those be presentation decisions."""
     repos = sorted(set(garden_repos) | set(allowed_repos))
     allowed = set(allowed_repos)
     in_flight = set(in_progress)
@@ -351,21 +367,42 @@ def build_garden_rows(
                 "last_success": s.last_success if s else None,
                 "last_outcome": s.last_outcome if s else None,
                 "cost_usd": round(s.cost_usd, 2) if s else 0.0,
+                # Aggregated by `repo_stats` all along and dropped here,
+                # so no view could show how much of a time budget a repo
+                # actually consumes (issue #137).
+                "duration_ms": s.duration_ms if s else 0,
             }
         )
     return rows
+
+
+#: Bumped whenever a key the page reads is renamed, removed, or changes
+#: meaning. The page compares it against its own baked-in copy and refuses
+#: to render a payload it doesn't understand, instead of interpolating
+#: `undefined` into the stat tiles under a confident heartbeat (issue
+#: #123). This is a real, routine skew, not a theoretical one: `overnight`
+#: self-updates before each run, so a tab left open across a restart is
+#: the normal case, and #119's `recent_*` → `session_*` rename is exactly
+#: the shape of change that produced it.
+PAYLOAD_SCHEMA = 2
 
 
 def build_status(
     state_dir: Optional[Path] = None,
     run_limit: int = 40,
     log_tail_lines: int = 400,
+    repo: Optional[str] = None,
+    history_days: int = 14,
 ) -> dict:
     base = state_dir or state.default_state_dir()
     db_path = base / "gardener.sqlite3"
     logs_dir = default_logs_dir(base)
 
-    runs = state.list_runs(db_path=db_path, limit=run_limit)
+    # `repo` narrows the Recent runs table to one repo's history. Both it
+    # and `run_limit` were already `list_runs` parameters that nothing ever
+    # passed, so the plant detail card could report "17 errors" with no way
+    # to reach any of them (issue #138).
+    runs = state.list_runs(db_path=db_path, limit=run_limit, repo=repo)
     # Every live log, not just the newest — a manual `tend` started
     # alongside the overnight run used to hide it completely (issue #50).
     active_logs = find_active_logs(logs_dir)
@@ -405,7 +442,12 @@ def build_status(
     )
 
     return {
+        "schema": PAYLOAD_SCHEMA,
         "generated_at": state.now_iso(),
+        # Echoed back so the page can caption the runs table with the
+        # filter actually applied, rather than assuming its own request
+        # shape survived.
+        "runs_filter": {"repo": repo, "limit": run_limit},
         # `active_log` is the one whose raw narration `log_tail` shows;
         # `active_logs` is every log the in-flight/batch panels were built
         # from, so the page can say how many runs it is *not* tailing
@@ -440,7 +482,31 @@ def build_status(
             "session_error_count": session.errors,
             "session_started_at": session.started_at,
             "session_ended_at": session.ended_at,
+            "session_duration_ms": session.duration_ms,
         },
+        # The session's error rows, not just the count in `stats` — see
+        # `SessionStats.errors_detail` for why a count alone misreads a
+        # single systemic failure as N unrelated ones (issue #136).
+        "session_errors": [
+            {
+                "repo": r.repo,
+                "timestamp": r.timestamp,
+                "summary": r.gap_summary,
+            }
+            for r in session.errors_detail
+        ],
+        # Per-night rollup, so a night that was a total loss stays visible
+        # after it stops being the newest session (issue #138).
+        "history": [
+            {
+                "day": d.day,
+                "runs": d.runs,
+                "errors": d.errors,
+                "cost_usd": round(d.cost_usd, 2),
+                "duration_ms": d.duration_ms,
+            }
+            for d in state.daily_stats(db_path=db_path, days=history_days)
+        ],
         # `garden`/`merge_allowlist` stay in the payload as the raw lists
         # they always were — `garden_rows` is the joined view the UI
         # renders, but the flat lists are what a `curl /api/status | jq`
@@ -1434,6 +1500,33 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 """
 
 
+#: Upper bound on `?limit=`. The Recent runs table is rendered wholesale
+#: into the DOM, so an unbounded limit would let a hand-typed URL build a
+#: multi-megabyte payload and a table to match.
+MAX_RUN_LIMIT = 500
+
+
+def _status_query(query: str) -> dict:
+    """`build_status` kwargs parsed from `/api/status`'s query string.
+
+    Deliberately total: anything unparseable is dropped in favour of the
+    default rather than raising, because this runs inside the poll path
+    and a malformed hand-typed URL should degrade to the normal page, not
+    to a 500."""
+    params = urllib.parse.parse_qs(query)
+    kwargs: dict = {}
+    raw_limit = params.get("limit", [None])[0]
+    if raw_limit is not None:
+        try:
+            kwargs["run_limit"] = max(1, min(MAX_RUN_LIMIT, int(raw_limit)))
+        except ValueError:
+            pass
+    raw_repo = params.get("repo", [None])[0]
+    if raw_repo:
+        kwargs["repo"] = raw_repo
+    return kwargs
+
+
 class _DashboardHandler(BaseHTTPRequestHandler):
     state_dir: Optional[Path] = None
 
@@ -1443,22 +1536,38 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         # with a request line every 4 seconds for no benefit.
         pass
 
+    def _send(self, code: int, content_type: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
-        if self.path == "/" or self.path == "/index.html":
-            body = PAGE_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == "/api/status":
-            payload = build_status(state_dir=self.state_dir)
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", PAGE_HTML.encode("utf-8"))
+        elif parsed.path == "/api/status":
+            # `BaseHTTPRequestHandler.handle_one_request` does not catch
+            # exceptions from the dispatched method — only socket.timeout —
+            # so an unguarded raise here reached `socketserver.handle_error`
+            # and closed the socket having written *zero bytes*. The page
+            # reports that as "fetch failed", which `docs/DASHBOARD.md`
+            # documents as the server being gone, for what is usually a
+            # transient read error (issue #121). A real 500 is a state the
+            # page already names separately.
+            try:
+                payload = build_status(state_dir=self.state_dir, **_status_query(parsed.query))
+                body = json.dumps(payload).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - a dashboard poll must never kill the socket
+                # `log_message` is stubbed out to keep the 4 s poll from
+                # spamming stderr, so without this an error left no trace
+                # at all beyond the traceback socketserver prints.
+                print(f"gardener dashboard: /api/status failed: {exc!r}", file=sys.stderr)
+                error_body = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
+                self._send(500, "application/json; charset=utf-8", error_body.encode("utf-8"))
+                return
+            self._send(200, "application/json; charset=utf-8", body)
         else:
             self.send_response(404)
             self.end_headers()
