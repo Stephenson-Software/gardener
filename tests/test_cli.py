@@ -9,6 +9,7 @@ running the suite."""
 import argparse
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gardener import dashboard, dev_loop, garden, merge_allowlist, overnight, repo_lock, selfupdate, state
+from gardener import (
+    dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, selfupdate, state,
+)
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
     PRESERVED_DEPENDENCY_DIRS,
@@ -67,6 +70,46 @@ from gardener.dispatch import (
 from gardener.notify import Level
 
 CONVENTIONS_URL = "https://example.invalid/conventions.git"
+
+#: Set by `setUpModule` so a test that forgets to patch the notifier
+#: cannot reach a real Discord webhook. See that function's docstring.
+_notifier_fence = None
+
+
+def setUpModule():
+    """Fence the whole module off from the operator's real Discord webhook.
+
+    Many tests here drive `cmd_overnight`/`cmd_tend`, which alert on their
+    outcome via `notify.default_notifier()`. A test that patches the thing
+    it's asserting on but *not* the notifier still runs the real alerting
+    path, and `default_notifier` resolves a webhook from the ambient
+    environment — so on a configured box the suite posts a genuine alert
+    built from test fixture data. That is not hypothetical: a test that
+    raised `RuntimeError("boom")` out of `self_update` posted a real
+    "gardener overnight: self-update FAILED / unexpected error: boom"
+    embed every time the suite ran, which on this deployment is nightly
+    (gardener tends its own repo). Individual tests patching
+    `default_notifier` is still the right thing to do and is what asserts
+    on alerting behavior; this is the backstop that keeps the *next*
+    oversight silent instead of paging someone.
+
+    Both webhook sources have to be closed (see `notify.load_webhook_url`):
+    the `GARDENER_DISCORD_WEBHOOK_URL` env var, and the `notify.env` file
+    under `$GARDENER_STATE_DIR`/`~/.local/state/gardener`. Pointing the
+    state dir at an empty temp dir closes the second. With neither
+    configured, `default_notifier()` returns a `NullNotifier`.
+    """
+    global _notifier_fence
+    _notifier_fence = tempfile.TemporaryDirectory()
+    os.environ.pop(notify.DISCORD_WEBHOOK_ENV_VAR, None)
+    os.environ["GARDENER_STATE_DIR"] = _notifier_fence.name
+
+
+def tearDownModule():
+    global _notifier_fence
+    if _notifier_fence is not None:
+        _notifier_fence.cleanup()
+        _notifier_fence = None
 
 
 class TestArgParsing(unittest.TestCase):
@@ -2379,8 +2422,9 @@ class TestCmdOvernightSelfUpdate(unittest.TestCase):
             cmd_overnight(args)
         mock_self_update.assert_called_once_with()
 
+    @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.selfupdate.self_update")
-    def test_a_raising_self_update_never_aborts_the_run(self, mock_self_update):
+    def test_a_raising_self_update_never_aborts_the_run(self, mock_self_update, _mock_notifier):
         mock_self_update.side_effect = RuntimeError("boom")
         with redirect_stderr(io.StringIO()) as stderr:
             exit_code = cmd_overnight(self._args())
