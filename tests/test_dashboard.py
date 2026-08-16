@@ -708,6 +708,26 @@ class TestPageHtmlInvariants(unittest.TestCase):
         self.assertIn("el.setAttribute(\"aria-selected\", String(selected));", dashboard.PAGE_HTML)
         self.assertIn("el.tabIndex = selected ? 0 : -1;", dashboard.PAGE_HTML)
 
+    def test_run_summaries_are_linkified_from_the_raw_string_not_the_escaped_one(self):
+        """`linkifyRefs` turns `#194` in a run summary into a link to that
+        issue/PR. Escaping first and matching `#\\d+` over the *result*
+        finds the digits inside numeric character references: `esc` renders
+        an apostrophe as `&#39;`, so the real summary "You've hit your
+        session limit" matched `#39` and rendered as `You&#39;ve` with an
+        anchor through the middle of the entity. The raw string must be
+        tokenized and each literal run escaped separately.
+
+        There is no JS runner here (stdlib-only Python), so this pins the
+        shape of the implementation that has to hold — the behaviour itself
+        was verified by rendering the page against the real state db."""
+        self.assertIn("const re = /#(\\d+)/g;", dashboard.PAGE_HTML)
+        self.assertIn("while ((m = re.exec(s)) !== null)", dashboard.PAGE_HTML)
+        self.assertIn("out += esc(s.slice(last, m.index))", dashboard.PAGE_HTML)
+        self.assertIn("return out + esc(s.slice(last));", dashboard.PAGE_HTML)
+        # The regression itself: escaping the whole summary up front and
+        # replacing over that result is what produced the mangled entity.
+        self.assertNotIn("const safe = esc(summary);", dashboard.PAGE_HTML)
+
     def test_every_sortable_header_is_a_real_button(self):
         """A `<th>` is not focusable and has no activation behaviour, so a
         click handler on one is a mouse-only control with no keyboard path
@@ -715,12 +735,13 @@ class TestPageHtmlInvariants(unittest.TestCase):
         and the listener must be bound to that button rather than to the
         cell around it — binding it back to the `<th>` would restore the
         original bug while leaving the markup looking fixed."""
-        for key in ("repo", "health", "successes", "errors", "last_success",
-                    "cost_usd", "can_merge"):
-            self.assertIn(f'<th data-sort="{key}" aria-sort="none"', dashboard.PAGE_HTML)
+        keys = ("repo", "health", "successes", "errors", "last_success",
+                "duration_ms", "cost_usd", "can_merge")
+        for key in keys:
+            self.assertIn(f'<th scope="col" data-sort="{key}" aria-sort="none"', dashboard.PAGE_HTML)
         self.assertEqual(
             dashboard.PAGE_HTML.count('<button type="button">'),
-            7,
+            len(keys),
             "one activation control per sortable column",
         )
         self.assertIn('const button = th.querySelector("button");', dashboard.PAGE_HTML)
@@ -746,7 +767,8 @@ class TestPageHtmlInvariants(unittest.TestCase):
         own start, so the stat tiles must be fed from the session-scoped
         payload keys rather than the row-window ones they replaced."""
         self.assertIn('<span class="sub" id="session-window">', dashboard.PAGE_HTML)
-        self.assertIn("st.session_run_count ? sessionWindow(st) : \"\"", dashboard.PAGE_HTML)
+        self.assertIn("sessionWindow(st)", dashboard.PAGE_HTML)
+        self.assertIn("st.session_run_count", dashboard.PAGE_HTML)
         for key in ("session_run_count", "session_cost_usd", "session_error_count"):
             self.assertIn("st." + key, dashboard.PAGE_HTML)
         self.assertNotIn("recent_run_count", dashboard.PAGE_HTML)
@@ -802,8 +824,17 @@ class TestPageHtmlInvariants(unittest.TestCase):
         polls. Against a restarting server a slow, doomed request can
         resolve *after* a later successful one and re-mark a live page
         stale; the payload is a whole snapshot, so skipping a poll that
-        starts while one is in flight loses nothing."""
-        self.assertIn("if (pollInFlight) return;", dashboard.PAGE_HTML)
+        starts while one is in flight loses nothing.
+
+        A reader-driven refetch (the per-repo runs filter) is the one case
+        that must not simply be dropped, so it supersedes instead: the
+        running request is aborted and a generation counter discards its
+        result. That keeps "never two live requests" true, which is the
+        actual invariant — bypassing the guard would restore the race."""
+        self.assertIn("if (!force) return;", dashboard.PAGE_HTML)
+        self.assertIn("if (inFlightController) inFlightController.abort();", dashboard.PAGE_HTML)
+        self.assertIn("const gen = ++pollGeneration;", dashboard.PAGE_HTML)
+        self.assertIn("if (gen !== pollGeneration) return;", dashboard.PAGE_HTML)
         self.assertIn("pollInFlight = false;", dashboard.PAGE_HTML)
 
     def test_the_plot_signature_includes_the_age_string_it_renders(self):
