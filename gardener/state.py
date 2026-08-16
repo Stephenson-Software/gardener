@@ -185,15 +185,28 @@ class Run:
 def _connect(db_path: Path, ensure_schema: bool = True) -> sqlite3.Connection:
     """Open the run-history db.
 
-    `ensure_schema=False` is the *read* path. `CREATE TABLE IF NOT EXISTS`
-    is a write: it takes sqlite's exclusive lock even when the table
-    already exists, so a pure reader that ran it would contend with a
-    concurrent `record_run` and could fail the whole read with `database
-    is locked`. The dashboard polls three aggregates every 4 s while
-    `overnight --concurrency 2` is writing, which made that a routine
-    collision rather than a theoretical one (issue #121). Readers pass
-    False and are guarded by their own `db_path.exists()` check, so the
-    table-creating side effect is never what they depended on."""
+    `ensure_schema=False` is the *read* path: a reader should not create
+    the state directory, the db file, or the schema as a side effect of
+    reading. Readers are guarded by their own `db_path.exists()` check, so
+    the table-creating side effect was never what they depended on.
+
+    What this does and does not fix, measured rather than assumed (the
+    lock contention originally claimed in issue #121 is not real in the
+    steady state, and the note there has been corrected):
+
+    - Table already present, a writer mid-`record_run` holding RESERVED:
+      both paths succeed. `CREATE TABLE IF NOT EXISTS` on an existing
+      table is a no-op that takes no write lock, so it never contended.
+    - A writer holding EXCLUSIVE: both paths fail with `database is
+      locked`. A plain SELECT is blocked too in the default
+      rollback-journal mode, so this parameter cannot help; what keeps
+      that from killing the poll is `dashboard._DashboardHandler`
+      returning a real 500 instead of zero bytes. WAL would fix it
+      properly and is a larger decision than this.
+    - No `runs` table yet and a writer holding RESERVED: `ensure_schema`
+      raises `database is locked` where the read path raises `no such
+      table`. This is the one case the parameter genuinely changes, and
+      it is a narrow first-run window."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     if ensure_schema:

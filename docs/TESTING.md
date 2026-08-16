@@ -43,7 +43,16 @@ their own private copy of that resolution, so one test asserts all eight
 helpers land under the override and another that they all fall back to
 `~/.local/state/gardener`, filenames asserted verbatim so a rename that
 would orphan a deployed box's on-disk state is caught too. It otherwise
-uses a real sqlite3 file in a tmp dir (including `repo_stats`' all-time
+uses a real sqlite3 file in a tmp dir (including `daily_stats`' per-day
+rollup — grouping, newest-first ordering, the `days` limit, and null
+`cost_usd`/`duration_ms` not poisoning the sums; `session_stats`'
+`errors_detail` carrying the session's error rows alongside the count;
+and `_connect`'s read path, whose assertions are deliberately scoped to
+what was *measured* rather than to the lock contention issue #121
+originally claimed — with the table already present `CREATE TABLE IF NOT
+EXISTS` is a no-op that takes no write lock, so the one case the
+parameter actually changes is a db with no `runs` table yet while another
+connection holds RESERVED; `repo_stats`' all-time
 per-repo aggregates — that every value in `state.KNOWN_OUTCOMES` is
 classified as either a success or an error rather than falling silently
 between the two, that a successful `align --implement`/`--file-issue` run
@@ -208,7 +217,16 @@ window outlasts a silent `tend` dispatch), `tail_lines`,
 `parse_in_progress` (including the `finished tending` marker clearing a
 repo with no notify line present at all, and a repo restarted after
 finishing reading as in flight again),
-`parse_batch_progress`, `find_free_port`, `build_garden_rows` (the
+`parse_batch_progress`, `find_free_port`, `_status_query` (the
+`/api/status` query string — a bad `limit=` degrades to the default
+rather than raising, since this runs inside the poll path), the
+`/api/status` branch returning a real 500 with a JSON body when
+`build_status` raises rather than closing the socket having written zero
+bytes, `find_active_log` skipping a log pruned between its glob and its
+stat (patching `is_file` alongside `stat` for the reason
+`TestFindActiveLogs` spells out — patching `stat` alone passes via
+`is_file`'s own `OSError` swallow without reaching the branch),
+`build_garden_rows` (the
 garden/allow-list/history join behind [the garden view](DASHBOARD.md),
 including the allow-listed-but-not-planted row the folded-together panel
 must not drop), and `build_status` (including its
@@ -229,7 +247,13 @@ because both are replaced wholesale, the tablist's `aria-controls`/
 `role="tabpanel"`/roving-`tabindex` wiring, focus surviving a rebuild of
 either, the rendered age being part of the plot signature, every sortable
 column header being a real `<button>` with the sort listener bound to it
-rather than to the `<th>` around it, the sorted column and direction being
+rather than to the `<th>` around it, run summaries being linkified from
+the *raw* string rather than the escaped one (escaping first and matching
+`#\d+` over the result finds the digits inside numeric character
+references, so the real summary "You've hit your session limit" rendered
+as `You&#39;ve` with an anchor through the middle of the entity — caught
+by rendering the page, not by any assertion, which is why the shape is
+pinned here afterwards), the sorted column and direction being
 written back into the `<thead>` from the same state the body is sorted
 from, the session panel naming both ends of the window it shows (and
 degrading to no caption at all rather than to a dangling preposition), and

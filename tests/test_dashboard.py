@@ -4,6 +4,7 @@ build_status() — not covered here, mirroring how dispatch.py's actual
 This file covers the pure log-parsing and status-assembly functions, which
 never touch a socket."""
 import io
+import json
 import socket
 import tempfile
 import unittest
@@ -948,3 +949,138 @@ class TestRunServerLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStatusQuery(unittest.TestCase):
+    """`/api/status`'s query string. Total by design: this runs inside the
+    poll path, so a malformed hand-typed URL must degrade to the default
+    page rather than to a 500."""
+
+    def test_no_query_is_no_overrides(self):
+        self.assertEqual(dashboard._status_query(""), {})
+
+    def test_limit_and_repo_are_parsed(self):
+        self.assertEqual(
+            dashboard._status_query("limit=5&repo=owner/name"),
+            {"run_limit": 5, "repo": "owner/name"},
+        )
+
+    def test_unparseable_limit_falls_back_to_the_default(self):
+        self.assertEqual(dashboard._status_query("limit=lots"), {})
+
+    def test_limit_is_clamped_at_both_ends(self):
+        self.assertEqual(dashboard._status_query("limit=0")["run_limit"], 1)
+        self.assertEqual(dashboard._status_query("limit=-3")["run_limit"], 1)
+        self.assertEqual(
+            dashboard._status_query("limit=99999")["run_limit"], dashboard.MAX_RUN_LIMIT
+        )
+
+    def test_an_empty_repo_is_not_a_filter(self):
+        self.assertEqual(dashboard._status_query("repo="), {})
+
+    def test_unknown_parameters_are_ignored(self):
+        self.assertEqual(dashboard._status_query("nope=1&limit=7"), {"run_limit": 7})
+
+
+class TestStatusEndpointErrorHandling(unittest.TestCase):
+    """`BaseHTTPRequestHandler.handle_one_request` does not catch exceptions
+    from the dispatched method, so an unguarded raise closed the socket
+    having written zero bytes — which the page reports as `fetch failed`,
+    i.e. "the server is gone", for what is usually a transient read
+    error (issue #121)."""
+
+    def _handler(self, build_status):
+        # Exercised without a socket: do_GET's two write paths are driven
+        # through _send, which is what gets recorded here.
+        handler = dashboard._DashboardHandler.__new__(dashboard._DashboardHandler)
+        handler.state_dir = None
+        handler.path = "/api/status"
+        sent = {}
+
+        def _send(code, content_type, body):
+            sent.update(code=code, content_type=content_type, body=body)
+
+        handler._send = _send
+        with patch.object(dashboard, "build_status", build_status):
+            handler.do_GET()
+        return sent
+
+    def test_a_raising_build_status_returns_a_real_500_with_a_json_body(self):
+        def boom(**kwargs):
+            raise OSError("log pruned mid-poll")
+
+        sent = self._handler(boom)
+        self.assertEqual(sent["code"], 500)
+        self.assertIn("application/json", sent["content_type"])
+        payload = json.loads(sent["body"].decode("utf-8"))
+        self.assertEqual(payload["error"], "OSError")
+        self.assertIn("log pruned mid-poll", payload["detail"])
+
+    def test_a_working_build_status_still_returns_200(self):
+        sent = self._handler(lambda **kwargs: {"ok": True})
+        self.assertEqual(sent["code"], 200)
+        self.assertEqual(json.loads(sent["body"].decode("utf-8")), {"ok": True})
+
+    def test_query_parameters_reach_build_status(self):
+        seen = {}
+
+        def capture(**kwargs):
+            seen.update(kwargs)
+            return {}
+
+        handler = dashboard._DashboardHandler.__new__(dashboard._DashboardHandler)
+        handler.state_dir = None
+        handler.path = "/api/status?repo=o/r&limit=3"
+        handler._send = lambda *a: None
+        with patch.object(dashboard, "build_status", capture):
+            handler.do_GET()
+        self.assertEqual(seen["repo"], "o/r")
+        self.assertEqual(seen["run_limit"], 3)
+
+
+class TestFindActiveLogSurvivesPruning(unittest.TestCase):
+    """`run_log.prune_old_logs` runs at the start of every dispatching run
+    and can delete a log between the glob and the stat. `find_active_logs`
+    guarded that from the beginning; `find_active_log` did not, and it is
+    the path every poll takes once no log is fresh enough to be active."""
+
+    def test_a_log_vanishing_between_glob_and_stat_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            (logs / "old.log").write_text("x")
+            (logs / "new.log").write_text("y")
+            real_stat = Path.stat
+
+            def flaky_stat(self, *args, **kwargs):
+                if self.name == "old.log":
+                    raise OSError("pruned between the glob and the stat")
+                return real_stat(self, *args, **kwargs)
+
+            # `is_file()` is patched alongside `stat()` for the reason
+            # `TestFindActiveLogs` spells out: it calls `stat()` internally
+            # and swallows `OSError` by returning False, so patching
+            # `stat()` alone passes via the guard without ever reaching the
+            # `except OSError` branch this exercises.
+            with patch.object(Path, "is_file", lambda self: True):
+                with patch.object(Path, "stat", flaky_stat):
+                    found = dashboard.find_active_log(logs)
+            self.assertEqual(found.name, "new.log")
+
+    def test_every_log_vanishing_yields_none_rather_than_raising(self):
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            (logs / "a.log").write_text("x")
+
+            real_stat = Path.stat
+
+            def gone_stat(self, *args, **kwargs):
+                # Scoped to the logs themselves: the directory's own
+                # `exists()` check stats too, and failing that would be
+                # testing a different thing entirely.
+                if self.suffix == ".log":
+                    raise OSError("pruned")
+                return real_stat(self, *args, **kwargs)
+
+            with patch.object(Path, "is_file", lambda self: True):
+                with patch.object(Path, "stat", gone_stat):
+                    self.assertIsNone(dashboard.find_active_log(logs))
