@@ -419,3 +419,197 @@ class TestStateDirIsHonouredEverywhere(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDailyStats(unittest.TestCase):
+    """One `GROUP BY` over the run history, so a night that went badly stays
+    visible after it stops being the newest session."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _run(self, day, outcome="tend", cost=1.0, duration=1000):
+        state.record_run(
+            state.Run(
+                repo="o/r",
+                mode="tend",
+                outcome=outcome,
+                timestamp=f"{day}T12:00:00+00:00",
+                cost_usd=cost,
+                duration_ms=duration,
+            ),
+            db_path=self.db_path,
+        )
+
+    def test_missing_db_is_empty_not_an_error(self):
+        self.assertEqual(state.daily_stats(db_path=self.db_path), [])
+
+    def test_groups_by_calendar_day_newest_first(self):
+        self._run("2026-08-10")
+        self._run("2026-08-12")
+        self._run("2026-08-12")
+        days = state.daily_stats(db_path=self.db_path)
+        self.assertEqual([d.day for d in days], ["2026-08-12", "2026-08-10"])
+        self.assertEqual([d.runs for d in days], [2, 1])
+
+    def test_counts_errors_and_sums_cost_and_duration_per_day(self):
+        self._run("2026-08-12", cost=2.0, duration=1000)
+        self._run("2026-08-12", outcome=state.ERROR_OUTCOME, cost=0.5, duration=500)
+        day = state.daily_stats(db_path=self.db_path)[0]
+        self.assertEqual(day.runs, 2)
+        self.assertEqual(day.errors, 1)
+        self.assertAlmostEqual(day.cost_usd, 2.5)
+        self.assertEqual(day.duration_ms, 1500)
+
+    def test_null_cost_and_duration_do_not_poison_the_sum(self):
+        # A dispatch that died before Claude reported usage records neither.
+        state.record_run(
+            state.Run(repo="o/r", mode="tend", outcome=state.ERROR_OUTCOME,
+                      timestamp="2026-08-12T12:00:00+00:00"),
+            db_path=self.db_path,
+        )
+        day = state.daily_stats(db_path=self.db_path)[0]
+        self.assertEqual(day.cost_usd, 0.0)
+        self.assertEqual(day.duration_ms, 0)
+
+    def test_days_limit_is_applied(self):
+        for d in range(1, 6):
+            self._run(f"2026-08-0{d}")
+        self.assertEqual(len(state.daily_stats(db_path=self.db_path, days=3)), 3)
+
+
+class TestSessionErrorDetail(unittest.TestCase):
+    """The session's error *rows*, not just the count — a count cannot say
+    that every failure after a point shared one systemic cause."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _run(self, repo, outcome, summary=None, minute=0):
+        state.record_run(
+            state.Run(repo=repo, mode="tend", outcome=outcome, gap_summary=summary,
+                      timestamp=f"2026-08-12T12:{minute:02d}:00+00:00", cost_usd=1.0,
+                      duration_ms=1000),
+            db_path=self.db_path,
+        )
+
+    def test_detail_matches_the_count_and_carries_repo_and_summary(self):
+        self._run("o/a", "tend", "fine", minute=0)
+        self._run("o/b", state.ERROR_OUTCOME, "usage limit", minute=1)
+        self._run("o/c", state.ERROR_OUTCOME, "usage limit", minute=2)
+        s = state.session_stats(db_path=self.db_path)
+        self.assertEqual(s.errors, 2)
+        self.assertEqual(len(s.errors_detail), 2)
+        self.assertEqual({r.repo for r in s.errors_detail}, {"o/b", "o/c"})
+        self.assertEqual({r.gap_summary for r in s.errors_detail}, {"usage limit"})
+
+    def test_a_clean_session_has_no_detail(self):
+        self._run("o/a", "tend", "fine")
+        s = state.session_stats(db_path=self.db_path)
+        self.assertEqual(s.errors, 0)
+        self.assertEqual(s.errors_detail, [])
+
+    def test_session_duration_is_summed(self):
+        self._run("o/a", "tend", minute=0)
+        self._run("o/b", "tend", minute=1)
+        self.assertEqual(state.session_stats(db_path=self.db_path).duration_ms, 2000)
+
+
+class TestReadPathDoesNotWrite(unittest.TestCase):
+    """A reader must not create the state dir, the db file, or the schema as
+    a side effect of reading.
+
+    These assertions are deliberately scoped to what was *measured* rather
+    than to the lock contention issue #121 originally claimed: with the
+    table already present, `CREATE TABLE IF NOT EXISTS` is a no-op that
+    takes no write lock, so it never contended with `record_run`. See
+    `state._connect`'s docstring for the three cases and which one this
+    parameter actually changes."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_read_connect_does_not_create_the_table(self):
+        with closing(state._connect(self.db_path, ensure_schema=False)) as conn:
+            tables = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        self.assertEqual(tables, [], "the read path must not create schema")
+
+    def test_write_connect_still_creates_the_table(self):
+        with closing(state._connect(self.db_path)) as conn:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+        self.assertIn("runs", tables)
+
+    def test_readers_still_work_against_a_real_db(self):
+        state.record_run(
+            state.Run(repo="o/r", mode="tend", outcome="tend",
+                      timestamp=state.now_iso(), cost_usd=1.0, duration_ms=5),
+            db_path=self.db_path,
+        )
+        self.assertEqual(len(state.list_runs(db_path=self.db_path)), 1)
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 1)
+        self.assertIn("o/r", state.repo_stats(db_path=self.db_path))
+        self.assertEqual(len(state.daily_stats(db_path=self.db_path)), 1)
+
+    def test_every_read_path_works_against_a_writer_mid_transaction(self):
+        """`record_run` holds RESERVED from its INSERT until its commit, and
+        a SHARED read lock coexists with RESERVED, so every aggregate the
+        dashboard polls gets through. This held before the change too —
+        it is pinned as the behaviour that must not regress, not as
+        evidence the change fixed it."""
+        state.record_run(
+            state.Run(repo="o/r", mode="tend", outcome="tend",
+                      timestamp=state.now_iso()),
+            db_path=self.db_path,
+        )
+        with closing(sqlite3.connect(str(self.db_path), timeout=0.1)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute(
+                "INSERT INTO runs (repo, timestamp, mode, outcome) VALUES (?,?,?,?)",
+                ("o/other", state.now_iso(), "tend", "tend"),
+            )
+            try:
+                self.assertEqual(len(state.list_runs(db_path=self.db_path)), 1)
+                self.assertEqual(state.session_stats(db_path=self.db_path).runs, 1)
+                self.assertEqual(len(state.daily_stats(db_path=self.db_path)), 1)
+                self.assertIn("o/r", state.repo_stats(db_path=self.db_path))
+            finally:
+                writer.rollback()
+
+    def test_the_one_case_the_read_path_actually_changes(self):
+        """A db file with no `runs` table, while another connection holds
+        RESERVED: `ensure_schema=True` cannot take the write lock it needs
+        and raises `database is locked`, where the read path reports the
+        honest `no such table`. Narrow — a first-run window — but it is
+        the real difference, so it is the one asserted."""
+        empty = Path(self._tmpdir.name) / "empty.sqlite3"
+        sqlite3.connect(str(empty)).close()
+        with closing(sqlite3.connect(str(empty), timeout=0.1)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("CREATE TABLE placeholder (x)")
+            try:
+                with self.assertRaises(sqlite3.OperationalError) as locked:
+                    with closing(state._connect(empty)) as conn:
+                        conn.execute("SELECT 1")
+                self.assertIn("locked", str(locked.exception))
+                with self.assertRaises(sqlite3.OperationalError) as missing:
+                    with closing(state._connect(empty, ensure_schema=False)) as conn:
+                        conn.execute("SELECT * FROM runs")
+                self.assertIn("no such table", str(missing.exception))
+            finally:
+                writer.rollback()

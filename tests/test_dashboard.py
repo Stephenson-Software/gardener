@@ -4,6 +4,7 @@ build_status() — not covered here, mirroring how dispatch.py's actual
 This file covers the pure log-parsing and status-assembly functions, which
 never touch a socket."""
 import io
+import json
 import socket
 import tempfile
 import unittest
@@ -708,6 +709,26 @@ class TestPageHtmlInvariants(unittest.TestCase):
         self.assertIn("el.setAttribute(\"aria-selected\", String(selected));", dashboard.PAGE_HTML)
         self.assertIn("el.tabIndex = selected ? 0 : -1;", dashboard.PAGE_HTML)
 
+    def test_run_summaries_are_linkified_from_the_raw_string_not_the_escaped_one(self):
+        """`linkifyRefs` turns `#194` in a run summary into a link to that
+        issue/PR. Escaping first and matching `#\\d+` over the *result*
+        finds the digits inside numeric character references: `esc` renders
+        an apostrophe as `&#39;`, so the real summary "You've hit your
+        session limit" matched `#39` and rendered as `You&#39;ve` with an
+        anchor through the middle of the entity. The raw string must be
+        tokenized and each literal run escaped separately.
+
+        There is no JS runner here (stdlib-only Python), so this pins the
+        shape of the implementation that has to hold — the behaviour itself
+        was verified by rendering the page against the real state db."""
+        self.assertIn("const re = /#(\\d+)/g;", dashboard.PAGE_HTML)
+        self.assertIn("while ((m = re.exec(s)) !== null)", dashboard.PAGE_HTML)
+        self.assertIn("out += esc(s.slice(last, m.index))", dashboard.PAGE_HTML)
+        self.assertIn("return out + esc(s.slice(last));", dashboard.PAGE_HTML)
+        # The regression itself: escaping the whole summary up front and
+        # replacing over that result is what produced the mangled entity.
+        self.assertNotIn("const safe = esc(summary);", dashboard.PAGE_HTML)
+
     def test_every_sortable_header_is_a_real_button(self):
         """A `<th>` is not focusable and has no activation behaviour, so a
         click handler on one is a mouse-only control with no keyboard path
@@ -715,12 +736,13 @@ class TestPageHtmlInvariants(unittest.TestCase):
         and the listener must be bound to that button rather than to the
         cell around it — binding it back to the `<th>` would restore the
         original bug while leaving the markup looking fixed."""
-        for key in ("repo", "health", "successes", "errors", "last_success",
-                    "cost_usd", "can_merge"):
-            self.assertIn(f'<th data-sort="{key}" aria-sort="none"', dashboard.PAGE_HTML)
+        keys = ("repo", "health", "successes", "errors", "last_success",
+                "duration_ms", "cost_usd", "can_merge")
+        for key in keys:
+            self.assertIn(f'<th scope="col" data-sort="{key}" aria-sort="none"', dashboard.PAGE_HTML)
         self.assertEqual(
             dashboard.PAGE_HTML.count('<button type="button">'),
-            7,
+            len(keys),
             "one activation control per sortable column",
         )
         self.assertIn('const button = th.querySelector("button");', dashboard.PAGE_HTML)
@@ -746,7 +768,8 @@ class TestPageHtmlInvariants(unittest.TestCase):
         own start, so the stat tiles must be fed from the session-scoped
         payload keys rather than the row-window ones they replaced."""
         self.assertIn('<span class="sub" id="session-window">', dashboard.PAGE_HTML)
-        self.assertIn("st.session_run_count ? sessionWindow(st) : \"\"", dashboard.PAGE_HTML)
+        self.assertIn("sessionWindow(st)", dashboard.PAGE_HTML)
+        self.assertIn("st.session_run_count", dashboard.PAGE_HTML)
         for key in ("session_run_count", "session_cost_usd", "session_error_count"):
             self.assertIn("st." + key, dashboard.PAGE_HTML)
         self.assertNotIn("recent_run_count", dashboard.PAGE_HTML)
@@ -802,8 +825,17 @@ class TestPageHtmlInvariants(unittest.TestCase):
         polls. Against a restarting server a slow, doomed request can
         resolve *after* a later successful one and re-mark a live page
         stale; the payload is a whole snapshot, so skipping a poll that
-        starts while one is in flight loses nothing."""
-        self.assertIn("if (pollInFlight) return;", dashboard.PAGE_HTML)
+        starts while one is in flight loses nothing.
+
+        A reader-driven refetch (the per-repo runs filter) is the one case
+        that must not simply be dropped, so it supersedes instead: the
+        running request is aborted and a generation counter discards its
+        result. That keeps "never two live requests" true, which is the
+        actual invariant — bypassing the guard would restore the race."""
+        self.assertIn("if (!force) return;", dashboard.PAGE_HTML)
+        self.assertIn("if (inFlightController) inFlightController.abort();", dashboard.PAGE_HTML)
+        self.assertIn("const gen = ++pollGeneration;", dashboard.PAGE_HTML)
+        self.assertIn("if (gen !== pollGeneration) return;", dashboard.PAGE_HTML)
         self.assertIn("pollInFlight = false;", dashboard.PAGE_HTML)
 
     def test_the_plot_signature_includes_the_age_string_it_renders(self):
@@ -917,3 +949,138 @@ class TestRunServerLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStatusQuery(unittest.TestCase):
+    """`/api/status`'s query string. Total by design: this runs inside the
+    poll path, so a malformed hand-typed URL must degrade to the default
+    page rather than to a 500."""
+
+    def test_no_query_is_no_overrides(self):
+        self.assertEqual(dashboard._status_query(""), {})
+
+    def test_limit_and_repo_are_parsed(self):
+        self.assertEqual(
+            dashboard._status_query("limit=5&repo=owner/name"),
+            {"run_limit": 5, "repo": "owner/name"},
+        )
+
+    def test_unparseable_limit_falls_back_to_the_default(self):
+        self.assertEqual(dashboard._status_query("limit=lots"), {})
+
+    def test_limit_is_clamped_at_both_ends(self):
+        self.assertEqual(dashboard._status_query("limit=0")["run_limit"], 1)
+        self.assertEqual(dashboard._status_query("limit=-3")["run_limit"], 1)
+        self.assertEqual(
+            dashboard._status_query("limit=99999")["run_limit"], dashboard.MAX_RUN_LIMIT
+        )
+
+    def test_an_empty_repo_is_not_a_filter(self):
+        self.assertEqual(dashboard._status_query("repo="), {})
+
+    def test_unknown_parameters_are_ignored(self):
+        self.assertEqual(dashboard._status_query("nope=1&limit=7"), {"run_limit": 7})
+
+
+class TestStatusEndpointErrorHandling(unittest.TestCase):
+    """`BaseHTTPRequestHandler.handle_one_request` does not catch exceptions
+    from the dispatched method, so an unguarded raise closed the socket
+    having written zero bytes — which the page reports as `fetch failed`,
+    i.e. "the server is gone", for what is usually a transient read
+    error (issue #121)."""
+
+    def _handler(self, build_status):
+        # Exercised without a socket: do_GET's two write paths are driven
+        # through _send, which is what gets recorded here.
+        handler = dashboard._DashboardHandler.__new__(dashboard._DashboardHandler)
+        handler.state_dir = None
+        handler.path = "/api/status"
+        sent = {}
+
+        def _send(code, content_type, body):
+            sent.update(code=code, content_type=content_type, body=body)
+
+        handler._send = _send
+        with patch.object(dashboard, "build_status", build_status):
+            handler.do_GET()
+        return sent
+
+    def test_a_raising_build_status_returns_a_real_500_with_a_json_body(self):
+        def boom(**kwargs):
+            raise OSError("log pruned mid-poll")
+
+        sent = self._handler(boom)
+        self.assertEqual(sent["code"], 500)
+        self.assertIn("application/json", sent["content_type"])
+        payload = json.loads(sent["body"].decode("utf-8"))
+        self.assertEqual(payload["error"], "OSError")
+        self.assertIn("log pruned mid-poll", payload["detail"])
+
+    def test_a_working_build_status_still_returns_200(self):
+        sent = self._handler(lambda **kwargs: {"ok": True})
+        self.assertEqual(sent["code"], 200)
+        self.assertEqual(json.loads(sent["body"].decode("utf-8")), {"ok": True})
+
+    def test_query_parameters_reach_build_status(self):
+        seen = {}
+
+        def capture(**kwargs):
+            seen.update(kwargs)
+            return {}
+
+        handler = dashboard._DashboardHandler.__new__(dashboard._DashboardHandler)
+        handler.state_dir = None
+        handler.path = "/api/status?repo=o/r&limit=3"
+        handler._send = lambda *a: None
+        with patch.object(dashboard, "build_status", capture):
+            handler.do_GET()
+        self.assertEqual(seen["repo"], "o/r")
+        self.assertEqual(seen["run_limit"], 3)
+
+
+class TestFindActiveLogSurvivesPruning(unittest.TestCase):
+    """`run_log.prune_old_logs` runs at the start of every dispatching run
+    and can delete a log between the glob and the stat. `find_active_logs`
+    guarded that from the beginning; `find_active_log` did not, and it is
+    the path every poll takes once no log is fresh enough to be active."""
+
+    def test_a_log_vanishing_between_glob_and_stat_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            (logs / "old.log").write_text("x")
+            (logs / "new.log").write_text("y")
+            real_stat = Path.stat
+
+            def flaky_stat(self, *args, **kwargs):
+                if self.name == "old.log":
+                    raise OSError("pruned between the glob and the stat")
+                return real_stat(self, *args, **kwargs)
+
+            # `is_file()` is patched alongside `stat()` for the reason
+            # `TestFindActiveLogs` spells out: it calls `stat()` internally
+            # and swallows `OSError` by returning False, so patching
+            # `stat()` alone passes via the guard without ever reaching the
+            # `except OSError` branch this exercises.
+            with patch.object(Path, "is_file", lambda self: True):
+                with patch.object(Path, "stat", flaky_stat):
+                    found = dashboard.find_active_log(logs)
+            self.assertEqual(found.name, "new.log")
+
+    def test_every_log_vanishing_yields_none_rather_than_raising(self):
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            (logs / "a.log").write_text("x")
+
+            real_stat = Path.stat
+
+            def gone_stat(self, *args, **kwargs):
+                # Scoped to the logs themselves: the directory's own
+                # `exists()` check stats too, and failing that would be
+                # testing a different thing entirely.
+                if self.suffix == ".log":
+                    raise OSError("pruned")
+                return real_stat(self, *args, **kwargs)
+
+            with patch.object(Path, "is_file", lambda self: True):
+                with patch.object(Path, "stat", gone_stat):
+                    self.assertIsNone(dashboard.find_active_log(logs))

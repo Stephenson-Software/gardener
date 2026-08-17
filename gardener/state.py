@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -154,8 +154,18 @@ class SessionStats:
     runs: int = 0
     errors: int = 0
     cost_usd: float = 0.0
+    duration_ms: int = 0
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
+    #: The session's error rows themselves, newest first — not just the
+    #: count above. A count alone cannot say *what* failed, and the
+    #: failures in a real overnight run are overwhelmingly one systemic
+    #: cause repeated across many repos (an exhausted session limit, a
+    #: `claude` that left PATH, a cached clone stuck dirty), which reads
+    #: as N unrelated repo failures when only the total is shown
+    #: (issue #136). Collected during the same walk the count comes from,
+    #: so this costs no extra query.
+    errors_detail: list["Run"] = field(default_factory=list)
 
 
 @dataclass
@@ -172,11 +182,36 @@ class Run:
     id: Optional[int] = None
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
+def _connect(db_path: Path, ensure_schema: bool = True) -> sqlite3.Connection:
+    """Open the run-history db.
+
+    `ensure_schema=False` is the *read* path: a reader should not create
+    the state directory, the db file, or the schema as a side effect of
+    reading. Readers are guarded by their own `db_path.exists()` check, so
+    the table-creating side effect was never what they depended on.
+
+    What this does and does not fix, measured rather than assumed (the
+    lock contention originally claimed in issue #121 is not real in the
+    steady state, and the note there has been corrected):
+
+    - Table already present, a writer mid-`record_run` holding RESERVED:
+      both paths succeed. `CREATE TABLE IF NOT EXISTS` on an existing
+      table is a no-op that takes no write lock, so it never contended.
+    - A writer holding EXCLUSIVE: both paths fail with `database is
+      locked`. A plain SELECT is blocked too in the default
+      rollback-journal mode, so this parameter cannot help; what keeps
+      that from killing the poll is `dashboard._DashboardHandler`
+      returning a real 500 instead of zero bytes. WAL would fix it
+      properly and is a larger decision than this.
+    - No `runs` table yet and a writer holding RESERVED: `ensure_schema`
+      raises `database is locked` where the read path raises `no such
+      table`. This is the one case the parameter genuinely changes, and
+      it is a narrow first-run window."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    conn.execute(SCHEMA)
-    conn.commit()
+    if ensure_schema:
+        conn.execute(SCHEMA)
+        conn.commit()
     return conn
 
 
@@ -216,7 +251,7 @@ def list_runs(
     db_path = db_path or default_db_path()
     if not db_path.exists():
         return []
-    with closing(_connect(db_path)) as conn:
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
         conn.row_factory = sqlite3.Row
         if repo:
             rows = conn.execute(
@@ -289,10 +324,11 @@ def session_stats(
         return stats
     newest: Optional[datetime] = None
     previous: Optional[datetime] = None
-    with closing(_connect(db_path)) as conn:
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
-            "SELECT timestamp, outcome, cost_usd FROM runs ORDER BY id DESC"
+            "SELECT id, repo, mode, timestamp, outcome, gap_summary, cost_usd, duration_ms "
+            "FROM runs ORDER BY id DESC"
         ):
             current = _parse_timestamp(row["timestamp"])
             # Measured from the newest run rather than from the previous
@@ -319,7 +355,20 @@ def session_stats(
             stats.runs += 1
             if row["outcome"] == ERROR_OUTCOME:
                 stats.errors += 1
+                stats.errors_detail.append(
+                    Run(
+                        id=row["id"],
+                        repo=row["repo"],
+                        mode=row["mode"],
+                        outcome=row["outcome"],
+                        timestamp=row["timestamp"],
+                        gap_summary=row["gap_summary"],
+                        cost_usd=row["cost_usd"],
+                        duration_ms=row["duration_ms"],
+                    )
+                )
             stats.cost_usd += row["cost_usd"] or 0.0
+            stats.duration_ms += row["duration_ms"] or 0
             # Newest row first, so the last one seen is the oldest.
             stats.started_at = row["timestamp"]
             if stats.ended_at is None:
@@ -328,6 +377,61 @@ def session_stats(
             previous = current
     stats.cost_usd = round(stats.cost_usd, 4)
     return stats
+
+
+@dataclass
+class DayStats:
+    """One calendar day's rollup of the run history."""
+
+    day: str
+    runs: int
+    errors: int
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+
+
+def daily_stats(db_path: Optional[Path] = None, days: int = 14) -> list[DayStats]:
+    """The last `days` calendar days that have any runs, newest first.
+
+    The only aggregate here that crosses sessions. `session_stats` answers
+    "how did tonight go" and `repo_stats` "how is this repo doing", but
+    neither can answer "is this getting better or worse" — so a night that
+    was a total loss is invisible the moment it stops being the newest one
+    (issue #138). Grouped in sqlite rather than folded in Python: the
+    history is the whole table, and this runs on every dashboard poll.
+
+    Days are grouped by the raw timestamp prefix, matching how
+    `now_iso()` writes them, so this needs no timezone handling of its
+    own — and inherits `now_iso()`'s timezone, whatever that is."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return []
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT substr(timestamp, 1, 10) AS day,
+                   COUNT(*) AS runs,
+                   SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS errors,
+                   SUM(COALESCE(cost_usd, 0)) AS cost_usd,
+                   SUM(COALESCE(duration_ms, 0)) AS duration_ms
+            FROM runs
+            GROUP BY day
+            ORDER BY day DESC
+            LIMIT ?
+            """,
+            (ERROR_OUTCOME, days),
+        ).fetchall()
+    return [
+        DayStats(
+            day=r["day"],
+            runs=r["runs"],
+            errors=r["errors"] or 0,
+            cost_usd=round(r["cost_usd"] or 0.0, 4),
+            duration_ms=int(r["duration_ms"] or 0),
+        )
+        for r in rows
+    ]
 
 
 def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
@@ -346,7 +450,7 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
         return {}
     placeholders = ",".join("?" for _ in SUCCESS_OUTCOMES)
     successes = sorted(SUCCESS_OUTCOMES)
-    with closing(_connect(db_path)) as conn:
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             f"""
