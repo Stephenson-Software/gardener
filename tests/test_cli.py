@@ -22,8 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, selfupdate,
-    sessions, state,
+    dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight, repo_lock,
+    selfupdate, sessions, state,
 )
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
@@ -32,6 +32,7 @@ from gardener.cli import (
     REPO_RE,
     TendResult,
     clone_or_refresh_target_repo,
+    cmd_doctor,
     current_branch,
     _blocking_reason,
     _default_branch_name,
@@ -309,6 +310,92 @@ class TestUpdateArgParsing(unittest.TestCase):
     def test_update_check_flag(self):
         args = self.parser.parse_args(["update", "--check"])
         self.assertTrue(args.check)
+
+
+class TestDoctorArgParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_defaults(self):
+        args = self.parser.parse_args(["doctor"])
+        self.assertFalse(args.verbose)
+        self.assertFalse(args.offline)
+
+    def test_flags(self):
+        args = self.parser.parse_args(["doctor", "-v", "--offline"])
+        self.assertTrue(args.verbose)
+        self.assertTrue(args.offline)
+
+    def test_doctor_is_not_a_dispatching_command(self):
+        # No `log_name` means `main` doesn't wrap it in a run log or
+        # register it as a session — correct for a read-only check that
+        # spawns no `claude` process and has nothing to `gardener stop`.
+        args = self.parser.parse_args(["doctor"])
+        self.assertIsNone(getattr(args, "log_name", None))
+
+
+class TestCmdDoctor(unittest.TestCase):
+    """Exit status is `cmd_doctor`'s actual contract — it's meant to gate a
+    nightly run (`gardener doctor || ...`), so ERROR-vs-WARN-vs-SKIPPED must
+    map onto it exactly. Every check is driven through a stubbed
+    `doctor.run_checks`; the checks themselves are covered in
+    `tests/test_doctor.py`."""
+
+    def _run(self, findings, argv=("doctor",)):
+        args = build_parser().parse_args(list(argv))
+        report = doctor.Report(list(findings))
+        out = io.StringIO()
+        with patch("gardener.cli.doctor.run_checks", return_value=report):
+            with redirect_stdout(out):
+                code = cmd_doctor(args)
+        return code, out.getvalue()
+
+    def test_error_exits_nonzero(self):
+        code, out = self._run([doctor.Finding("cache-clone", doctor.Severity.ERROR, "bad")])
+        self.assertEqual(code, 1)
+        self.assertIn("bad", out)
+
+    def test_warning_alone_exits_zero_but_is_still_printed(self):
+        code, out = self._run([doctor.Finding("cache-clone", doctor.Severity.WARN, "meh")])
+        self.assertEqual(code, 0)
+        self.assertIn("meh", out)
+
+    def test_skipped_alone_exits_zero_and_is_quiet_by_default(self):
+        # `doctor --offline` on a phone with no signal is all SKIPPED and
+        # must not look like a failing check.
+        code, out = self._run([doctor.Finding("repo-name", doctor.Severity.SKIPPED, "no signal")])
+        self.assertEqual(code, 0)
+        self.assertIn("no problems found", out)
+        self.assertNotIn("no signal", out)
+
+    def test_verbose_prints_passing_and_skipped_checks(self):
+        code, out = self._run(
+            [
+                doctor.Finding("cli", doctor.Severity.OK, "git found"),
+                doctor.Finding("repo-name", doctor.Severity.SKIPPED, "no signal"),
+            ],
+            argv=("doctor", "--verbose"),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("git found", out)
+        self.assertIn("no signal", out)
+
+    def test_fix_command_is_printed_with_its_finding(self):
+        code, out = self._run(
+            [doctor.Finding("cache-clone", doctor.Severity.ERROR, "dirty", fix="git stash push -u")]
+        )
+        self.assertIn("fix: git stash push -u", out)
+
+    def test_repo_is_named_in_the_finding_line(self):
+        code, out = self._run(
+            [doctor.Finding("cache-clone", doctor.Severity.ERROR, "dirty", repo="Owner/repo")]
+        )
+        self.assertIn("cache-clone: Owner/repo", out)
+
+    def test_clean_report_says_so(self):
+        code, out = self._run([doctor.Finding("cli", doctor.Severity.OK, "git found")])
+        self.assertEqual(code, 0)
+        self.assertIn("no problems found", out)
 
 
 class TestTailTranscriptArgParsing(unittest.TestCase):

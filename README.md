@@ -48,6 +48,17 @@ it*. See [Usage](#usage) below for the full command set.
   written to, so an unattended overnight run doesn't require polling the
   CLI by hand to see what it's doing. See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- **`gardener doctor`**: a read-only pre-flight check over gardener's own
+  local state — the CLIs it shells out to, the state directory, every
+  cache clone's refresh-readiness, and whether each garden/allow-list
+  entry still resolves to itself on GitHub. Every check comes from a
+  failure that really did consume a garden slot on a real overnight run
+  (a clone left dirty by a killed dev-loop run fails `tend` every night
+  afterward; a renamed target repo fails in a way that looks fixed for
+  exactly one run after you clear the cache). It reports findings and the
+  exact command to fix each, and repairs nothing itself. Exits `1` on any
+  error, so it works as a gate before the nightly run. See
+  [`gardener doctor`](docs/USAGE.md#gardener-doctor--pre-flight-check-on-gardeners-own-state).
 - **`gardener update`**: fast-forwards gardener's own checkout to `origin`
   — `gardener overnight` does this automatically before each run (opt out
   with `--no-self-update`), so a box running it unattended stays current
@@ -183,6 +194,7 @@ gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-c
 gardener ps [-a] [-q]
 gardener stop <session>... | --all [-t SECONDS]
 gardener kill <session>... | --all [-s SIGNAL]
+gardener doctor [-v] [--offline]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 gardener dashboard [--port N]

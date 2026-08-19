@@ -30,8 +30,8 @@ from string import Template
 from typing import Optional
 
 from gardener import (
-    conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock,
-    run_log, selfupdate, sessions, state, transcript,
+    conventions, dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight,
+    repo_lock, run_log, selfupdate, sessions, state, transcript,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -1386,6 +1386,59 @@ def cmd_update(args: argparse.Namespace) -> int:
     return 1 if result.status is selfupdate.UpdateStatus.ERROR else 0
 
 
+#: Prefix printed for each severity. Plain ASCII on purpose — this is read
+#: over SSH and in a phone terminal as often as in a real one.
+_DOCTOR_MARKS = {
+    doctor.Severity.OK: "  ok  ",
+    doctor.Severity.WARN: " warn ",
+    doctor.Severity.ERROR: " ERROR",
+    doctor.Severity.SKIPPED: " skip ",
+}
+
+
+def _print_doctor_finding(finding: doctor.Finding) -> None:
+    subject = f"{finding.check}: {finding.repo}" if finding.repo else finding.check
+    print(f"[{_DOCTOR_MARKS[finding.severity]}] {subject}: {finding.message}")
+    if finding.fix:
+        print(f"           fix: {finding.fix}")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Read-only health check over gardener's own local state — see
+    `doctor.py`'s module docstring for what each check exists to catch and
+    why none of them repair anything.
+
+    Exit status is the point of this command being scriptable: `1` for any
+    ERROR (something will fail on the next run), `0` otherwise. A WARN or a
+    SKIPPED check is not a failure — `doctor` running on a phone with no
+    signal skips every `gh` check and must still exit `0`."""
+    report = doctor.run_checks(
+        cache_dir=args.cache_dir or default_repos_cache_dir(),
+        state_dir=args.state_dir or state.default_state_dir(),
+        garden_repos=garden.list_garden(path=args.garden_file),
+        allowlist_repos=merge_allowlist.list_allowed(path=args.allowlist_path),
+        offline=args.offline,
+    )
+
+    shown = report.findings if args.verbose else report.problems
+    for finding in shown:
+        _print_doctor_finding(finding)
+
+    problems = report.problems
+    errors = [f for f in problems if f.severity is doctor.Severity.ERROR]
+    if not problems:
+        checked = len(report.findings)
+        print(f"no problems found ({checked} check(s) ran)")
+    else:
+        if not args.verbose:
+            print()
+        print(
+            f"{len(problems)} problem(s): {len(errors)} error(s), "
+            f"{len(problems) - len(errors)} warning(s)"
+        )
+    return 1 if errors else 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
     if not runs:
@@ -1792,6 +1845,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kill_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
     kill_parser.set_defaults(func=cmd_kill)
+
+    doctor_parser = sub.add_parser(
+        "doctor",
+        help="Check gardener's own local state for problems that would fail the next run",
+    )
+    doctor_parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Print every check, including the passing ones (default: problems only)",
+    )
+    doctor_parser.add_argument(
+        "--offline", action="store_true",
+        help="Skip every check that needs the network (repo renames, gh auth)",
+    )
+    doctor_parser.add_argument("--cache-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    doctor_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    doctor_parser.add_argument("--garden-file", type=Path, default=None, help=argparse.SUPPRESS)
+    doctor_parser.add_argument("--allowlist-path", type=Path, default=None, help=argparse.SUPPRESS)
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
