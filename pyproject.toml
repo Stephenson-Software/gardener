@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gardener"
-version = "0.2.0.dev20260808"
+version = "0.2.0"
 description = "Safety-gated CLI that dispatches Claude Code to align repos against your own engineering conventions, or tend a whole fleet of repos unattended overnight via each one's own dev-loop skill — never merges without an explicit per-repo opt-in."
 readme = "README.md"
 requires-python = ">=3.10"
