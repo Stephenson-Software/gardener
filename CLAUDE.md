@@ -60,6 +60,22 @@ every `-p` session, and logs its path to stderr within seconds of dispatch
 start. `gardener tail-transcript <path> [-f]` pretty-prints that file. See
 `docs/USAGE.md`'s "Live session visibility" section.
 
+A running dispatch is also a *handle*, not just a log: `sessions.py`
+registers every `align`/`tend`/`overnight` process under
+`<state>/sessions/<id>.json` for its lifetime, and `gardener ps` /
+`gardener stop` / `gardener kill` list and stop them — deliberately shaped
+like the docker CLI (`-a`, `-q`, `--time`, `--signal`, id-prefix matching)
+because that vocabulary is already in the operator's fingers, while being
+only skin deep: a session is a plain OS process and nothing here isolates
+or restarts anything. Two design points are load-bearing and shouldn't be
+"simplified" later: liveness is an `fcntl.flock` probe of the registry
+file, never `os.kill(pid, 0)` (a phone recycles pids, and a stale record
+reading as running would become a `stop` target), and `stop` signals the
+session's whole `/proc`-walked process tree, since the dispatched `claude`
+and the builds it spawns are the processes that actually need to die. See
+`sessions.py`'s module docstring and `docs/USAGE.md`'s "Listing and
+stopping sessions".
+
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.

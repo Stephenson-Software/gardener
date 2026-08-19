@@ -55,6 +55,13 @@ gardener/
                        <state>/logs/<command>-<stamp>.log, which is the file
                        dashboard.py's live panels read back (see Usage's
                        "Run logs")
+    sessions.py      — registry of live dispatching processes under
+                       <state>/sessions/<id>.json, behind `gardener ps`/
+                       `stop`/`kill`; liveness is an fcntl.flock probe (not a
+                       pid check) and stopping signals the session's whole
+                       /proc-walked process tree, so a dispatched claude and
+                       its builds can't outlive it (see Usage's "Listing and
+                       stopping sessions")
     dashboard.py     — read-only stdlib http.server UI over the run history,
                        garden/allow-list files, and the active run log;
                        build_garden_rows() joins the first three into the
@@ -64,8 +71,8 @@ gardener/
                        that has runtime logic (state, cli parsing/templating/
                        notify-severity, mocked dispatch, dev_loop,
                        merge_allowlist, garden, overnight, conventions,
-                       repo_lock, notify, transcript, run_log, dashboard,
-                       selfupdate)
+                       repo_lock, notify, transcript, run_log, sessions,
+                       dashboard, selfupdate)
 ```
 
 ## Relationship to a conventions repo

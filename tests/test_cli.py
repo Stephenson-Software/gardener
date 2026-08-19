@@ -7,20 +7,23 @@ every test that exercises it passes `CONVENTIONS_URL` explicitly rather
 than depending on `$GARDENER_CONVENTIONS_URL` being set in the environment
 running the suite."""
 import argparse
+import fcntl
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, selfupdate, state,
+    dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock, selfupdate,
+    sessions, state,
 )
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
@@ -42,11 +45,16 @@ from gardener.cli import (
     cmd_allowlist,
     cmd_dashboard,
     cmd_garden,
+    cmd_kill,
+    cmd_ps,
+    cmd_stop,
     cmd_overnight,
     cmd_status,
     cmd_tail_transcript,
     cmd_tend,
     cmd_update,
+    _parse_signal,
+    _session_target,
     DENIAL_MAX_CHARS,
     DENIAL_PRINT_LIMIT,
     denial_report_lines,
@@ -3240,6 +3248,194 @@ class TestCmdOvernightStrategies(unittest.TestCase):
             cmd_overnight(self._args(hours=8.0, strategy="random", random_seed=5))
 
         self.assertEqual(overnight.read_cursor(path=self.cursor_file), 1)
+
+
+class TestSessionCommandParsing(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_ps_defaults_to_running_sessions_only(self):
+        args = self.parser.parse_args(["ps"])
+        self.assertFalse(args.all)
+        self.assertFalse(args.quiet)
+
+    def test_ps_short_flags_match_docker(self):
+        args = self.parser.parse_args(["ps", "-a", "-q"])
+        self.assertTrue(args.all)
+        self.assertTrue(args.quiet)
+
+    def test_stop_takes_several_sessions(self):
+        args = self.parser.parse_args(["stop", "abc", "def"])
+        self.assertEqual(args.session, ["abc", "def"])
+
+    def test_stop_grace_period_defaults_to_the_shared_constant(self):
+        args = self.parser.parse_args(["stop", "abc"])
+        self.assertEqual(args.time, sessions.DEFAULT_STOP_TIMEOUT_SECONDS)
+        self.assertEqual(self.parser.parse_args(["stop", "-t", "3", "abc"]).time, 3.0)
+
+    def test_kill_defaults_to_sigkill(self):
+        self.assertEqual(self.parser.parse_args(["kill", "abc"]).signal, "KILL")
+        self.assertEqual(self.parser.parse_args(["kill", "-s", "INT", "abc"]).signal, "INT")
+
+
+class TestParseSignal(unittest.TestCase):
+    def test_accepts_every_spelling_docker_does(self):
+        self.assertEqual(_parse_signal("KILL"), int(signal.SIGKILL))
+        self.assertEqual(_parse_signal("SIGKILL"), int(signal.SIGKILL))
+        self.assertEqual(_parse_signal("term"), int(signal.SIGTERM))
+        self.assertEqual(_parse_signal("9"), 9)
+
+    def test_unknown_name_says_what_to_pass_instead(self):
+        with self.assertRaises(ValueError) as ctx:
+            _parse_signal("NOPE")
+        self.assertIn("KILL/TERM/INT", str(ctx.exception))
+
+
+class TestSessionTarget(unittest.TestCase):
+    def test_a_repo_command_targets_that_repo(self):
+        self.assertEqual(_session_target(SimpleNamespace(repo="owner/name")), "owner/name")
+
+    def test_overnight_targets_the_garden(self):
+        self.assertEqual(_session_target(SimpleNamespace()), "garden")
+        self.assertEqual(_session_target(SimpleNamespace(repo=None)), "garden")
+
+
+class TestSessionCommands(unittest.TestCase):
+    """`ps`/`stop`/`kill` against a real sessions directory, with the actual
+    signalling mocked — no test here may signal a real process."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+        self.sessions_dir = self.state_dir / "sessions"
+        self.sessions_dir.mkdir()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _write(self, session_id, target="owner/name", command="tend", pid=4242):
+        path = self.sessions_dir / f"{session_id}.json"
+        path.write_text(json.dumps({
+            "id": session_id, "pid": pid, "command": command, "target": target,
+            "started_at": "2026-08-19T03:00:00+00:00", "log_path": None,
+        }))
+        return path
+
+    def _args(self, **kwargs):
+        base = dict(state_dir=self.state_dir, all=False, quiet=False, session=[], time=1.0,
+                    signal="KILL")
+        base.update(kwargs)
+        return SimpleNamespace(**base)
+
+    def _running(self, path):
+        """Hold `path`'s lock for the rest of the test, so the session it
+        describes reads as running."""
+        fd = os.open(path, os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(os.close, fd)
+
+    def test_ps_lists_a_running_session(self):
+        self._running(self._write("abcdef01", target="owner/live"))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cmd_ps(self._args()), 0)
+        self.assertIn("abcdef01", out.getvalue())
+        self.assertIn("owner/live", out.getvalue())
+
+    def test_ps_hides_exited_sessions_until_asked(self):
+        self._write("abcdef01", target="owner/gone")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cmd_ps(self._args())
+        self.assertIn("no gardener sessions running", out.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cmd_ps(self._args(all=True))
+        self.assertIn("owner/gone", out.getvalue())
+        self.assertIn("exited", out.getvalue())
+
+    def test_ps_quiet_prints_bare_ids(self):
+        self._running(self._write("abcdef01"))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cmd_ps(self._args(quiet=True))
+        self.assertEqual(out.getvalue().strip(), "abcdef01")
+
+    def test_stop_without_a_session_or_all_explains_both_options(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(cmd_stop(self._args()), 2)
+        self.assertIn("--all", err.getvalue())
+        self.assertIn("gardener ps", err.getvalue())
+
+    def test_stop_resolves_by_prefix_and_reports_what_it_stopped(self):
+        self._running(self._write("abcdef01", target="owner/live"))
+        out, calls = io.StringIO(), []
+
+        def fake_stop(session, **kwargs):
+            calls.append(session.id)
+            return sessions.StopResult(session=session, signalled=[session.pid],
+                                       escalated=False, stopped=True)
+
+        with patch("gardener.cli.sessions.stop", side_effect=fake_stop):
+            with redirect_stdout(out):
+                self.assertEqual(cmd_stop(self._args(session=["abc"])), 0)
+        self.assertEqual(calls, ["abcdef01"])
+        self.assertIn("stopped abcdef01", out.getvalue())
+
+    def test_stop_passes_the_grace_period_through(self):
+        self._running(self._write("abcdef01"))
+        seen = {}
+
+        def fake_stop(session, **kwargs):
+            seen.update(kwargs)
+            return sessions.StopResult(session=session, signalled=[], escalated=False, stopped=True)
+
+        with patch("gardener.cli.sessions.stop", side_effect=fake_stop):
+            with redirect_stdout(io.StringIO()):
+                cmd_stop(self._args(session=["abcdef01"], time=42.0))
+        self.assertEqual(seen.get("timeout"), 42.0)
+
+    def test_stop_all_over_no_sessions_is_a_reported_no_op(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cmd_stop(self._args(all=True)), 0)
+        self.assertIn("nothing to stop", out.getvalue())
+
+    def test_stop_reports_failure_when_the_process_survives(self):
+        self._running(self._write("abcdef01"))
+
+        def fake_stop(session, **kwargs):
+            return sessions.StopResult(session=session, signalled=[session.pid],
+                                       escalated=True, stopped=False)
+
+        err = io.StringIO()
+        with patch("gardener.cli.sessions.stop", side_effect=fake_stop):
+            with redirect_stderr(err):
+                self.assertEqual(cmd_stop(self._args(session=["abcdef01"])), 1)
+        self.assertIn("still running", err.getvalue())
+
+    def test_kill_sends_the_named_signal_without_escalating(self):
+        self._running(self._write("abcdef01"))
+        seen = {}
+
+        def fake_stop(session, **kwargs):
+            seen.update(kwargs)
+            return sessions.StopResult(session=session, signalled=[], escalated=False, stopped=True)
+
+        with patch("gardener.cli.sessions.stop", side_effect=fake_stop):
+            with redirect_stdout(io.StringIO()):
+                cmd_kill(self._args(session=["abcdef01"], signal="INT"))
+        self.assertEqual(seen.get("sig"), int(signal.SIGINT))
+        self.assertFalse(seen.get("escalate"))
+
+    def test_kill_rejects_an_unknown_signal_before_signalling_anything(self):
+        self._running(self._write("abcdef01"))
+        err = io.StringIO()
+        with patch("gardener.cli.sessions.stop") as mock_stop:
+            with redirect_stderr(err):
+                self.assertEqual(cmd_kill(self._args(session=["abcdef01"], signal="NOPE")), 1)
+        mock_stop.assert_not_called()
+        self.assertIn("unknown signal", err.getvalue())
+
 
 
 if __name__ == "__main__":

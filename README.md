@@ -180,6 +180,9 @@ gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
+gardener ps [-a] [-q]
+gardener stop <session>... | --all [-t SECONDS]
+gardener kill <session>... | --all [-s SIGNAL]
 gardener status [--repo <owner/repo>]
 gardener tail-transcript <path> [-f]
 gardener dashboard [--port N]
@@ -191,7 +194,9 @@ every flag (`--implement`, `--file-issue`, `--model`, `--timeout`,
 `--conventions-repo`, `--no-refresh-*`), how `tend` bootstraps and
 dispatches a target repo's own dev-loop skill, orphaned-work recovery,
 concurrent-dispatch safety, the merge allow-list, live session/transcript
-visibility, and run logs.
+visibility, run logs, and the docker-shaped `ps`/`stop`/`kill` commands for
+listing a running session and stopping it together with everything it
+dispatched.
 
 For the unattended "tend to my garden while I sleep" flow (the `garden`
 opt-in list, `overnight`'s batching/budget/resume-cursor design, and the

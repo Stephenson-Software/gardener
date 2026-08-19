@@ -297,6 +297,84 @@ gardener. Without `-f` it dumps whatever's in the file right now and exits
 (safe to run against a still-in-progress dispatch); with `-f` it keeps
 reading as the file grows, like `tail -f`, until interrupted.
 
+### Listing and stopping sessions
+
+A *session* is one running dispatching process — an `align`, a `tend`, or
+an `overnight`. Every one of them registers itself under
+`~/.local/state/gardener/sessions/<id>.json` for the duration of its run,
+which is what makes the three commands below possible. The names and flags
+deliberately mirror the docker CLI, since that vocabulary is already in
+most operators' fingers — but the resemblance is skin deep: a gardener
+session is a plain OS process, and nothing here isolates, namespaces, or
+restarts anything.
+
+```
+gardener ps [-a|--all] [-q|--quiet]
+gardener stop <session>... | --all [-t|--time SECONDS]
+gardener kill <session>... | --all [-s|--signal NAME]
+```
+
+`gardener ps` lists what is running right now:
+
+```
+SESSION    COMMAND    TARGET                             PID      STARTED  STATUS
+--------------------------------------------------------------------------------
+82cf55cd   overnight  garden                             9787     00:57    running (tending Preponderous-Software/viron)
+```
+
+`TARGET` is the `--repo` an `align`/`tend` was given, or `garden` for an
+`overnight` run (whose target is the whole opt-in list). `STARTED` is age
+since the session started, not runtime — no end time is recorded, since a
+session killed outright never gets to write one, and a column that is only
+sometimes a duration is worse than one that is always an age. The
+parenthesised detail in `STATUS` is read back out of that session's own run
+log with the same parser the dashboard's "Currently tending" panel uses, so
+the two can't drift apart.
+
+- `-a`/`--all` also shows recently finished sessions, like `docker ps -a`.
+  These are not run history — `gardener status` and the dashboard read the
+  SQLite db for that; the newest `sessions.DEFAULT_KEEP_EXITED` (50) exited
+  session files are kept and the rest pruned once per run.
+- `-q`/`--quiet` prints bare ids, so `gardener stop $(gardener ps -q)`
+  works the way its docker equivalent does.
+
+`gardener stop <session>` stops a run gracefully. A session is named by its
+id, by any unique prefix of that id, or by its target repo — `gardener stop
+owner/name` is valid whenever exactly one running session is pointed at it.
+`--all` stops every running session.
+
+**`stop` signals the session's whole process tree, not just gardener.** The
+real work of a dispatch happens in a `claude` child process, which spawns
+builds (`mvn`, `npm`, `pytest`) of its own; signalling gardener alone
+leaves those running as orphans still holding the repo's clone directory —
+the exact failure that motivated these commands. `stop` collects the
+session pid's descendants from `/proc`, SIGTERMs the whole set deepest
+first, waits `--time` seconds (default 10, matching `docker stop`), and
+SIGKILLs whatever is still alive. Stopping is worth preferring over
+killing: an `overnight` given the chance to exit cleanly still writes the
+resume cursor that lets the next run pick up where it left off.
+
+`gardener kill <session>` sends one signal — `--signal` (default `KILL`,
+accepting `KILL`, `SIGKILL`, or `9`) — to the same process tree, with no
+grace period and no escalation. Prefer it only for a session that is
+already wedged.
+
+Both commands report what actually happened rather than assuming the signal
+worked; a session still alive afterwards is an error exit, not a silent
+success.
+
+**Liveness comes from a lock, not a pid check.** Each session holds an
+exclusive `fcntl.flock` on its own registry file (the same stdlib mechanism
+`repo_lock.py` uses), and `ps` decides "is this alive?" by trying to take a
+shared lock. The kernel releases that lock however the process dies —
+clean exit, SIGKILL, or Android killing every background process on a
+task-swipe-away — so the registry self-heals with no reaper and no cleanup
+on the crash path. `os.kill(pid, 0)` was deliberately not used: an
+overnight run can outlive its own logs by hours on a phone that recycles
+pids freely, and a stale record whose pid had been reused would otherwise
+read as running and, far worse, become a target `gardener stop` would
+signal. See `sessions.py`'s module docstring for the rest of the design.
+
 ### Run logs
 
 `align`, `tend`, and `overnight` also mirror their own stderr narration to
