@@ -38,9 +38,9 @@ usage limit is flagged blocked but never retried), always with `sleep_fn`
 injected so no test actually sleeps; `tests/test_state.py`
 also pins the `GARDENER_STATE_DIR` contract across every module that
 resolves it — `state.py`, `garden.py`, `merge_allowlist.py`,
-`overnight.py`, `notify.py`, `run_log.py`, and `repo_lock.py` each carry
-their own private copy of that resolution, so one test asserts all eight
-helpers land under the override and another that they all fall back to
+`overnight.py`, `notify.py`, `run_log.py`, `repo_lock.py`, and
+`sessions.py` each carry their own private copy of that resolution, so one
+test asserts all nine helpers land under the override and another that they all fall back to
 `~/.local/state/gardener`, filenames asserted verbatim so a rename that
 would orphan a deployed box's on-disk state is caught too. It otherwise
 uses a real sqlite3 file in a tmp dir (including `daily_stats`' per-day
@@ -278,7 +278,19 @@ remain the module's only uncovered lines; `tests/test_repo_lock.py` covers
 `lock_file_path`'s naming convention and the `repo_lock` context manager's
 exclusivity and release-on-exit (normal and exception) using real
 `fcntl.flock` calls against a tmp dir, not a mock, since the whole point is
-proving the OS-level exclusion actually holds; `tests/test_selfupdate.py`
+proving the OS-level exclusion actually holds; `tests/test_sessions.py`
+covers the session registry the same way — real `flock` calls decide
+liveness, so one test proves a held lock reads as running and another that
+an unlocked file reads as exited *even when its recorded pid is a live
+process*, which is the whole reason liveness isn't a pid check — plus
+id/prefix/target resolution (including the ambiguous and no-match errors,
+asserted to name the candidates and point at `gardener ps` rather than just
+failing), `descendants()` against a synthetic `/proc` tree written into a
+tmp dir, and `stop()`'s signal-then-escalate sequence with `os.kill`,
+liveness, and the clock all injected so nothing real is ever signalled;
+`tests/test_cli.py`'s session-command tests likewise drive `cmd_ps`/
+`cmd_stop`/`cmd_kill` against a real sessions directory with
+`sessions.stop` itself patched out; `tests/test_selfupdate.py`
 covers `self_update`'s every branch (up to date, a real fast-forward,
 skipped for a dirty tree/detached HEAD/diverged branch, `--check`'s
 update-available report, and a `git` failure/timeout/`OSError` all coming

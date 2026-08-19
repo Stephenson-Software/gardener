@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
-from gardener import garden, merge_allowlist, notify, overnight, repo_lock, run_log, state
+from gardener import garden, merge_allowlist, notify, overnight, repo_lock, run_log, sessions, state
 
 
 class TestState(unittest.TestCase):
@@ -356,11 +356,11 @@ class TestSessionStats(unittest.TestCase):
 
 
 class TestStateDirIsHonouredEverywhere(unittest.TestCase):
-    """Eight helpers across seven modules each resolve `GARDENER_STATE_DIR`
+    """Nine helpers across eight modules each resolve `GARDENER_STATE_DIR`
     with their own private copy of the same three lines — `state.py`,
     `garden.py`, `merge_allowlist.py`, `overnight.py`, `notify.py`,
-    `run_log.py`, and `repo_lock.py`. Nothing makes them agree; they agree
-    only because each was written the same way.
+    `run_log.py`, `repo_lock.py`, and `sessions.py`. Nothing makes them
+    agree; they agree only because each was written the same way.
 
     That matters because they are two halves of the same conversations: the
     dashboard reads the logs dir `run_log.py` writes, `cmd_overnight` reads
@@ -390,6 +390,7 @@ class TestStateDirIsHonouredEverywhere(unittest.TestCase):
             ("overnight.default_cursor_path", overnight.default_cursor_path, "overnight_cursor.json"),
             ("run_log.default_logs_dir", run_log.default_logs_dir, "logs"),
             ("repo_lock.lock_file_path", lambda: repo_lock.lock_file_path("owner/repo"), "locks/owner__repo.lock"),
+            ("sessions.default_sessions_dir", sessions.default_sessions_dir, "sessions"),
         ]
 
     def test_every_helper_honours_the_override(self):
@@ -402,7 +403,7 @@ class TestStateDirIsHonouredEverywhere(unittest.TestCase):
                         self.assertEqual(fn(), expected)
 
     def test_every_helper_falls_back_to_the_same_home_dir(self):
-        """With no override set, all eight must land under
+        """With no override set, all nine must land under
         `~/.local/state/gardener` — the path `README.md` and `docs/USAGE.md`
         both tell an operator to look in."""
         with tempfile.TemporaryDirectory() as td:

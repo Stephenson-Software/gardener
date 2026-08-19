@@ -1,7 +1,7 @@
 """argparse-based CLI: `gardener align`, `gardener tend`,
 `gardener allowlist`, `gardener garden`, `gardener overnight`,
-`gardener status`, `gardener tail-transcript`, `gardener dashboard`, and
-`gardener update`.
+`gardener ps`, `gardener stop`, `gardener kill`, `gardener status`,
+`gardener tail-transcript`, `gardener dashboard`, and `gardener update`.
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
@@ -19,6 +19,7 @@ import json
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -30,7 +31,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, garden, merge_allowlist, notify, overnight, repo_lock,
-    run_log, selfupdate, state, transcript,
+    run_log, selfupdate, sessions, state, transcript,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -1413,6 +1414,177 @@ def cmd_tail_transcript(args: argparse.Namespace) -> int:
     return transcript.print_transcript(args.path, follow=args.follow)
 
 
+def _session_activity(session: sessions.Session) -> str:
+    """What a live session is working on right now, read back out of its own
+    run log via the same parser the dashboard uses
+    (`dashboard.parse_in_progress`) — reusing that rather than adding a
+    second bookkeeping channel, so the writing and reading halves can't
+    drift apart. Best-effort: a missing or unreadable log just means no
+    detail, never an error."""
+    if session.log_path is None:
+        return ""
+    try:
+        in_flight = dashboard.parse_in_progress(dashboard.tail_lines(session.log_path))
+    except OSError:
+        return ""
+    if not in_flight:
+        return ""
+    return "tending " + ", ".join(in_flight)
+
+
+def _ps_sessions(args: argparse.Namespace) -> list[sessions.Session]:
+    return sessions.list_sessions(
+        state_dir=getattr(args, "state_dir", None),
+        include_exited=getattr(args, "all", False),
+    )
+
+
+def cmd_ps(args: argparse.Namespace) -> int:
+    """List gardener's dispatching sessions — `docker ps` for a garden.
+
+    Only live sessions by default; `-a`/`--all` includes recently exited
+    ones (see `sessions.py` on why "live" is a lock probe rather than a pid
+    check). `-q`/`--quiet` prints bare ids, so `gardener stop $(gardener ps
+    -q)` works the way the docker equivalent does."""
+    found = _ps_sessions(args)
+    if args.quiet:
+        for session in found:
+            print(session.short_id)
+        return 0
+    if not found:
+        print(
+            "no gardener sessions running"
+            if not args.all
+            else "no gardener sessions recorded yet"
+        )
+        return 0
+    # STARTED is age-since-start, not runtime, so it stays honest for an
+    # exited session too — the same split `docker ps` makes between its
+    # CREATED and STATUS columns.
+    header = f"{'SESSION':<10} {'COMMAND':<10} {'TARGET':<34} {'PID':<8} {'STARTED':<8} STATUS"
+    print(header)
+    print("-" * len(header))
+    for session in found:
+        status = "running" if session.running else "exited"
+        if session.running:
+            activity = _session_activity(session)
+            if activity:
+                status = f"running ({activity})"
+        target = session.target
+        if len(target) > 34:
+            target = target[:31] + "..."
+        print(
+            f"{session.short_id:<10} {session.command:<10} {target:<34} "
+            f"{session.pid:<8} {sessions.format_age(session.age_seconds()):<8} {status}"
+        )
+    return 0
+
+
+def _targets_to_signal(args: argparse.Namespace) -> tuple[list[sessions.Session], int]:
+    """The sessions `stop`/`kill` should act on, plus the exit code to use
+    if that list is empty. `--all` over an empty garden of sessions is a
+    no-op worth reporting, not a failure; a named session that doesn't
+    exist is a failure."""
+    if not args.session and not args.all:
+        print(
+            "gardener: name a session to act on (see `gardener ps`), or pass "
+            "--all to act on every running session",
+            file=sys.stderr,
+        )
+        return [], 2
+    live = sessions.list_sessions(state_dir=getattr(args, "state_dir", None))
+    if args.all:
+        if not live:
+            print("no gardener sessions running — nothing to stop")
+        return live, 0
+    resolved: list[sessions.Session] = []
+    for ident in args.session:
+        try:
+            resolved.append(sessions.resolve(ident, live))
+        except sessions.SessionLookupError as e:
+            print(f"gardener: {e}", file=sys.stderr)
+            return [], 1
+    return resolved, 0
+
+
+def _report_stop(result: sessions.StopResult) -> None:
+    session = result.session
+    what = f"{session.short_id} ({session.command} {session.target}, pid {session.pid})"
+    if not result.stopped:
+        print(
+            f"gardener: {what} is still running after being signalled — it may be "
+            "stuck in an uninterruptible state; check `gardener ps` and, if it "
+            "persists, kill it by pid",
+            file=sys.stderr,
+        )
+        return
+    extra = ""
+    if len(result.signalled) > 1:
+        extra = f" (and {len(result.signalled) - 1} child process(es))"
+    if result.escalated:
+        extra += " — escalated to SIGKILL after the grace period"
+    print(f"stopped {what}{extra}")
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Stop one or more running sessions gracefully — `docker stop`.
+
+    SIGTERM to the session's whole process tree (the dispatched `claude`
+    and anything it spawned, not just gardener itself — see `sessions.py`),
+    then SIGKILL for whatever is still alive after `--time` seconds."""
+    targets, code = _targets_to_signal(args)
+    if not targets:
+        return code
+    failed = False
+    for session in targets:
+        result = sessions.stop(session, timeout=args.time)
+        _report_stop(result)
+        failed = failed or not result.stopped
+    return 1 if failed else 0
+
+
+def cmd_kill(args: argparse.Namespace) -> int:
+    """Signal one or more running sessions immediately — `docker kill`.
+
+    No grace period and no escalation: `--signal` (default SIGKILL) is sent
+    to the session's process tree once. Prefer `gardener stop` unless a
+    session is already wedged — an overnight run killed outright still
+    keeps the resume cursor it persisted per batch, but loses whatever the
+    in-flight `claude` dispatch was doing."""
+    targets, code = _targets_to_signal(args)
+    if not targets:
+        return code
+    try:
+        sig = _parse_signal(args.signal)
+    except ValueError as e:
+        print(f"gardener: {e}", file=sys.stderr)
+        return 1
+    failed = False
+    for session in targets:
+        result = sessions.stop(session, sig=sig, escalate=False)
+        _report_stop(result)
+        failed = failed or not result.stopped
+    return 1 if failed else 0
+
+
+def _parse_signal(name: str) -> int:
+    """`KILL`, `SIGKILL`, `9` — all three spellings `docker kill --signal`
+    accepts."""
+    raw = str(name).strip()
+    if raw.isdigit():
+        return int(raw)
+    candidate = raw.upper()
+    if not candidate.startswith("SIG"):
+        candidate = "SIG" + candidate
+    try:
+        return int(getattr(signal, candidate))
+    except AttributeError:
+        raise ValueError(
+            f"unknown signal '{name}' — pass a name like KILL/TERM/INT or a "
+            "number like 9"
+        ) from None
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     port = dashboard.find_free_port(preferred=args.port)
     if port != args.port:
@@ -1568,6 +1740,59 @@ def build_parser() -> argparse.ArgumentParser:
     overnight_parser.add_argument("--random-seed", type=int, default=None, help=argparse.SUPPRESS)
     overnight_parser.set_defaults(func=cmd_overnight, log_name="overnight")
 
+    ps_parser = sub.add_parser(
+        "ps", help="List gardener's running dispatching sessions (align/tend/overnight)"
+    )
+    ps_parser.add_argument(
+        "-a", "--all", action="store_true",
+        help="Also show sessions that have already finished",
+    )
+    ps_parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Print only session ids (pairs with `gardener stop $(gardener ps -q)`)",
+    )
+    ps_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    ps_parser.set_defaults(func=cmd_ps)
+
+    stop_parser = sub.add_parser(
+        "stop",
+        help="Gracefully stop a running session and everything it dispatched",
+    )
+    stop_parser.add_argument(
+        "session", nargs="*",
+        help="Session id (or a unique prefix of one), or the session's target repo. "
+             "See `gardener ps`",
+    )
+    stop_parser.add_argument(
+        "--all", action="store_true", help="Stop every running session",
+    )
+    stop_parser.add_argument(
+        "-t", "--time", type=float, default=sessions.DEFAULT_STOP_TIMEOUT_SECONDS,
+        help="Seconds to wait after SIGTERM before escalating to SIGKILL "
+             f"(default {sessions.DEFAULT_STOP_TIMEOUT_SECONDS:g})",
+    )
+    stop_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    stop_parser.set_defaults(func=cmd_stop)
+
+    kill_parser = sub.add_parser(
+        "kill",
+        help="Signal a running session immediately, with no grace period",
+    )
+    kill_parser.add_argument(
+        "session", nargs="*",
+        help="Session id (or a unique prefix of one), or the session's target repo. "
+             "See `gardener ps`",
+    )
+    kill_parser.add_argument(
+        "--all", action="store_true", help="Signal every running session",
+    )
+    kill_parser.add_argument(
+        "-s", "--signal", default="KILL",
+        help="Signal to send, by name or number (default KILL)",
+    )
+    kill_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    kill_parser.set_defaults(func=cmd_kill)
+
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
     status.add_argument(
@@ -1617,6 +1842,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _session_target(args: argparse.Namespace) -> str:
+    """What a session is pointed at, for `gardener ps`' TARGET column: the
+    `--repo` an `align`/`tend` was given, or `garden` for an `overnight`
+    run, whose target is the whole opt-in list rather than one repo."""
+    return getattr(args, "repo", None) or "garden"
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1627,7 +1859,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # line a dispatching run prints is captured, including the ones printed
     # before/after the command's own body (argparse errors have already
     # exited by this point, so nothing is lost by starting the log here).
+    # `log_name` marks exactly the dispatching subcommands, which are also
+    # exactly the ones worth listing and stopping — so the session registry
+    # is registered here too, inside the log so it can record the log's
+    # path for `gardener ps` to read progress back out of.
     with run_log.tee_stderr(log_name) as path:
         if path is not None:
             print(f"gardener: run log: {path}", file=sys.stderr)
-        return args.func(args)
+        with sessions.register(log_name, _session_target(args), log_path=path) as session:
+            if session is not None:
+                print(
+                    f"gardener: session {session.short_id} (stop it with "
+                    f"`gardener stop {session.short_id}`)",
+                    file=sys.stderr,
+                )
+            return args.func(args)

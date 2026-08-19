@@ -182,6 +182,19 @@ devsrv status gardener-overnight   # confirm it's running
 devsrv logs gardener-overnight -f  # watch progress live
 ```
 
+Stopping a night early is `gardener stop`, not the supervisor's own stop:
+a supervisor kills the process it started, which is not necessarily the
+one dispatching, and never the `claude` process underneath it or the
+builds that `claude` spawned — those survive as orphans still holding the
+repo's clone directory. `gardener ps` shows the run and what it is
+currently tending, and `gardener stop <id>` signals its whole process tree
+(see [Listing and stopping sessions](USAGE.md#listing-and-stopping-sessions)).
+Prefer `stop` over `kill` here: an overnight run allowed to exit on
+SIGTERM still leaves the resume cursor pointing at the next untended repo.
+Note that a supervisor configured to restart the command (`--autostart`
+above) will start a *fresh* run the next time it fires — stopping the
+session is not the same as cancelling the schedule.
+
 `--hours 6` here is a deliberate local choice on this device, not
 gardener's default (`8.0`, `overnight.DEFAULT_OVERNIGHT_HOURS` — see the
 time budget section above). The registered service is the source of truth
