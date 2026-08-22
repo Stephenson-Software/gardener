@@ -130,6 +130,18 @@ and previously appeared nowhere.
   signature of their contents changes, for the same reason the plot is:
   an unconditional rebuild every four seconds destroys any text selection
   inside them before it can be copied.
+
+  That card layout also hides the whole `<thead>`, and these headers are
+  not only labels — they are the sort control — so below 720px the table
+  was not sortable at all, on the layout the page is written for. A
+  **Sort by** select and a direction toggle therefore render inside the
+  table view at exactly those widths, from the same media block that
+  hides the header row, sticky at the top of the view's own scroll box.
+  Both controls change the order through one `setGardenSort` and are
+  re-rendered from one read of `gardenSort`, so the caret, `aria-sort`
+  and the select cannot describe different orders; the select's options
+  are built from the header cells at load rather than listed a second
+  time, so a new column appears in both controls or in neither.
 - **Plot** — each repo drawn as a plant, in SVG, generated in the page from
   the same row. This is the "look at the garden" view rather than the "read
   the garden" one:

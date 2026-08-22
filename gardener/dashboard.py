@@ -837,6 +837,30 @@ PAGE_HTML = """<!doctype html>
      th carries the same fact for a screen reader. */
   .garden-table th .sort-ind { color: var(--accent); margin-left: 0.25rem; }
   .garden-table th[aria-sort="none"] .sort-ind { visibility: hidden; }
+  /* The garden table's header cells are its sort control as well as its
+     labels, so the phone card layout's `table thead { display: none }`
+     doesn't drop a repetition — it removes the feature outright, on the
+     one device this page is written for (issue #120). This is the same
+     `gardenSort` state offered from inside the table view, rendered at
+     exactly the widths where the header row isn't. Its counterpart rule
+     sits beside that `thead` one in the phone block below, so the two
+     can't drift onto different breakpoints. */
+  .table-sort {
+    display: none; align-items: center; gap: 0.4rem 0.6rem;
+    flex-wrap: wrap; margin-bottom: 0.7rem;
+  }
+  .table-sort label { color: var(--muted); font-size: 0.78rem; }
+  /* 16px for the same reason .filter-box is: anything smaller makes iOS
+     Safari zoom the whole page when the control takes focus. */
+  .table-sort select {
+    font: inherit; font-size: 16px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 0.25rem 0.7rem; min-height: 34px; max-width: 12rem;
+  }
+  .table-sort select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* 34px like the tabs and the filter box, not .chip's 30px: this control
+     only ever renders on a touch layout (issue #135's target rule). */
+  .table-sort .chip { min-height: 34px; }
   .garden-table td.num, .garden-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   /* The status dot takes the page's own semantic tokens, not the plant's
      naturalistic leaf colour. Those leaf colours are an illustration and
@@ -900,6 +924,16 @@ PAGE_HTML = """<!doctype html>
     main { padding: 1rem; gap: 1rem; }
     .panel { padding: 0.9rem 1rem; border-radius: 12px; }
     table thead { display: none; }
+    /* The other half of hiding the header row: the garden table's headers
+       are also its only sort control, so that control has to exist
+       somewhere else at exactly these widths (issue #120). Sticky within
+       #table-view's own scroll box (see below) — the header row it stands
+       in for scrolled with the table, but a 135-row garden inside a 70vh
+       box puts the control out of reach within one flick otherwise. */
+    .table-sort {
+      display: flex; position: sticky; top: 0; z-index: 1;
+      background: var(--panel); padding: 0.2rem 0;
+    }
     table, table tbody, table tr, table td { display: block; width: 100%; }
     table tr {
       display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem;
@@ -1031,6 +1065,21 @@ PAGE_HTML = """<!doctype html>
       </details>
     </div>
     <div id="table-view" role="tabpanel" aria-labelledby="tab-table" tabindex="0" hidden>
+      <!-- Inside the table view rather than in the panel toolbar above:
+           sorting only affects this view (the plot orders itself by
+           attention), so a sort control beside the view tabs would sit
+           there doing nothing whenever the plot is the one on screen.
+           The options are built from the header cells at load, never
+           written out here a second time — see buildGardenSortOptions. -->
+      <div class="table-sort">
+        <label for="garden-sort">Sort by</label>
+        <select id="garden-sort"></select>
+        <button type="button" class="chip" id="garden-sort-dir"
+                aria-label="Sorted ascending. Activate to sort descending.">
+          <span aria-hidden="true" id="garden-sort-dir-glyph">▲</span>
+          <span id="garden-sort-dir-label">ascending</span>
+        </button>
+      </div>
       <table class="garden-table" role="table">
         <caption class="sr-only">Every opted-in repo with its health, tend and error counts, cost and merge eligibility</caption>
         <thead><tr>
@@ -1407,6 +1456,37 @@ function renderGardenSortHeaders() {
     const ind = th.querySelector(".sort-ind");
     if (ind) ind.textContent = active && !ascending ? "▼" : "▲";
   }
+  syncGardenSortControl();
+}
+
+// The narrow-viewport half of the same header. Called from
+// renderGardenSortHeaders rather than from its own render path, so the
+// header cells and this control are written from one read of `gardenSort`
+// and cannot end up describing different orders (issue #120).
+function syncGardenSortControl() {
+  const select = document.getElementById("garden-sort");
+  if (select && select.value !== gardenSort.key) select.value = gardenSort.key;
+  const button = document.getElementById("garden-sort-dir");
+  if (!button) return;
+  const ascending = gardenSort.dir === 1;
+  const glyph = document.getElementById("garden-sort-dir-glyph");
+  const label = document.getElementById("garden-sort-dir-label");
+  if (glyph) glyph.textContent = ascending ? "▲" : "▼";
+  if (label) label.textContent = ascending ? "ascending" : "descending";
+  // The caret is aria-hidden, so the accessible name has to carry the
+  // direction in words as well as what activating the button will do —
+  // a name of "▲" announces as nothing useful (issue #130).
+  button.setAttribute("aria-label", ascending
+    ? "Sorted ascending. Activate to sort descending."
+    : "Sorted descending. Activate to sort ascending.");
+}
+
+// One entry point for every control that changes the order, so a second
+// control can't set the state without the first one being re-rendered
+// from it.
+function setGardenSort(key, dir) {
+  gardenSort = {key, dir};
+  renderGardenTable();
 }
 
 // Same change-detection the plot has had. Without it the tbody was
@@ -1713,10 +1793,33 @@ for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
   if (!button) continue;
   button.addEventListener("click", () => {
     const key = th.dataset.sort;
-    gardenSort = {key, dir: gardenSort.key === key ? -gardenSort.dir : 1};
-    renderGardenTable();
+    setGardenSort(key, gardenSort.key === key ? -gardenSort.dir : 1);
   });
 }
+// The select's options are derived from the header cells rather than
+// written out a second time in the markup: both controls drive one
+// `gardenSort`, so a column added to the table has to appear in both or in
+// neither — and a hand-maintained second list is exactly what wouldn't.
+function buildGardenSortOptions() {
+  const select = document.getElementById("garden-sort");
+  if (!select) return;
+  for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {
+    const option = document.createElement("option");
+    option.value = th.dataset.sort;
+    // The button's first child is its label text node; the caret span
+    // after it is decoration and must not reach an option's label.
+    const first = th.querySelector("button") && th.querySelector("button").firstChild;
+    option.textContent = ((first && first.textContent) || th.dataset.sort).trim();
+    select.append(option);
+  }
+}
+buildGardenSortOptions();
+document.getElementById("garden-sort").addEventListener("change", ev => {
+  setGardenSort(ev.target.value, gardenSort.dir);
+});
+document.getElementById("garden-sort-dir").addEventListener("click", () => {
+  setGardenSort(gardenSort.key, -gardenSort.dir);
+});
 // Filtering re-renders both views. `input` rather than `change` so it
 // narrows as you type, which is the whole point at 135 rows.
 document.getElementById("garden-filter").addEventListener("input", ev => {

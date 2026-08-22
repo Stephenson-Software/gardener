@@ -857,6 +857,108 @@ class TestPageHtmlInvariants(unittest.TestCase):
         self.assertNotIn("fetch failed — retrying…", dashboard.PAGE_HTML)
 
 
+class TestGardenSortOnNarrowViewports(unittest.TestCase):
+    """The garden table's header cells carry its sort control as well as
+    its labels, and the phone card layout hides the whole `<thead>` — so
+    hiding it removed a feature rather than a repetition, on the layout the
+    page is explicitly written for (issue #120). These assert the second
+    control exists, is offered exactly where the header row isn't, and is
+    driven from the same state — at the level the Python side can see, per
+    `TestPageHtmlInvariants`' note about there being no JS runner here."""
+
+    PHONE_BLOCK_START = "@media (max-width: 720px) {"
+
+    def phone_block(self) -> str:
+        """The stylesheet's narrow-viewport block, which is where the
+        `<thead>` is hidden and therefore where the substitute control has
+        to be turned on."""
+        start = dashboard.PAGE_HTML.index(self.PHONE_BLOCK_START)
+        return dashboard.PAGE_HTML[start:dashboard.PAGE_HTML.index("</style>", start)]
+
+    def test_the_substitute_control_is_shown_exactly_where_the_header_row_is_hidden(self):
+        """Both rules must live in the same media block. Split across two
+        breakpoints, a range of widths would show either both controls or
+        neither — and "neither" is the bug this fixes, silently restored."""
+        block = self.phone_block()
+        self.assertIn("table thead { display: none; }", block)
+        self.assertIn(".table-sort {", block)
+        self.assertIn("display: flex;", block.split(".table-sort {", 1)[1].split("}", 1)[0])
+        # ...and it is off by default, so the wide layout keeps the header
+        # cells as its only sort control rather than growing a second one.
+        default_rules = dashboard.PAGE_HTML[:dashboard.PAGE_HTML.index(self.PHONE_BLOCK_START)]
+        self.assertIn(".table-sort {\n    display: none;", default_rules)
+
+    def test_the_control_sits_inside_the_table_view_not_the_shared_toolbar(self):
+        """Sorting reorders the table only — the plot orders itself by
+        attention — so in the panel's shared toolbar this control would sit
+        beside the view tabs doing nothing whenever the plot is on screen."""
+        table_view = dashboard.PAGE_HTML.index('id="table-view"')
+        table = dashboard.PAGE_HTML.index('<table class="garden-table"', table_view)
+        self.assertIn('<div class="table-sort">', dashboard.PAGE_HTML[table_view:table])
+
+    def test_both_controls_change_the_sort_through_one_entry_point(self):
+        """Two controls over one `gardenSort` is the whole risk here: a
+        second writer that sets the state directly would reorder the rows
+        while the header cells went on describing the previous order.
+        `setGardenSort` must be the only assignment to it after the
+        initial declaration."""
+        self.assertIn("function setGardenSort(key, dir) {\n  gardenSort = {key, dir};", dashboard.PAGE_HTML)
+        self.assertIn("setGardenSort(key, gardenSort.key === key ? -gardenSort.dir : 1);", dashboard.PAGE_HTML)
+        self.assertIn("setGardenSort(ev.target.value, gardenSort.dir);", dashboard.PAGE_HTML)
+        self.assertIn("setGardenSort(gardenSort.key, -gardenSort.dir);", dashboard.PAGE_HTML)
+        self.assertEqual(
+            dashboard.PAGE_HTML.count("gardenSort = {"),
+            2,
+            "only the initial declaration and setGardenSort may assign gardenSort",
+        )
+
+    def test_the_rendered_sort_state_reaches_both_controls_from_one_read(self):
+        """`renderGardenSortHeaders` already runs from `renderGardenTable`,
+        i.e. from the same call that renders the rows. Syncing the select
+        from there rather than from its own path is what keeps the caret,
+        `aria-sort` and the select from disagreeing."""
+        self.assertIn("  }\n  syncGardenSortControl();\n}", dashboard.PAGE_HTML)
+        self.assertIn("if (select && select.value !== gardenSort.key) select.value = gardenSort.key;",
+                      dashboard.PAGE_HTML)
+
+    def test_the_options_are_derived_from_the_header_cells(self):
+        """A hand-written second list of columns is what would drift: a
+        column added to the `<thead>` must appear in the select or in
+        neither control, never in only one."""
+        self.assertIn('for (const th of document.querySelectorAll(".garden-table th[data-sort]")) {\n'
+                      "    const option = document.createElement(\"option\");",
+                      dashboard.PAGE_HTML)
+        self.assertIn("option.value = th.dataset.sort;", dashboard.PAGE_HTML)
+        self.assertNotIn("<option value=", dashboard.PAGE_HTML)
+        # The caret span sits inside the same button as the label, so
+        # `textContent` on the button would put "▲" in every option.
+        self.assertIn("(first && first.textContent) || th.dataset.sort", dashboard.PAGE_HTML)
+
+    def test_the_direction_button_names_its_direction_in_words(self):
+        """The caret is `aria-hidden` (issue #130), so without an explicit
+        accessible name the only control for sort direction on a phone
+        would announce as an unnamed button."""
+        self.assertIn('<span aria-hidden="true" id="garden-sort-dir-glyph">', dashboard.PAGE_HTML)
+        self.assertIn('button.setAttribute("aria-label", ascending', dashboard.PAGE_HTML)
+        self.assertIn('"Sorted ascending. Activate to sort descending."', dashboard.PAGE_HTML)
+        self.assertIn('"Sorted descending. Activate to sort ascending."', dashboard.PAGE_HTML)
+        # The visible label is a word, not the glyph, so the accessible
+        # name contains it (WCAG's label-in-name).
+        self.assertIn('ascending" : "descending"', dashboard.PAGE_HTML)
+
+    def test_the_select_is_labelled_and_wired_before_the_first_render(self):
+        """`syncGardenSortControl` sets `select.value`, which silently
+        resolves to "" against an empty option list — so the options have
+        to be built before the initial header render, not on the first
+        poll."""
+        self.assertIn('<label for="garden-sort">', dashboard.PAGE_HTML)
+        self.assertIn('<select id="garden-sort"></select>', dashboard.PAGE_HTML)
+        self.assertLess(
+            dashboard.PAGE_HTML.index("\nbuildGardenSortOptions();"),
+            dashboard.PAGE_HTML.index("\nrenderGardenSortHeaders();"),
+        )
+
+
 class TestRunServerLoopbackEnforcement(unittest.TestCase):
     def test_non_loopback_host_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:
