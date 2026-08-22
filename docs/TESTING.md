@@ -257,7 +257,19 @@ pinned here afterwards), the sorted column and direction being
 written back into the `<thead>` from the same state the body is sorted
 from, the session panel naming both ends of the window it shows (and
 degrading to no caption at all rather than to a dangling preposition), and
-each of the four poll-failure reasons marking the page stale. Anything about how the
+each of the four poll-failure reasons marking the page stale.
+`TestGardenSortOnNarrowViewports` reads the same emitted source for the
+second sort control the phone layout needs, since the header cells that
+carry the sort are hidden there: that the rule showing it and the rule
+hiding the `<thead>` live in one media block (split across two
+breakpoints, some range of widths would show neither, which is the bug
+itself), that it renders inside the table view rather than the panel's
+shared toolbar, that every control changes the order through the single
+`setGardenSort` — asserted by counting the assignments to `gardenSort`,
+so a third writer fails the test — that both are re-rendered from one
+read of it, that the select's options are derived from the header cells
+rather than listed a second time, and that its direction toggle names
+its direction in words because the caret is `aria-hidden`. Anything about how the
 plot *looks* is still verified by rendering it and looking at it, per
 CLAUDE.md. `find_active_logs` additionally covers the prune race
 (a log deleted between the `glob` and the `stat` is skipped, not fatal) —
