@@ -302,7 +302,20 @@ tmp dir, and `stop()`'s signal-then-escalate sequence with `os.kill`,
 liveness, and the clock all injected so nothing real is ever signalled;
 `tests/test_cli.py`'s session-command tests likewise drive `cmd_ps`/
 `cmd_stop`/`cmd_kill` against a real sessions directory with
-`sessions.stop` itself patched out; `tests/test_selfupdate.py`
+`sessions.stop` itself patched out; `tests/test_doctor.py` covers every
+`doctor.py` check with `run_fn`/`which_fn`/`locked_fn` all injected, so no
+test invokes a real `git`, `gh`, or network call — including the two
+severity rules the command's exit code depends on (a modified tracked file
+is an ERROR, an untracked-only tree is a WARN, since the refresh's `git
+clean -fdx` is meant to remove those) and the two "don't cry wolf" ones (an
+unresolvable repo is SKIPPED rather than reported as renamed, because
+offline/rate-limited/deleted are the same answer from `gh`; and a repo whose
+per-repo lock is currently held is skipped without shelling out to git at
+all, so an in-flight tend's legitimately-dirty clone is never a finding).
+`tests/test_repo_lock.py` additionally covers `is_repo_locked`, the
+read-only probe that makes that last rule work — including that probing a
+never-dispatched repo doesn't create the lock file, since a read-only
+command must leave no state behind. `tests/test_selfupdate.py`
 covers `self_update`'s every branch (up to date, a real fast-forward,
 skipped for a dirty tree/detached HEAD/diverged branch, `--check`'s
 update-available report, and a `git` failure/timeout/`OSError` all coming

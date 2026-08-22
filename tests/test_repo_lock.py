@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gardener.repo_lock import RepoLockedError, lock_file_path, repo_lock
+from gardener.repo_lock import RepoLockedError, is_repo_locked, lock_file_path, repo_lock
 
 
 class TestLockFilePath(unittest.TestCase):
@@ -94,6 +94,41 @@ class TestRepoLock(unittest.TestCase):
     def test_error_message_names_the_repo(self):
         err = RepoLockedError("owner/name")
         self.assertIn("owner/name", str(err))
+
+
+class TestIsRepoLocked(unittest.TestCase):
+    """`is_repo_locked` is the read-only probe `doctor.py` uses to tell an
+    in-flight dispatch's legitimately-dirty clone apart from one left dirty
+    by a killed run. Same-process acquisition is a valid test of this:
+    `flock` is per open-file-description, so a second `os.open` of the same
+    lock file contends exactly the way a second process would."""
+
+    def test_reports_a_held_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with repo_lock("owner/name", state_dir=state_dir):
+                self.assertTrue(is_repo_locked("owner/name", state_dir=state_dir))
+
+    def test_reports_a_released_lock_as_free(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with repo_lock("owner/name", state_dir=state_dir):
+                pass
+            self.assertFalse(is_repo_locked("owner/name", state_dir=state_dir))
+
+    def test_another_repos_lock_does_not_register(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with repo_lock("owner/name-a", state_dir=state_dir):
+                self.assertFalse(is_repo_locked("owner/name-b", state_dir=state_dir))
+
+    def test_never_creates_the_lock_file(self):
+        # A read-only command must stay read-only: probing a repo that has
+        # never been dispatched against must not leave state behind.
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            self.assertFalse(is_repo_locked("owner/never-touched", state_dir=state_dir))
+            self.assertFalse(lock_file_path("owner/never-touched", state_dir).exists())
 
 
 if __name__ == "__main__":

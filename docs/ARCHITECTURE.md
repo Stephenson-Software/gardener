@@ -42,6 +42,12 @@ gardener/
                        gardener invocations never clone/checkout/dispatch
                        against the same shared clone directory at once (see
                        Usage's "Concurrent dispatch safety")
+    doctor.py        — read-only pre-flight checks over gardener's own local
+                       state (required CLIs, gh auth, state dir, every cache
+                       clone's refresh-readiness, and whether each garden/
+                       allow-list entry still resolves to itself on GitHub)
+                       behind `gardener doctor`; reports findings and the
+                       command to fix each, never repairs anything itself
     selfupdate.py    — fast-forwards gardener's own checkout to origin (never
                        a target repo) for `gardener update` and, by default,
                        at the start of `gardener overnight`; a dirty tree,

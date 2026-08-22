@@ -76,6 +76,20 @@ and the builds it spawns are the processes that actually need to die. See
 `sessions.py`'s module docstring and `docs/USAGE.md`'s "Listing and
 stopping sessions".
 
+`gardener doctor` (`doctor.py`) is the read-only pre-flight check over
+gardener's *own* local state — cache clones, the two opt-in lists, the
+state directory, the external CLIs. Two rules there are load-bearing and
+shouldn't be "improved" later: it **never repairs anything** (the
+remediations it surfaces are `git stash`-versus-discard on possibly-unpushed
+work and rewriting an opt-in safety list — neither is a health check's
+decision to make, so every `Finding` carries the command instead), and a
+repo whose per-repo lock is currently held is **skipped, not checked** (a
+tend in flight has legitimately dirtied its own clone, and a `doctor` that
+cries wolf during an overnight run is a `doctor` nobody runs). Every check
+in it traces to a real observed failure — its module docstring names the
+incident behind each; add new checks the same way rather than from
+imagined failure modes.
+
 ## Conventions
 
 - **Stdlib-only Python.** No pip dependencies beyond the standard library.

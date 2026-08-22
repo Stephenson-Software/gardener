@@ -6,6 +6,7 @@ gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
+gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
 gardener tail-transcript <path> [-f | --follow]
 gardener dashboard [--port N]
@@ -186,6 +187,60 @@ See also [Merge allow-list mechanics](SAFETY.md#merge-allow-list-mechanics)
 in the safety model for exactly how this is enforced at the tool-scoping
 level.
 
+## `gardener doctor` — pre-flight check on gardener's own state
+
+`gardener doctor` is a read-only health check over everything an
+`overnight` run depends on locally: the external CLIs it shells out to
+(`git`, `gh`, `claude`, plus `gh`'s auth status), the state directory and
+whether its JSON lists still parse, every cache clone under
+`~/.cache/gardener/repos`, and whether each garden/allow-list entry still
+resolves to itself on GitHub.
+
+Every check exists because of a failure that really did consume a garden
+slot on a real overnight run — see `doctor.py`'s module docstring for the
+specific incident behind each. The two that matter most:
+
+- **A cache clone with modified tracked files fails `tend` on every
+  subsequent run, silently.** The refresh in
+  `clone_or_refresh_target_repo` is `git checkout -B <default>
+  origin/<default>`, which git refuses rather than overwrite local
+  changes, and nothing ever cleans that up — so a clone left dirty by a
+  killed dev-loop run burns that repo's slot every night until someone
+  looks.
+- **A renamed or transferred target repo fails in a way that looks fixed
+  after you clear the cache.** `gh repo clone <old-name>` follows GitHub's
+  rename redirect and writes the *canonical* URL as `origin`, so the fresh
+  clone works — and then the next refresh trips the origin check and fails
+  again. Only asking GitHub for each configured entry's current
+  `nameWithOwner` surfaces this before it wastes another night.
+
+**`doctor` never repairs anything.** Each finding carries the exact
+command to run instead. That's deliberate: the remediations these findings
+call for are `git stash`-versus-discard on a clone that may hold unpushed
+work, and rewriting an opt-in list — the merge allow-list included. Neither
+belongs to a health check to decide on the operator's behalf.
+
+```bash
+gardener doctor              # problems only
+gardener doctor --verbose    # every check, including the passing ones
+gardener doctor --offline    # skip the gh/network checks
+```
+
+Exit status is `1` if any check reported an ERROR (something will fail on
+the next run) and `0` otherwise — a WARN or a skipped check is not a
+failure, so `doctor --offline` on a phone with no signal still exits `0`.
+That makes it usable as a gate in whatever wrapper starts the nightly run:
+
+```bash
+gardener doctor || echo "fix the above before tonight's run"
+```
+
+A repo another gardener process currently holds the [per-repo
+lock](#concurrent-dispatch-safety) on is reported as skipped rather than
+checked — a `tend` in flight has legitimately dirtied its own clone and
+will clean up after itself, so `doctor` stays usable *during* the
+unattended run it exists to protect.
+
 ## Self-update
 
 `gardener overnight` runs unattended (Task Scheduler, cron, `devsrv`) with
@@ -241,6 +296,14 @@ available (and, if so, the old/new commit) without applying it.
   newest first. Defaults to `20`; pass a larger number to page further
   back through the run history, or combine with `--repo` to scope the
   window to one repo.
+- `-v` / `--verbose` (`doctor` only) — print every check, including the
+  passing ones, instead of only the problems. Useful the first time, or
+  to confirm a check actually ran rather than being skipped.
+- `--offline` (`doctor` only) — skip every check that needs the network
+  (the `gh auth status` probe and the per-repo rename lookups). Those
+  checks already degrade to "skipped" on their own when `gh` can't answer;
+  this avoids spending one `gh` call per configured repo when you already
+  know there's no signal.
 - `-f` / `--follow` (`tail-transcript` only) — keep reading as the file
   grows, like `tail -f`, instead of exiting at EOF. Useful against the
   transcript path a dispatch logs to stderr while that run is still going.

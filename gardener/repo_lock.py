@@ -85,3 +85,37 @@ def repo_lock(repo: str, state_dir: Optional[Path] = None) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def is_repo_locked(repo: str, state_dir: Optional[Path] = None) -> bool:
+    """True when another gardener process currently holds `repo`'s lock.
+
+    A read-only probe for callers that want to *know* about a live dispatch
+    rather than exclude one — `doctor.py`'s cache-clone checks, so a
+    working tree that is dirty only because a tend is mid-run right now
+    isn't reported as a problem. Takes and immediately releases the lock
+    (the same acquire-to-test technique `sessions.py` uses for liveness)
+    rather than reading a pid, because a pid is exactly what isn't
+    trustworthy here: this device recycles them, and `flock` is released by
+    the kernel however the holder dies.
+
+    Never creates the lock file — a repo that has never been dispatched
+    against has no lock file and is trivially not locked. That keeps a
+    read-only command read-only.
+    """
+    path = lock_file_path(repo, state_dir)
+    if not path.exists():
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
