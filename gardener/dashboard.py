@@ -858,6 +858,9 @@ PAGE_HTML = """<!doctype html>
     padding: 0.25rem 0.7rem; min-height: 34px; max-width: 12rem;
   }
   .table-sort select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* 34px like the tabs and the filter box, not .chip's 30px: this control
+     only ever renders on a touch layout (issue #135's target rule). */
+  .table-sort .chip { min-height: 34px; }
   .garden-table td.num, .garden-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   /* The status dot takes the page's own semantic tokens, not the plant's
      naturalistic leaf colour. Those leaf colours are an illustration and
@@ -923,8 +926,14 @@ PAGE_HTML = """<!doctype html>
     table thead { display: none; }
     /* The other half of hiding the header row: the garden table's headers
        are also its only sort control, so that control has to exist
-       somewhere else at exactly these widths (issue #120). */
-    .table-sort { display: flex; }
+       somewhere else at exactly these widths (issue #120). Sticky within
+       #table-view's own scroll box (see below) — the header row it stands
+       in for scrolled with the table, but a 135-row garden inside a 70vh
+       box puts the control out of reach within one flick otherwise. */
+    .table-sort {
+      display: flex; position: sticky; top: 0; z-index: 1;
+      background: var(--panel); padding: 0.2rem 0;
+    }
     table, table tbody, table tr, table td { display: block; width: 100%; }
     table tr {
       display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem;

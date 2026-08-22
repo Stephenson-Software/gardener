@@ -881,7 +881,8 @@ class TestGardenSortOnNarrowViewports(unittest.TestCase):
         neither — and "neither" is the bug this fixes, silently restored."""
         block = self.phone_block()
         self.assertIn("table thead { display: none; }", block)
-        self.assertIn(".table-sort { display: flex; }", block)
+        self.assertIn(".table-sort {", block)
+        self.assertIn("display: flex;", block.split(".table-sort {", 1)[1].split("}", 1)[0])
         # ...and it is off by default, so the wide layout keeps the header
         # cells as its only sort control rather than growing a second one.
         default_rules = dashboard.PAGE_HTML[:dashboard.PAGE_HTML.index(self.PHONE_BLOCK_START)]
