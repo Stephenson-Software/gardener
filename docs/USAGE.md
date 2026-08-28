@@ -45,9 +45,11 @@ gardener update [--check]
   table or as a plot of plants) and
   a live-updating tail of the most recently written `tend`/`overnight` run
   log (see [Run logs](#run-logs) — a dispatching run writes one itself;
-  auto-refreshes every 4s). "Currently tending" and the three
-  [progress bars](DASHBOARD.md) — the cycle over the whole garden, the
-  running invocation's time budget, and the current batch — are
+  auto-refreshes every 4s). Three
+  [progress bars](DASHBOARD.md) sit under the session stats — the cycle
+  over the whole garden (read from the resume cursor, not from a log), the
+  running invocation's time budget, and the current batch. "Currently
+  tending" and the latter two are
   built from *every* run log still being written to, not just the tailed
   one, so a manual `tend` started alongside the overnight run doesn't hide
   it — and the tail names the log it's showing plus how many others it
