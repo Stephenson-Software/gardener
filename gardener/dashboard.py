@@ -52,6 +52,28 @@ overnight run it was running alongside vanished with no indication (issue
 raw narrations would be unreadable, but the payload names the others so
 the page can say how many it isn't showing.
 
+## Three different progress numbers, kept apart
+
+An `overnight` run has three nested progress questions and they are not
+interchangeable: how far through *this batch* it is (`parse_batch_progress`,
+from the log's own `(N-M/T candidates this run)` line), how much of *this
+invocation's time budget* is left (`parse_overnight_start` for the budget
+and the strategy, `log_started_at` for when the run began), and how far
+through *the cycle over the whole garden* it is (`overnight.read_attempted`
+/`read_cursor` against the garden list). Only the first was ever on the
+page, and its denominator is this invocation's candidate count, which is
+itself a consequence of how many repos a previous night already attempted —
+so `candidates 1–2 of 29` could not say whether the garden was nearly
+through a cycle or had just started one (issue #113).
+
+The cycle number is the one the design is actually built around: `overnight`
+resumes across several nights when the garden is bigger than one budget
+window (see `docs/OVERNIGHT.md`). Which cursor key holds it depends on the
+running strategy — `next_index` for `round-robin`, the `attempted` name list
+for `issue-count`/`random` — so the payload reports both and names the
+strategy alongside, rather than shipping one of them under a
+strategy-neutral name that silently means nothing under the default.
+
 ## The headline panel names its own window
 
 The page's first panel — runs, cost, errors, in flight — is scoped by
@@ -113,6 +135,7 @@ import socket
 import sys
 import time
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -138,6 +161,19 @@ NOTIFY_RE = re.compile(r"^notify: sent to Discord: gardener (\S+): (?:MUTATION �
 # concurrent batch, and the bare `N/T` form for the (default) sequential
 # `--concurrency 1` run, where the batch is a single repo.
 BATCH_RE = re.compile(r"\((\d+)(?:-(\d+))?/(\d+) candidates this run")
+# `cmd_overnight`'s opening line, which is the only place the run's own
+# time budget and the strategy it picked are stated. Both of its branches
+# (round-robin, and the name-keyed issue-count/random one) print the same
+# three fields in the same order before diverging, so this matches up to
+# `budget=` and stops — the resume clause after it differs per strategy.
+OVERNIGHT_START_RE = re.compile(
+    r"overnight starting .*?(\d+) repo\(s\) in garden, "
+    r"strategy=([\w-]+), budget=([\d.]+)h"
+)
+# `run_log.log_file_name`'s `<command>-<YYYYmmdd-HHMMSS>.log`. The stamp is
+# `datetime.now()` at the top of the dispatching run, i.e. naive local
+# time, and is read back the same way below.
+LOG_STAMP_RE = re.compile(r"-(\d{8}-\d{6})\.log$")
 
 
 def default_logs_dir(state_dir: Optional[Path] = None) -> Path:
@@ -244,6 +280,46 @@ def tail_lines(path: Path, n: int = 400) -> list[str]:
     return lines[-n:]
 
 
+def head_lines(path: Path, n: int = 200) -> list[str]:
+    """Return the first `n` lines of `path`.
+
+    The counterpart to `tail_lines`, and needed for exactly one thing: the
+    `overnight starting` header carrying the run's time budget is the
+    *first* line a run writes, and a full garden's narration runs to well
+    over `tail_lines`' 400-line window, so by the time the budget is worth
+    knowing it has long since scrolled out of the tail. Reads line by line
+    and stops at `n`, so a multi-MB log costs the same as a short one."""
+    try:
+        f = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with f:
+        lines = []
+        for line in f:
+            lines.append(line.rstrip("\n"))
+            if len(lines) >= n:
+                break
+    return lines
+
+
+def log_started_at(path: Path) -> Optional[float]:
+    """The epoch seconds encoded in a run log's own filename, or None if it
+    doesn't carry `run_log.log_file_name`'s stamp.
+
+    The start of a run is not written *into* the log — only into its name —
+    and it is what "elapsed" is measured from. Parsed as naive local time
+    because `run_log.tee_stderr` stamps it with `datetime.now()`; both
+    sides are the same machine, since the dashboard only ever reads logs
+    this device wrote."""
+    m = LOG_STAMP_RE.search(path.name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").timestamp()
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 def parse_in_progress(lines: list[str]) -> list[str]:
     """Repos with a `gardener: tending X` line in this log and no matching
     `gardener: finished tending X` line after it.
@@ -319,6 +395,29 @@ def parse_batch_progress(lines: list[str]) -> Optional[tuple[int, int, int]]:
     return (start, end, int(match.group(3)))
 
 
+def parse_overnight_start(lines: list[str]) -> Optional[dict]:
+    """`{garden_size, strategy, budget_hours}` from the `overnight
+    starting` header `cmd_overnight` prints, or None if these lines have no
+    such header (a plain `tend --repo` log, or an `overnight` log truncated
+    before its first line).
+
+    The last match wins, for the same reason `run_log.tee_stderr` opens its
+    log in append mode: two runs started within the same second share one
+    file, and the newer header is the one describing the run still going."""
+    match = None
+    for line in lines:
+        m = OVERNIGHT_START_RE.search(line)
+        if m:
+            match = m
+    if match is None:
+        return None
+    return {
+        "garden_size": int(match.group(1)),
+        "strategy": match.group(2),
+        "budget_hours": float(match.group(3)),
+    }
+
+
 def build_garden_rows(
     garden_repos: list[str],
     allowed_repos: list[str],
@@ -383,8 +482,10 @@ def build_garden_rows(
 #: #123). This is a real, routine skew, not a theoretical one: `overnight`
 #: self-updates before each run, so a tab left open across a restart is
 #: the normal case, and #119's `recent_*` → `session_*` rename is exactly
-#: the shape of change that produced it.
-PAYLOAD_SCHEMA = 2
+#: the shape of change that produced it. Bumped to 3 when
+#: `overnight_next_index` became `overnight_cycle`/`overnight_run` (issue
+#: #113) — the same shape of change again.
+PAYLOAD_SCHEMA = 3
 
 
 def build_status(
@@ -425,6 +526,41 @@ def build_status(
         if batch is not None:
             break
 
+    # The run's own budget and strategy, from the freshest live log that
+    # has an `overnight starting` header — read from the *head* of the file
+    # rather than `lines_by_log`'s tail, because that header is line 1 and a
+    # full garden's narration is longer than the tail window (see
+    # `head_lines`). Same "first log that has one wins" fallback as `batch`.
+    overnight_run = None
+    for path in active_logs:
+        started = parse_overnight_start(head_lines(path))
+        if started is not None:
+            overnight_run = {
+                "strategy": started["strategy"],
+                "budget_hours": started["budget_hours"],
+                # Named apart from `overnight_cycle`'s `garden_size`, which
+                # is the garden as it is *now*: this one is what the run
+                # itself saw when it started, and a repo added mid-run
+                # makes them legitimately disagree.
+                "garden_size_at_start": started["garden_size"],
+                "log": str(path),
+            }
+            began = log_started_at(path)
+            elapsed = max(0.0, time.time() - began) if began is not None else None
+            overnight_run["started_at"] = (
+                datetime.fromtimestamp(began).isoformat() if began is not None else None
+            )
+            # Whole seconds: the page polls every 4 s and renders these to
+            # the nearest minute, so sub-second precision is noise in every
+            # `curl /api/status | jq` read of the payload.
+            overnight_run["elapsed_seconds"] = None if elapsed is None else round(elapsed)
+            overnight_run["remaining_seconds"] = (
+                round(max(0.0, started["budget_hours"] * 3600 - elapsed))
+                if elapsed is not None
+                else None
+            )
+            break
+
     # Scoped to the newest contiguous burst of runs, not to the `run_limit`
     # slice above: the panel these feed is the one read to answer "how did
     # tonight go", and a fixed row count reaches back however far it has to,
@@ -440,6 +576,27 @@ def build_status(
     garden_rows = build_garden_rows(
         garden_repos, allowed_repos, state.repo_stats(db_path=db_path), in_progress
     )
+
+    # Where the *cycle* through the garden stands, which is the unit
+    # `overnight` is actually built around — it resumes across several
+    # nights when the garden is bigger than one budget window. Both cursor
+    # keys are reported rather than one, because the file holds both and
+    # only the running strategy says which is meaningful: `next_index` is
+    # round-robin's, `attempted` is issue-count/random's (see
+    # `overnight.py`'s docstring). The payload used to carry `next_index`
+    # alone under the strategy-neutral name `overnight_next_index`, which
+    # reads as 0 — "cycle just started" — for the whole of a `random` run,
+    # the default (issue #113).
+    cursor_path = base / "overnight_cursor.json"
+    attempted = overnight.read_attempted(path=cursor_path)
+    overnight_cycle = {
+        "garden_size": len(garden_repos),
+        "attempted": len(attempted),
+        "next_index": overnight.read_cursor(path=cursor_path),
+        # Only known while a run is live, since the cursor file doesn't
+        # record which strategy wrote it.
+        "strategy": overnight_run["strategy"] if overnight_run else None,
+    }
 
     return {
         "schema": PAYLOAD_SCHEMA,
@@ -514,7 +671,13 @@ def build_status(
         "garden": garden_repos,
         "merge_allowlist": allowed_repos,
         "garden_rows": garden_rows,
-        "overnight_next_index": overnight.read_cursor(path=base / "overnight_cursor.json"),
+        # `overnight_run` is *this invocation* — budget, elapsed, remaining;
+        # `overnight_cycle` is the garden-wide rotation the invocation is
+        # one slice of. They are genuinely different numbers, and the batch
+        # counter above is a third; conflating any two of them is what made
+        # the old single bar unreadable.
+        "overnight_run": overnight_run,
+        "overnight_cycle": overnight_cycle,
     }
 
 
@@ -1023,6 +1186,12 @@ PAGE_HTML = """<!doctype html>
     <div class="panel">
       <h2>Latest session <span class="sub" id="session-window"></span></h2>
       <div class="stats" id="stats"></div>
+      <!-- Three nested progress numbers, outermost first: the cycle over
+           the whole garden, this invocation's time budget, then the batch
+           within it. They are different denominators and were previously
+           collapsed to the innermost one alone (issue #113). -->
+      <div id="cycle"></div>
+      <div id="budget"></div>
       <div id="batch"></div>
     </div>
     <div class="panel">
@@ -2011,7 +2180,7 @@ function sessionWindow(stats) {
 // then calling markFresh over the top of it (issue #123). Missing keys
 // stringify rather than throw, which is exactly why this has to be an
 // explicit check rather than something render code discovers naturally.
-const PAGE_SCHEMA = 2;
+const PAGE_SCHEMA = 3;
 const REQUIRED_KEYS = ["stats", "runs", "garden_rows", "log_tail", "in_progress"];
 const REQUIRED_STAT_KEYS = ["session_run_count", "session_cost_usd", "session_error_count"];
 function assertPayload(data) {
@@ -2081,6 +2250,66 @@ function renderHistory(days) {
   `).join("") || `<tr class="is-empty" role="row"><td colspan="5" class="empty" role="cell">no history yet</td></tr>`;
 }
 
+// How far through the cycle over the whole garden the rotation is — the
+// unit `overnight` is designed around, since it resumes across several
+// nights when the garden is bigger than one budget window. Which cursor
+// key holds that position depends on the strategy that wrote it, and the
+// file records both without recording which (see overnight.py), so each
+// branch below names the cursor it actually read rather than presenting
+// one of them as "the" cycle position.
+function cycleProgress(oc) {
+  if (!oc || !oc.garden_size) return null;
+  const total = oc.garden_size;
+  if (oc.strategy === "round-robin") {
+    const n = oc.next_index % total;
+    return {label: `cycle ${n} of ${total} · round-robin`, done: n, total};
+  }
+  if (oc.strategy) {
+    return {label: `cycle ${oc.attempted} of ${total} attempted · ${oc.strategy}`,
+            done: oc.attempted, total};
+  }
+  // No run is live, so the strategy is unknown and only the cursor's own
+  // contents can say which rotation is part-way through.
+  if (oc.attempted) {
+    return {label: `cycle ${oc.attempted} of ${total} attempted · from the last issue-count/random run`,
+            done: oc.attempted, total};
+  }
+  if (oc.next_index % total) {
+    const n = oc.next_index % total;
+    return {label: `cycle ${n} of ${total} · from the last round-robin run`, done: n, total};
+  }
+  return null;
+}
+
+function renderCycle(oc) {
+  const cp = cycleProgress(oc);
+  document.getElementById("cycle").innerHTML = cp
+    ? `<div class="sub">${esc(cp.label)}</div>
+       <div class="progress-bar"><div style="width:${Math.min(100, 100 * cp.done / cp.total)}%"></div></div>`
+    : "";
+}
+
+// The invocation's own time budget. `overnight` stops dispatching when it
+// runs out, so "how much is left" is what says whether the rest of the
+// cycle can plausibly land tonight — and it was on no panel at all, even
+// though the run states it on its first line (issue #113).
+function renderBudget(run) {
+  const el = document.getElementById("budget");
+  if (!run) { el.innerHTML = ""; return; }
+  const budgetMs = run.budget_hours * 3600 * 1000;
+  const parts = [`budget ${fmtDur(budgetMs)}`];
+  if (run.elapsed_seconds != null) {
+    parts.push(`${fmtDur(run.elapsed_seconds * 1000)} elapsed`);
+    parts.push(run.remaining_seconds ? `${fmtDur(run.remaining_seconds * 1000)} left` : "budget spent");
+  }
+  if (run.started_at) parts.push(`started ${shortTime(run.started_at)}`);
+  const pct = run.elapsed_seconds != null && budgetMs > 0
+    ? Math.min(100, 100 * run.elapsed_seconds * 1000 / budgetMs)
+    : null;
+  el.innerHTML = `<div class="sub">${esc(parts.join(" · "))}</div>`
+    + (pct == null ? "" : `<div class="progress-bar"><div style="width:${pct}%"></div></div>`);
+}
+
 function renderStatus(data) {
   // The window is stated, never implied: this panel used to be headed
   // "Tonight" over whatever the last 40 rows happened to span (issue #105).
@@ -2101,6 +2330,9 @@ function renderStatus(data) {
     <div class="stat${st.session_error_count ? " is-err" : ""}"><div class="n">${st.session_error_count}</div><div class="l">errors</div></div>
     <div class="stat${liveCount ? " is-live" : ""}"><div class="n">${liveCount}</div><div class="l">in flight</div></div>
   `;
+
+  renderCycle(data.overnight_cycle);
+  renderBudget(data.overnight_run);
 
   const bp = data.batch_progress;
   // A default (--concurrency 1) run reports a batch of one, where start

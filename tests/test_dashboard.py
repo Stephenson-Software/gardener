@@ -5,14 +5,18 @@ This file covers the pure log-parsing and status-assembly functions, which
 never touch a socket."""
 import io
 import json
+import re
 import socket
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from gardener import dashboard, dispatch, garden, merge_allowlist, overnight, state
+from gardener import (
+    dashboard, dispatch, garden, merge_allowlist, overnight, run_log, state,
+)
 
 
 class TestFindActiveLog(unittest.TestCase):
@@ -328,6 +332,98 @@ class TestParseBatchProgress(unittest.TestCase):
         self.assertEqual(dashboard.parse_batch_progress(lines), (3, 3, 5))
 
 
+class TestHeadLines(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(dashboard.head_lines(self.dir / "nope.log"), [])
+
+    def test_returns_the_first_n_lines_without_reading_the_rest(self):
+        log = self.dir / "a.log"
+        log.write_text("\n".join(f"line {i}" for i in range(500)) + "\n")
+        self.assertEqual(dashboard.head_lines(log, 3), ["line 0", "line 1", "line 2"])
+
+    def test_shorter_file_returns_everything_it_has(self):
+        log = self.dir / "a.log"
+        log.write_text("only\n")
+        self.assertEqual(dashboard.head_lines(log, 10), ["only"])
+
+    def test_finds_the_header_a_tail_of_the_same_log_would_have_lost(self):
+        # The reason this helper exists: the `overnight starting` header is
+        # line 1, and a full garden's narration is longer than tail_lines'
+        # 400-line window, so by the time the budget matters the header is
+        # only reachable from the head.
+        log = self.dir / "overnight-20260812-010000.log"
+        header = "gardener: overnight starting — 33 repo(s) in garden, strategy=random, budget=6.0h, 4 repo(s) already attempted this cycle"
+        log.write_text(header + "\n" + "\n".join(f"noise {i}" for i in range(900)) + "\n")
+        self.assertIsNone(dashboard.parse_overnight_start(dashboard.tail_lines(log)))
+        self.assertEqual(
+            dashboard.parse_overnight_start(dashboard.head_lines(log)),
+            {"garden_size": 33, "strategy": "random", "budget_hours": 6.0},
+        )
+
+
+class TestLogStartedAt(unittest.TestCase):
+    def test_reads_the_stamp_run_log_writes_into_the_name(self):
+        # Round-tripped through run_log's own namer rather than a
+        # hand-written filename, so the two can't drift apart.
+        started = datetime(2026, 8, 12, 1, 3, 4)
+        name = run_log.log_file_name("overnight", started)
+        self.assertEqual(dashboard.log_started_at(Path("/logs") / name), started.timestamp())
+
+    def test_a_name_without_a_stamp_is_none_not_a_crash(self):
+        self.assertIsNone(dashboard.log_started_at(Path("/logs/overnight.log")))
+        self.assertIsNone(dashboard.log_started_at(Path("/logs/overnight-nonsense.log")))
+
+    def test_an_impossible_date_is_none_not_a_crash(self):
+        self.assertIsNone(dashboard.log_started_at(Path("/logs/overnight-20261332-010000.log")))
+
+
+class TestParseOvernightStart(unittest.TestCase):
+    def test_no_header_returns_none(self):
+        self.assertIsNone(dashboard.parse_overnight_start(["gardener: tending owner/repo"]))
+
+    def test_reads_the_round_robin_header(self):
+        lines = [
+            "gardener: overnight starting — 33 repo(s) in garden, "
+            "strategy=round-robin, budget=6.0h, resuming at index 4 (owner/e)",
+        ]
+        self.assertEqual(
+            dashboard.parse_overnight_start(lines),
+            {"garden_size": 33, "strategy": "round-robin", "budget_hours": 6.0},
+        )
+
+    def test_reads_the_name_keyed_header(self):
+        lines = [
+            "gardener: overnight starting — 33 repo(s) in garden, "
+            "strategy=random, budget=0.2h, 4 repo(s) already attempted this cycle",
+        ]
+        self.assertEqual(
+            dashboard.parse_overnight_start(lines),
+            {"garden_size": 33, "strategy": "random", "budget_hours": 0.2},
+        )
+
+    def test_uses_the_last_header_when_two_runs_share_one_log(self):
+        # run_log.tee_stderr appends rather than truncating, so two runs
+        # started in the same second write into one file — the newer header
+        # describes the run still going.
+        lines = [
+            "gardener: overnight starting — 3 repo(s) in garden, "
+            "strategy=random, budget=1.0h, 0 repo(s) already attempted this cycle",
+            "gardener: overnight starting — 5 repo(s) in garden, "
+            "strategy=issue-count, budget=2.0h, 1 repo(s) already attempted this cycle",
+        ]
+        self.assertEqual(
+            dashboard.parse_overnight_start(lines),
+            {"garden_size": 5, "strategy": "issue-count", "budget_hours": 2.0},
+        )
+
+
 class TestFindFreePort(unittest.TestCase):
     def test_returns_preferred_port_when_free(self):
         import socket
@@ -368,7 +464,11 @@ class TestBuildStatus(unittest.TestCase):
         self.assertIsNone(result["active_log"])
         self.assertEqual(result["active_logs"], [])
         self.assertIsNone(result["batch_progress"])
-        self.assertEqual(result["overnight_next_index"], 0)
+        self.assertIsNone(result["overnight_run"])
+        self.assertEqual(
+            result["overnight_cycle"],
+            {"garden_size": 0, "attempted": 0, "next_index": 0, "strategy": None},
+        )
 
     def test_reads_garden_and_allowlist_from_the_given_state_dir_not_the_real_default(self):
         # Regression guard: build_status's state_dir override must actually
@@ -384,7 +484,7 @@ class TestBuildStatus(unittest.TestCase):
         result = dashboard.build_status(state_dir=self.state_dir)
         self.assertEqual(result["garden"], ["owner/repo"])
         self.assertEqual(result["merge_allowlist"], ["owner/repo"])
-        self.assertEqual(result["overnight_next_index"], 3)
+        self.assertEqual(result["overnight_cycle"]["next_index"], 3)
 
     def test_includes_recorded_runs_and_session_cost(self):
         run = state.Run(
@@ -487,6 +587,96 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["active_logs"], [str(tend_log), str(overnight_log)])
         self.assertEqual(result["in_progress"], ["owner/manual", "owner/b"])
         self.assertEqual(result["batch_progress"], {"start": 1, "end": 2, "total": 9})
+
+    def test_a_live_overnight_log_supplies_budget_elapsed_and_remaining(self):
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        # Named through run_log's own namer, since the start time is read
+        # back out of the filename and nowhere else.
+        started = datetime.fromtimestamp(time.time() - 3600)
+        log_path = logs_dir / run_log.log_file_name("overnight", started)
+        log_path.write_text(
+            "gardener: overnight starting — 33 repo(s) in garden, "
+            "strategy=random, budget=6.0h, 4 repo(s) already attempted this cycle\n"
+            "gardener: overnight dispatching tend for owner/a "
+            "(5/29 candidates this run)...\n"
+        )
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        run = result["overnight_run"]
+        self.assertEqual(run["strategy"], "random")
+        self.assertEqual(run["budget_hours"], 6.0)
+        self.assertEqual(run["garden_size_at_start"], 33)
+        self.assertEqual(run["log"], str(log_path))
+        self.assertEqual(run["started_at"], started.replace(microsecond=0).isoformat())
+        # An hour in on a six-hour budget, within a generous tolerance for
+        # the wall clock advancing during the test itself.
+        self.assertAlmostEqual(run["elapsed_seconds"], 3600, delta=60)
+        self.assertAlmostEqual(run["remaining_seconds"], 5 * 3600, delta=60)
+
+    def test_elapsed_past_the_budget_clamps_at_zero_remaining(self):
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        started = datetime.fromtimestamp(time.time() - 7200)
+        log_path = logs_dir / run_log.log_file_name("overnight", started)
+        log_path.write_text(
+            "gardener: overnight starting — 3 repo(s) in garden, "
+            "strategy=round-robin, budget=1.0h, resuming at index 0 (owner/a)\n"
+        )
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["overnight_run"]["remaining_seconds"], 0)
+
+    def test_cycle_reports_both_cursor_keys_and_the_live_strategy(self):
+        # The whole point of #113: under the default `random` strategy the
+        # cycle position lives in `attempted`, and reporting `next_index`
+        # alone reads as "cycle just started" for the entire run.
+        import time
+
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.state_dir / "garden.json")
+        cursor = self.state_dir / "overnight_cursor.json"
+        overnight.write_attempted(["owner/a", "owner/b"], path=cursor)
+        overnight.write_cursor(0, path=cursor)
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        log_path = logs_dir / run_log.log_file_name("overnight", datetime.fromtimestamp(time.time()))
+        log_path.write_text(
+            "gardener: overnight starting — 3 repo(s) in garden, "
+            "strategy=random, budget=6.0h, 2 repo(s) already attempted this cycle\n"
+        )
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(
+            result["overnight_cycle"],
+            {"garden_size": 3, "attempted": 2, "next_index": 0, "strategy": "random"},
+        )
+
+    def test_cycle_is_reported_with_no_strategy_when_no_run_is_live(self):
+        for repo in ("owner/a", "owner/b"):
+            garden.add(repo, path=self.state_dir / "garden.json")
+        overnight.write_attempted(["owner/a"], path=self.state_dir / "overnight_cursor.json")
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertIsNone(result["overnight_run"])
+        self.assertEqual(
+            result["overnight_cycle"],
+            {"garden_size": 2, "attempted": 1, "next_index": 0, "strategy": None},
+        )
+
+    def test_a_plain_tend_log_supplies_no_overnight_run(self):
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "tend-20260812-010000.log").write_text(
+            "gardener: tending owner/a (allow_merge=False)\n"
+        )
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertIsNone(result["overnight_run"])
 
     def test_a_repo_in_flight_in_two_logs_is_listed_once(self):
         import os
@@ -609,6 +799,25 @@ class TestPageHtmlInvariants(unittest.TestCase):
     narrow — they check that a specific mechanism is present, not that the
     JavaScript as a whole behaves. Anything about how the plot *looks* is
     still verified by rendering it, per CLAUDE.md."""
+
+    def test_the_pages_schema_constant_matches_the_payloads(self):
+        """`assertPayload` refuses any payload whose `schema` differs from
+        the page's own baked-in copy, so bumping one and not the other
+        doesn't degrade anything — it marks every poll `render failed` and
+        the dashboard never renders again. The two constants live in two
+        files (one Python, one a JS literal inside a Python string) and
+        nothing but this connects them."""
+        m = re.search(r"const PAGE_SCHEMA = (\d+);", dashboard.PAGE_HTML)
+        self.assertIsNotNone(m, "the page no longer declares PAGE_SCHEMA")
+        self.assertEqual(int(m.group(1)), dashboard.PAYLOAD_SCHEMA)
+
+    def test_the_three_progress_numbers_each_have_their_own_target(self):
+        """Cycle, budget and batch are different denominators (issue #113).
+        Each renders into its own element; collapsing two of them back into
+        one target is exactly the regression this guards."""
+        for element_id in ("cycle", "budget", "batch"):
+            self.assertIn(f'<div id="{element_id}"></div>', dashboard.PAGE_HTML)
+            self.assertIn(f'getElementById("{element_id}")', dashboard.PAGE_HTML)
 
     def test_esc_escapes_quotes_because_it_builds_an_attribute_value(self):
         """`esc` output is interpolated into the plot's `title="..."`

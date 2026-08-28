@@ -2330,6 +2330,40 @@ class TestCmdOvernight(unittest.TestCase):
                 )
 
     @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_the_starting_header_is_parseable_by_the_dashboard(self, mock_dispatch_tend, mock_default_notifier):
+        # Same producer/consumer contract as the batch line above, for the
+        # header that carries the run's budget and strategy — the only
+        # place either is stated, and the dashboard's sole source for both.
+        # Both of cmd_overnight's branches are exercised: round-robin and
+        # the name-keyed strategies print the same three fields and then
+        # diverge, so a regex anchored past `budget=` would pass on one and
+        # fail on the other.
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+        outcomes = {r: {} for r in ("owner/a", "owner/b", "owner/c")}
+
+        for strategy in ("round-robin", "random", "issue-count"):
+            with self.subTest(strategy=strategy):
+                self.calls.clear()
+                self.cursor_file.unlink(missing_ok=True)
+                mock_dispatch_tend.side_effect = self._fake_dispatch_tend(outcomes)
+                stderr = io.StringIO()
+                with patch("gardener.cli.fetch_issue_counts", return_value={}):
+                    with redirect_stderr(stderr):
+                        cmd_overnight(self._args(hours=6.0, strategy=strategy))
+
+                header = [
+                    line for line in stderr.getvalue().splitlines()
+                    if "overnight starting" in line
+                ]
+                self.assertEqual(len(header), 1)
+                self.assertEqual(
+                    dashboard.parse_overnight_start(header),
+                    {"garden_size": 3, "strategy": strategy, "budget_hours": 6.0},
+                )
+
+    @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.time.monotonic")
     @patch("gardener.cli._dispatch_tend")
     def test_stops_dispatching_once_budget_is_exhausted(self, mock_dispatch_tend, mock_monotonic, mock_default_notifier):
