@@ -1,8 +1,8 @@
 # The dashboard
 
-Covers the headline session panel, the garden view — the panel the
-dashboard is mostly *for* — and what the page does when it can no longer
-reach the server behind it.
+Covers the headline session panel, the three progress bars an `overnight`
+run drives, the garden view — the panel the dashboard is mostly *for* —
+and what the page does when it can no longer reach the server behind it.
 
 ## The Latest session panel
 
