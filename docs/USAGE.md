@@ -45,7 +45,9 @@ gardener update [--check]
   table or as a plot of plants) and
   a live-updating tail of the most recently written `tend`/`overnight` run
   log (see [Run logs](#run-logs) — a dispatching run writes one itself;
-  auto-refreshes every 4s). "Currently tending" and the batch bar are
+  auto-refreshes every 4s). "Currently tending" and the three
+  [progress bars](DASHBOARD.md) — the cycle over the whole garden, the
+  running invocation's time budget, and the current batch — are
   built from *every* run log still being written to, not just the tailed
   one, so a manual `tend` started alongside the overnight run doesn't hide
   it — and the tail names the log it's showing plus how many others it
@@ -473,10 +475,10 @@ configuration, which is why `repo_lock.py` exists — so the live panels
 read *every* log written to within `dashboard.ACTIVE_LOG_WINDOW_SECONDS`
 (the real `tend` dispatch timeout plus a margin, since a single dispatch
 can sit inside one `claude` subprocess that long without printing a line),
-not just the newest one. "Currently tending" is the union across them and
-the batch bar comes from the freshest log that actually has one, so
-starting a one-repo tend no longer makes the overnight run beside it
-disappear. The "Live log" tail still shows a single file — interleaving
+not just the newest one. "Currently tending" is the union across them, and
+the batch bar and the time-budget bar each come from the freshest log that
+actually has one, so starting a one-repo tend no longer makes the
+overnight run beside it disappear. The "Live log" tail still shows a single file — interleaving
 two raw narrations would be unreadable — but it names that file and says
 how many other live logs it isn't tailing.
 
