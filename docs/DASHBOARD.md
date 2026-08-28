@@ -1,8 +1,8 @@
 # The dashboard
 
-Covers the headline session panel, the garden view — the panel the
-dashboard is mostly *for* — and what the page does when it can no longer
-reach the server behind it.
+Covers the headline session panel, the three progress bars an `overnight`
+run drives, the garden view — the panel the dashboard is mostly *for* —
+and what the page does when it can no longer reach the server behind it.
 
 ## The Latest session panel
 
@@ -56,6 +56,53 @@ between calendar days, because a bare `HH:MM` clock on every row made four
 days of history read as one morning. `?repo=` and `?limit=` on
 `/api/status` narrow it — `state.list_runs()` always accepted both, and
 nothing ever passed them.
+
+## Overnight progress: three different denominators
+
+Three progress bars sit under the session stats while an `overnight` run is
+live, outermost first. They answer different questions and are deliberately
+not merged into one:
+
+| Bar | Question | Where the numbers come from |
+|---|---|---|
+| **Cycle** | How far through the garden is the current rotation? | The resume cursor (`overnight.read_attempted` / `read_cursor`) against the garden list |
+| **Budget** | How much of tonight is left? | The run's own `overnight starting … budget=6.0h` header (`dashboard.parse_overnight_start`) and the start time in the log's filename (`dashboard.log_started_at`) |
+| **Batch** | Which candidates is the run dispatching right now? | The `(N-M/T candidates this run)` line (`dashboard.parse_batch_progress`) |
+
+Only the batch bar used to be on the page, and its denominator is *this
+invocation's* candidate count — itself a consequence of how many repos a
+previous night already attempted. So `candidates 1–2 of 29` could not say
+whether the garden was nearly through a cycle or had just started one, which
+is the question `overnight` is designed around: it resumes a cycle across
+several nights whenever the garden is bigger than one budget window (see
+[Overnight](OVERNIGHT.md)).
+
+The cycle bar has to name which cursor it read, because the cursor file holds
+two keys and only the running strategy says which one is the cycle position:
+`next_index` for `round-robin`, the `attempted` name list for `issue-count`
+and `random` (the default). The payload previously carried `next_index`
+alone, under the strategy-neutral name `overnight_next_index` — so under the
+default strategy an API consumer read `0` all night and would reasonably take
+it for "cycle just started". It is now `overnight_cycle`
+(`garden_size`/`attempted`/`next_index`/`strategy`) alongside
+`overnight_run` (`budget_hours`/`started_at`/`elapsed_seconds`/
+`remaining_seconds`/`strategy`/`garden_size_at_start`/`log`), and
+`PAYLOAD_SCHEMA` was bumped with the rename. The two garden sizes are named
+apart on purpose: `overnight_cycle.garden_size` is the garden as it is now,
+`overnight_run.garden_size_at_start` is what the running invocation saw when
+it began, and a repo added mid-run makes them legitimately disagree.
+
+`strategy` is null whenever no run is live, since nothing in the cursor file
+records which strategy wrote it — the cycle bar then says which cursor key it
+fell back to rather than implying a strategy it cannot know. `overnight_run`
+is null in the same case, and for a plain `tend --repo` log, which has no
+budget header at all.
+
+The budget header is read from the *head* of the log rather than the tail
+every other live panel uses: it is the first line a run writes, and a full
+garden's narration runs well past `tail_lines`' 400-line window, so by the
+time the remaining budget is worth knowing the header has long since scrolled
+out of it.
 
 ## The Failures this session panel
 

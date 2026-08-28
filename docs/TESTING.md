@@ -110,7 +110,11 @@ still gets attempted regardless of completion order, another asserts
 feeds `cmd_overnight`'s real captured stderr through
 `dashboard.parse_batch_progress` so the two log shapes it emits — `N/T`
 sequential and `N-M/T` concurrent — can't drift away from the regex the
-dashboard reads them with), the same drift guard applied to
+dashboard reads them with), the same drift guard applied to its
+`overnight starting` header (real captured stderr through the real
+`dashboard.parse_overnight_start`, across all three strategies, since
+`cmd_overnight` prints that header from two branches and it is the only
+place the run's time budget is stated at all), the same drift guard applied to
 `_dispatch_tend`'s own progress markers (the *real* function's captured
 stderr fed through the *real* `dashboard.parse_in_progress`, down each of
 its four return paths plus a `KeyboardInterrupt`, with the notifier silent
@@ -217,7 +221,14 @@ window outlasts a silent `tend` dispatch), `tail_lines`,
 `parse_in_progress` (including the `finished tending` marker clearing a
 repo with no notify line present at all, and a repo restarted after
 finishing reading as in flight again),
-`parse_batch_progress`, `find_free_port`, `_status_query` (the
+`parse_batch_progress`, `head_lines` (including the case that motivates its
+existence: a real `overnight starting` header found by it and *not* found by
+`tail_lines` over the same 900-line log), `log_started_at` (round-tripped
+through `run_log.log_file_name` rather than a hand-written filename, plus a
+name with no stamp and an impossible date each degrading to `None`),
+`parse_overnight_start` (both header branches `cmd_overnight` prints, and the
+last header winning when two runs share one appended log),
+`find_free_port`, `_status_query` (the
 `/api/status` query string — a bad `limit=` degrades to the default
 rather than raising, since this runs inside the poll path), the
 `/api/status` branch returning a real 500 with a JSON body when
@@ -233,8 +244,12 @@ must not drop), and `build_status` (including its
 `state_dir` override actually reaching `garden.py`/`merge_allowlist.py`/
 `overnight.py`, not just `state.py`'s own db path, that a newer
 manual-`tend` log does not hide the concurrent `overnight` run's in-flight
-repos or batch bar, and that its stat tiles are scoped to the session
-rather than to the `run_limit` row window the Recent runs table keeps). The page's in-page JavaScript has no test runner here
+repos or batch bar, that its stat tiles are scoped to the session
+rather than to the `run_limit` row window the Recent runs table keeps, and
+that `overnight_run`/`overnight_cycle` report the live run's budget, elapsed
+and remaining time — clamped at zero remaining once a run outlives its
+budget — alongside both resume-cursor keys and a `strategy` that is `None`
+whenever no run is live to name one). The page's in-page JavaScript has no test runner here
 — stdlib-only Python means no JS toolchain — so `TestPageHtmlInvariants`
 asserts it at the only level the Python side can see: the emitted source
 text of `PAGE_HTML`. Those are deliberately narrow "this mechanism is still
@@ -256,8 +271,13 @@ by rendering the page, not by any assertion, which is why the shape is
 pinned here afterwards), the sorted column and direction being
 written back into the `<thead>` from the same state the body is sorted
 from, the session panel naming both ends of the window it shows (and
-degrading to no caption at all rather than to a dangling preposition), and
-each of the four poll-failure reasons marking the page stale.
+degrading to no caption at all rather than to a dangling preposition),
+each of the four poll-failure reasons marking the page stale, the page's
+baked-in `PAGE_SCHEMA` literal still equalling `dashboard.PAYLOAD_SCHEMA`
+(bumping one without the other doesn't degrade the page — it makes every
+poll `render failed` forever, and nothing else connects the two constants),
+and the cycle/budget/batch progress numbers each still rendering into their
+own element rather than being collapsed back into one.
 `TestGardenSortOnNarrowViewports` reads the same emitted source for the
 second sort control the phone layout needs, since the header cells that
 carry the sort are hidden there: that the rule showing it and the rule
