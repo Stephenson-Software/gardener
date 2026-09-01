@@ -249,7 +249,11 @@ rather than to the `run_limit` row window the Recent runs table keeps, and
 that `overnight_run`/`overnight_cycle` report the live run's budget, elapsed
 and remaining time — clamped at zero remaining once a run outlives its
 budget — alongside both resume-cursor keys and a `strategy` that is `None`
-whenever no run is live to name one). The page's in-page JavaScript has no test runner here
+whenever no run is live to name one, and that `log_tails` ships one tail
+per live log — keyed by *exactly* the strings in `active_logs`, since the
+page looks a tail up by the same string it puts in the picker's option
+value — capped at the same 200 lines as `log_tail`, which still carries
+the newest log's tail unchanged). The page's in-page JavaScript has no test runner here
 — stdlib-only Python means no JS toolchain — so `TestPageHtmlInvariants`
 asserts it at the only level the Python side can see: the emitted source
 text of `PAGE_HTML`. Those are deliberately narrow "this mechanism is still
@@ -289,7 +293,17 @@ shared toolbar, that every control changes the order through the single
 so a third writer fails the test — that both are re-rendered from one
 read of it, that the select's options are derived from the header cells
 rather than listed a second time, and that its direction toggle names
-its direction in words because the caret is `aria-hidden`. Anything about how the
+its direction in words because the caret is `aria-hidden`.
+`TestLiveLogPicker` reads it the same way for [the Live log
+panel](DASHBOARD.md#the-live-log-panel)'s picker: that the `<select>`
+exists and is `hidden` in the markup so the single-log case is the state
+the page starts in, that it un-hides only at two or more live logs, that
+the `<pre>` is filled from `log_tails[selected]` rather than
+unconditionally from `log_tail`, that a selection is held across polls but
+cleared once that log leaves `active_logs`, that the option list is
+rebuilt only when the set of live logs changes (an unconditional rebuild
+closes an open `<select>` within 4 s), and that the dead-end
+`· N other live log(s) not tailed` caption is gone. Anything about how the
 plot *looks* is still verified by rendering it and looking at it, per
 CLAUDE.md. `find_active_logs` additionally covers the prune race
 (a log deleted between the `glob` and the `stat` is skipped, not fatal) —

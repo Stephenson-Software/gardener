@@ -119,6 +119,42 @@ the panel groups identical summaries into `reason ×N` with the affected
 repos listed beneath. Nothing new is captured — `outcome` and
 `gap_summary` were already columns on `runs`.
 
+## The Live log panel
+
+The one panel showing a raw narration rather than an aggregate, and the
+only one that still shows a single file: interleaving two runs' stderr
+would be unreadable.
+
+More than one run can be live at once — a manual `gardener tend` alongside
+the devsrv-managed `overnight` run is a supported configuration, which is
+why `repo_lock.py` exists — and every other live panel aggregates across
+all of them (`find_active_logs`). This one used to name the others and
+stop there, captioning itself `· N other live log(s) not tailed`. Being
+told a second run exists, being shown its path, and not being able to open
+it is the least useful of the three possible states, so the caption is now
+a picker (issue #117):
+
+| Live logs | What the panel renders |
+|---|---|
+| 0 | `(no active log)`, no caption, no picker |
+| 1 | The tail, captioned with that log's full path. Unchanged from before the picker existed — the `<label>` carrying it is `hidden` in the markup, so this is the state the page starts in |
+| 2+ | The tail of whichever log is selected, captioned with its full path, with a `<select>` over every live log listing them by filename (`<command>-<YYYYmmdd-HHMMSS>.log`, which is what tells them apart) |
+
+The payload carries a tail per live log in `log_tails`, keyed by exactly
+the path strings in `active_logs`, alongside the unchanged `log_tail` —
+still the newest log's, still what the panel shows until the reader picks
+otherwise. This costs no extra I/O: `build_status` already read every live
+log in full on every poll to build the in-flight and batch panels, and
+then discarded all but one before serialising.
+
+A picked log is held across polls and cleared the moment it leaves
+`active_logs`. `find_active_logs` sorts by mtime descending, so with two
+runs both writing, "the newest" swaps between polls — without the hold,
+the view would be yanked away from the log being read every few seconds.
+The selection is not persisted to `localStorage` the way the plot/table
+view choice is: a log path is only meaningful while something is still
+writing to it.
+
 ## The Per-night history panel
 
 `session_stats` answers "how did tonight go" and `repo_stats` "how is this

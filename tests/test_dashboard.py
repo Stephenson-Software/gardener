@@ -693,6 +693,70 @@ class TestBuildStatus(unittest.TestCase):
         result = dashboard.build_status(state_dir=self.state_dir)
         self.assertEqual(result["in_progress"], ["owner/a"])
 
+    def test_every_live_log_ships_its_own_tail_not_just_the_newest(self):
+        # Issue #117: the payload named the other live logs and shipped
+        # only the newest one's narration, so the panel could say a second
+        # run existed and offer no way to read it. `lines_by_log` was
+        # already read in full to build the aggregated panels, so this is
+        # a serialisation fix, not extra I/O.
+        import os
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        overnight_log = logs_dir / "overnight-1.log"
+        overnight_log.write_text("gardener: tending owner/a (allow_merge=True)\n")
+        tend_log = logs_dir / "tend-1.log"
+        tend_log.write_text("gardener: tending owner/manual (allow_merge=False)\n")
+        now = time.time()
+        os.utime(overnight_log, (now - 60, now - 60))
+        os.utime(tend_log, (now, now))
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(
+            sorted(result["log_tails"]), sorted([str(tend_log), str(overnight_log)])
+        )
+        self.assertEqual(
+            result["log_tails"][str(overnight_log)],
+            ["gardener: tending owner/a (allow_merge=True)"],
+        )
+        self.assertEqual(
+            result["log_tails"][str(tend_log)],
+            ["gardener: tending owner/manual (allow_merge=False)"],
+        )
+        # `log_tail` still means "the default tail", i.e. the newest log's,
+        # so the key the page has always read keeps its meaning and the
+        # schema needs no bump.
+        self.assertEqual(result["log_tail"], result["log_tails"][str(tend_log)])
+        self.assertEqual(result["active_log"], str(tend_log))
+
+    def test_log_tails_is_keyed_by_exactly_the_active_logs_paths(self):
+        # The page looks a tail up by the same string it puts in the
+        # picker's option value, so the two lists have to be the same
+        # strings, not merely the same files.
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "overnight-1.log").write_text("gardener: tending owner/a (allow_merge=True)\n")
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(list(result["log_tails"]), result["active_logs"])
+
+    def test_no_logs_ships_an_empty_tail_map_not_a_missing_key(self):
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertEqual(result["log_tails"], {})
+
+    def test_a_tail_is_capped_at_the_same_two_hundred_lines_as_log_tail(self):
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        log_path = logs_dir / "overnight-1.log"
+        log_path.write_text("".join(f"line {i}\n" for i in range(500)))
+
+        result = dashboard.build_status(state_dir=self.state_dir)
+        tail = result["log_tails"][str(log_path)]
+        self.assertEqual(len(tail), 200)
+        self.assertEqual(tail[-1], "line 499")
+        self.assertEqual(tail, result["log_tail"])
+
     def test_corrupt_garden_json_returns_empty_list_not_exception(self):
         # A mid-write or user-corrupted garden.json must not crash the dashboard.
         (self.state_dir / "garden.json").write_text("not valid json{{{")
@@ -1064,6 +1128,60 @@ class TestPageHtmlInvariants(unittest.TestCase):
         first hour."""
         self.assertIn("fmtSince(lastGoodAt)", dashboard.PAGE_HTML)
         self.assertNotIn("fetch failed — retrying…", dashboard.PAGE_HTML)
+
+
+class TestLiveLogPicker(unittest.TestCase):
+    """Issue #117: the panel used to name the other live logs and offer no
+    way to read them. Same limitation as `TestPageHtmlInvariants` — no JS
+    runner here — so these check the mechanism is wired, at the level the
+    emitted source text can show."""
+
+    def test_the_picker_element_exists_and_is_hidden_by_default(self):
+        """A single live run is by far the common case, and the issue asked
+        for it to render exactly as it did before the picker existed. The
+        `hidden` attribute in the markup is what makes that the state the
+        page starts in, before any poll has landed."""
+        self.assertIn('<select id="log-pick"></select>', dashboard.PAGE_HTML)
+        self.assertIn('<label class="log-pick" id="log-pick-wrap" hidden>', dashboard.PAGE_HTML)
+        self.assertIn(".log-pick[hidden] { display: none; }", dashboard.PAGE_HTML)
+
+    def test_the_picker_appears_only_when_a_second_log_is_live(self):
+        self.assertIn("wrap.hidden = logs.length < 2;", dashboard.PAGE_HTML)
+
+    def test_the_tail_is_looked_up_by_the_selected_path(self):
+        """The whole point of the change: the `<pre>` renders the selected
+        log's tail out of `log_tails`, not unconditionally `log_tail`."""
+        self.assertIn("const tails = data.log_tails || {};", dashboard.PAGE_HTML)
+        self.assertIn("const selected = logSelection || data.active_log;", dashboard.PAGE_HTML)
+        self.assertIn("tails[selected]", dashboard.PAGE_HTML)
+
+    def test_a_selection_survives_polls_but_not_the_log_going_quiet(self):
+        """`find_active_logs` sorts by mtime, so with two runs writing, the
+        newest swaps between polls. Holding the selection across polls is
+        what stops the view being yanked away mid-read; clearing it once
+        that log leaves `active_logs` is what stops the panel pinning
+        itself to a file nothing is writing to any more."""
+        self.assertIn("if (logSelection && !logs.includes(logSelection)) logSelection = null;",
+                      dashboard.PAGE_HTML)
+        self.assertIn('document.getElementById("log-pick").addEventListener("change"',
+                      dashboard.PAGE_HTML)
+
+    def test_the_option_list_is_only_rebuilt_when_the_log_set_changes(self):
+        """This renders on every 4 s poll, and replacing the options under
+        an open `<select>` closes it in the reader's face — the same
+        signature guard the runs and garden tables already use."""
+        self.assertIn("if (pick.dataset.sig !== sig) {", dashboard.PAGE_HTML)
+
+    def test_the_caption_still_carries_the_full_path_of_the_tailed_log(self):
+        """The picker labels its options by filename, which is what
+        distinguishes two live logs; the path is still what identifies the
+        file on disk, so it stays in the caption in both cases."""
+        self.assertIn(
+            'document.getElementById("log-path").textContent = selected ? "(" + selected + ")" : "";',
+            dashboard.PAGE_HTML,
+        )
+        # The dead-end caption this replaced.
+        self.assertNotIn("other live log", dashboard.PAGE_HTML)
 
 
 class TestGardenSortOnNarrowViewports(unittest.TestCase):

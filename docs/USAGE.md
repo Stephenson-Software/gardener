@@ -480,9 +480,10 @@ can sit inside one `claude` subprocess that long without printing a line),
 not just the newest one. "Currently tending" is the union across them, and
 the batch bar and the time-budget bar each come from the freshest log that
 actually has one, so starting a one-repo tend no longer makes the
-overnight run beside it disappear. The "Live log" tail still shows a single file — interleaving
-two raw narrations would be unreadable — but it names that file and says
-how many other live logs it isn't tailing.
+overnight run beside it disappear. The "Live log" tail still shows a single file at a time —
+interleaving two raw narrations would be unreadable — but it names that
+file and, once a second log is live, offers a picker over all of them;
+see [the dashboard's Live log panel](DASHBOARD.md#the-live-log-panel).
 
 A repo clears from "Currently tending" when its `gardener: finished
 tending <repo>` line appears, which `_dispatch_tend` prints from a
