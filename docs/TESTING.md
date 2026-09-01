@@ -297,7 +297,9 @@ its direction in words because the caret is `aria-hidden`.
 `TestLiveLogPicker` reads it the same way for [the Live log
 panel](DASHBOARD.md#the-live-log-panel)'s picker: that the `<select>`
 exists and is `hidden` in the markup so the single-log case is the state
-the page starts in, that it un-hides only at two or more live logs, that
+the page starts in, that it sits beside the `<h2>` rather than inside it
+(a control nested in a heading contributes its value to that heading's
+accessible name), that it un-hides only at two or more live logs, that
 the `<pre>` is filled from `log_tails[selected]` rather than
 unconditionally from `log_tail`, that a selection is held across polls but
 cleared once that log leaves `active_logs`, that the option list is

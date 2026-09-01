@@ -845,11 +845,23 @@ PAGE_HTML = """<!doctype html>
     word-break: break-word; max-height: min(480px, 60vh); overflow-y: auto; margin: 0;
     line-height: 1.45;
   }
+  /* Keeps the picker on the heading's line without putting it inside the
+     heading — see the markup for why. `baseline` rather than `center` so
+     the select's text sits on the same line as the caption's, and the
+     h2's own bottom margin carries the whole row. */
+  .log-head {
+    display: flex; align-items: baseline; gap: 0.6rem;
+    flex-wrap: wrap; margin-bottom: 0.75rem;
+  }
+  .log-head h2 { margin-bottom: 0; }
   /* Matches .table-sort select, including the 16px: anything smaller
      makes iOS Safari zoom the whole page when the control takes focus,
      and this page is written phone-first. The explicit [hidden] rule is
-     what keeps the single-log case rendering as it always did, and holds
-     even if .log-pick later gains a display of its own. */
+     what keeps the single-log case rendering as it always did, and is
+     needed here rather than merely defensive: .log-head is a flex
+     container, so `display: flex` on the picker's parent does not stop
+     the UA `hidden` rule being overridden if .log-pick ever gains a
+     display of its own. */
   .log-pick[hidden] { display: none; }
   .log-pick select {
     font: inherit; font-size: 16px; font-family: var(--mono);
@@ -1302,16 +1314,22 @@ PAGE_HTML = """<!doctype html>
     </table>
   </div>
   <div class="panel wide log-panel">
-    <!-- The picker is hidden outright while only one log is live, so the
+    <!-- The picker sits *beside* the heading rather than inside it, laid
+         out on the same line by .log-head. A <select> inside an <h2>
+         contributes its selected option to that heading's accessible
+         name, so heading-by-heading navigation would announce "Live log,
+         which live log to tail, tend-….log, (/full/path/tend-….log)" —
+         the filename twice, inside a name that is supposed to be a label.
+         The picker is hidden outright while only one log is live, so the
          ordinary single-run case renders exactly as it did before it
          existed: a heading and the tailed file's path. -->
-    <h2>Live log
+    <div class="log-head">
+      <h2>Live log <span class="sub" id="log-path"></span></h2>
       <label class="log-pick" id="log-pick-wrap" hidden>
         <span class="sr-only">Which live log to tail</span>
         <select id="log-pick"></select>
       </label>
-      <span class="sub" id="log-path"></span>
-    </h2>
+    </div>
     <!-- role="log" so the append is announced as an updating log rather
          than silently, and tabindex so a scrollable region has a focusable
          owner — without one it is unreachable by keyboard in Safari. -->

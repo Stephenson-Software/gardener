@@ -1145,6 +1145,22 @@ class TestLiveLogPicker(unittest.TestCase):
         self.assertIn('<label class="log-pick" id="log-pick-wrap" hidden>', dashboard.PAGE_HTML)
         self.assertIn(".log-pick[hidden] { display: none; }", dashboard.PAGE_HTML)
 
+    def test_the_picker_sits_beside_the_heading_not_inside_it(self):
+        """A `<select>` inside an `<h2>` contributes its selected option to
+        that heading's accessible name, so heading navigation would
+        announce the log's filename inside what is supposed to be a label —
+        and the caption already carries the full path. `.log-head` puts the
+        two on one line without nesting one in the other."""
+        self.assertIn(
+            '<div class="log-head">\n'
+            '      <h2>Live log <span class="sub" id="log-path"></span></h2>\n'
+            '      <label class="log-pick" id="log-pick-wrap" hidden>',
+            dashboard.PAGE_HTML,
+        )
+        # The h2 carries no bottom margin of its own once the flex row owns
+        # the spacing, or the panel gains a gap the other panels don't have.
+        self.assertIn(".log-head h2 { margin-bottom: 0; }", dashboard.PAGE_HTML)
+
     def test_the_picker_appears_only_when_a_second_log_is_live(self):
         self.assertIn("wrap.hidden = logs.length < 2;", dashboard.PAGE_HTML)
 

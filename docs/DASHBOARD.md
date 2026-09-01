@@ -140,6 +140,12 @@ a picker (issue #117):
 | 1 | The tail, captioned with that log's full path. Unchanged from before the picker existed — the `<label>` carrying it is `hidden` in the markup, so this is the state the page starts in |
 | 2+ | The tail of whichever log is selected, captioned with its full path, with a `<select>` over every live log listing them by filename (`<command>-<YYYYmmdd-HHMMSS>.log`, which is what tells them apart) |
 
+The picker sits *beside* the heading rather than inside it, on the same
+line. A `<select>` inside an `<h2>` contributes its selected option to
+that heading's accessible name, so heading-by-heading navigation would
+announce the filename inside what is supposed to be a label — and the
+caption in the heading already carries the full path.
+
 The payload carries a tail per live log in `log_tails`, keyed by exactly
 the path strings in `active_logs`, alongside the unchanged `log_tail` —
 still the newest log's, still what the panel shows until the reader picks
