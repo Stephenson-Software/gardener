@@ -48,7 +48,16 @@ from gardener.dispatch import (
     tend_mode_spec,
 )
 
-REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The repo half deliberately allows a leading dot: GitHub's org-level meta
+# repos are named `.github` (and `.allstar`, `.devcontainer`), and a garden
+# that spans whole orgs has to be able to name them — `gardener garden add
+# --repo kingdom-community/.github` was rejected outright before this.
+# `.` and `..` alone stay rejected (a repo can't be named either, and they
+# are the two names that would mean something unwanted as the repo half of
+# the `owner__name` cache-clone directory). The owner half stays strict:
+# GitHub owners can't begin with a dot, and keeping the first character
+# alphanumeric is what rejects `--upload-pack=x/y` and `/leading-slash`.
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/(?!\.\.?$)[A-Za-z0-9.][A-Za-z0-9._-]*$")
 
 # Per-command timeouts for the cache-clone refresh in
 # `clone_or_refresh_target_repo`. The fetch/checkout steps are

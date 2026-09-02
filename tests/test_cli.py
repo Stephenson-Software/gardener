@@ -638,6 +638,19 @@ class TestRepoRegex(unittest.TestCase):
         for good in ["dmccoystephenson/gardener", "Org-Name/repo.name_2", "a/b"]:
             self.assertTrue(REPO_RE.match(good), good)
 
+    def test_accepts_a_leading_dot_repo_name(self):
+        """GitHub's org meta repos are literally named `.github`, and a
+        garden that covers a whole org has to be able to name one."""
+        for good in ["kingdom-community/.github", "Org/.allstar"]:
+            self.assertTrue(REPO_RE.match(good), good)
+
+    def test_rejects_dot_and_dotdot_as_the_repo_name(self):
+        for bad in ["owner/.", "owner/.."]:
+            self.assertIsNone(REPO_RE.match(bad), bad)
+
+    def test_rejects_a_leading_dot_owner(self):
+        self.assertIsNone(REPO_RE.match(".github/repo"))
+
     def test_rejects_missing_slash(self):
         self.assertIsNone(REPO_RE.match("just-a-name"))
 
@@ -654,8 +667,11 @@ class TestRepoArg(unittest.TestCase):
     def test_returns_a_valid_value_unchanged(self):
         self.assertEqual(repo_arg("dmccoystephenson/gardener"), "dmccoystephenson/gardener")
 
+    def test_returns_a_leading_dot_repo_name_unchanged(self):
+        self.assertEqual(repo_arg("kingdom-community/.github"), "kingdom-community/.github")
+
     def test_raises_argument_type_error_for_a_malformed_value(self):
-        for bad in ["just-a-name", "owner/", "--upload-pack=x/y", ""]:
+        for bad in ["just-a-name", "owner/", "--upload-pack=x/y", "owner/..", ""]:
             with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
                 repo_arg(bad)
 
