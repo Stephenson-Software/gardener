@@ -48,9 +48,14 @@ panels read *every* log written to within `ACTIVE_LOG_WINDOW_SECONDS`
 (`find_active_logs`), not just the single newest one — otherwise starting
 a one-repo manual tend silently swapped the whole page over to it and the
 overnight run it was running alongside vanished with no indication (issue
-#50). The log *tail* panel still shows one file, since interleaving two
-raw narrations would be unreadable, but the payload names the others so
-the page can say how many it isn't showing.
+#50). The log *tail* panel still shows one file at a time, since
+interleaving two raw narrations would be unreadable, but the payload
+carries a tail per live log (`log_tails`) and the panel's caption becomes
+a picker over them once there is more than one — naming the others
+without being able to open them was the least useful of the three
+possible states (issue #117). A picked log is remembered for as long as
+it stays live, so the newest-mtime default cannot yank the view away
+mid-read when two runs are both writing.
 
 ## Three different progress numbers, kept apart
 
@@ -605,13 +610,19 @@ def build_status(
         # filter actually applied, rather than assuming its own request
         # shape survived.
         "runs_filter": {"repo": repo, "limit": run_limit},
-        # `active_log` is the one whose raw narration `log_tail` shows;
-        # `active_logs` is every log the in-flight/batch panels were built
-        # from, so the page can say how many runs it is *not* tailing
-        # rather than silently showing one of several.
+        # `active_log` is the log the page tails by default — the newest,
+        # and the one `log_tail` carries; `active_logs` is every log the
+        # in-flight/batch panels were built from. `log_tails` carries one
+        # narration per entry of `active_logs`, keyed by the same path
+        # strings, so the reader can switch the tail to any of them
+        # instead of being told a second run exists and left there
+        # (issue #117). Costs no extra I/O: `lines_by_log` was already
+        # read in full on this poll to build the aggregated panels, and
+        # was then discarded down to one file.
         "active_log": str(active_log) if active_log else None,
         "active_logs": [str(p) for p in active_logs],
         "log_tail": log_lines[-200:],
+        "log_tails": {str(p): lines[-200:] for p, lines in lines_by_log.items()},
         "in_progress": in_progress,
         "batch_progress": (
             {"start": batch[0], "end": batch[1], "total": batch[2]} if batch else None
@@ -834,6 +845,31 @@ PAGE_HTML = """<!doctype html>
     word-break: break-word; max-height: min(480px, 60vh); overflow-y: auto; margin: 0;
     line-height: 1.45;
   }
+  /* Keeps the picker on the heading's line without putting it inside the
+     heading — see the markup for why. `baseline` rather than `center` so
+     the select's text sits on the same line as the caption's, and the
+     h2's own bottom margin carries the whole row. */
+  .log-head {
+    display: flex; align-items: baseline; gap: 0.6rem;
+    flex-wrap: wrap; margin-bottom: 0.75rem;
+  }
+  .log-head h2 { margin-bottom: 0; }
+  /* Matches .table-sort select, including the 16px: anything smaller
+     makes iOS Safari zoom the whole page when the control takes focus,
+     and this page is written phone-first. The explicit [hidden] rule is
+     what keeps the single-log case rendering as it always did, and is
+     needed here rather than merely defensive: .log-head is a flex
+     container, so `display: flex` on the picker's parent does not stop
+     the UA `hidden` rule being overridden if .log-pick ever gains a
+     display of its own. */
+  .log-pick[hidden] { display: none; }
+  .log-pick select {
+    font: inherit; font-size: 16px; font-family: var(--mono);
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 0.15rem 0.5rem; max-width: 100%;
+  }
+  .log-pick select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .empty { color: var(--muted); font-style: italic; }
   .progress-bar {
     height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 0.4rem;
@@ -1278,7 +1314,22 @@ PAGE_HTML = """<!doctype html>
     </table>
   </div>
   <div class="panel wide log-panel">
-    <h2>Live log <span class="sub" id="log-path"></span></h2>
+    <!-- The picker sits *beside* the heading rather than inside it, laid
+         out on the same line by .log-head. A <select> inside an <h2>
+         contributes its selected option to that heading's accessible
+         name, so heading-by-heading navigation would announce "Live log,
+         which live log to tail, tend-….log, (/full/path/tend-….log)" —
+         the filename twice, inside a name that is supposed to be a label.
+         The picker is hidden outright while only one log is live, so the
+         ordinary single-run case renders exactly as it did before it
+         existed: a heading and the tailed file's path. -->
+    <div class="log-head">
+      <h2>Live log <span class="sub" id="log-path"></span></h2>
+      <label class="log-pick" id="log-pick-wrap" hidden>
+        <span class="sr-only">Which live log to tail</span>
+        <select id="log-pick"></select>
+      </label>
+    </div>
     <!-- role="log" so the append is announced as an updating log rather
          than silently, and tabindex so a scrollable region has a focusable
          owner — without one it is unreachable by keyboard in Safari. -->
@@ -2399,19 +2450,89 @@ function renderStatus(data) {
     }).join("") || `<tr class="is-empty" role="row"><td colspan="7" class="empty" role="cell">no runs recorded yet</td></tr>`;
   }
 
-  // Name the log being tailed, and say plainly when there are others.
-  // The in-flight and batch panels above already aggregate every live
-  // log; this pre is the one panel that still shows a single file, so an
-  // unlabelled tail is the only place a second run could hide.
-  const others = Math.max(0, (data.active_logs || []).length - 1);
-  document.getElementById("log-path").textContent = data.active_log
-    ? "(" + data.active_log + (others ? ` · ${others} other live log${others > 1 ? "s" : ""} not tailed` : "") + ")"
-    : "";
+  renderLog(data);
+}
+
+// Which log the reader explicitly picked, or null for "whichever is
+// newest". Held across polls so a mid-poll mtime flip between two
+// concurrently-writing runs can't yank the view away from the one being
+// read, and cleared the moment that log stops being live — the same
+// shape as the plot/table view choice, minus the persistence: a picked
+// log is meaningful only while it is still being written to.
+let logSelection = null;
+// Set when the reader switches logs, so the next render starts the new
+// file at its newest line instead of inheriting the previous one's
+// scroll offset, which points at unrelated content.
+let logJumpToBottom = false;
+
+// The tail panel shows one file at a time — interleaving two raw
+// narrations would be unreadable — but every live log's tail is in the
+// payload, so when a second run exists the caption becomes a picker over
+// them rather than a note saying they are there and cannot be read
+// (issue #117). With one live log the picker stays hidden and this
+// renders exactly what it always did.
+function renderLog(data) {
+  const logs = data.active_logs || [];
+  // `log_tails` is additive, so a page loaded from a newer server than
+  // the one now answering still renders the default tail rather than
+  // going blank.
+  const tails = data.log_tails || {};
+  if (logSelection && !logs.includes(logSelection)) logSelection = null;
+  const selected = logSelection || data.active_log;
+  const wrap = document.getElementById("log-pick-wrap");
+  const pick = document.getElementById("log-pick");
+  wrap.hidden = logs.length < 2;
+  if (!wrap.hidden) {
+    // Rebuilt only when the set of live logs actually changes: this runs
+    // on every 4 s poll, and replacing the options under an open <select>
+    // closes it in the reader's face.
+    const sig = logs.join("\\u0000");
+    if (pick.dataset.sig !== sig) {
+      pick.dataset.sig = sig;
+      // Built as elements rather than interpolated HTML, like
+      // `buildGardenSortOptions`: a log path is server-supplied text and
+      // `option.value`/`textContent` cannot be escaped wrongly.
+      pick.replaceChildren();
+      for (const p of logs) {
+        const option = document.createElement("option");
+        option.value = p;
+        option.textContent = logName(p);
+        // The filename is what the option is labelled with; the full
+        // path is on the option itself for anyone who needs it.
+        option.title = p;
+        pick.append(option);
+      }
+    }
+    if (pick.value !== selected) pick.value = selected;
+  }
+  // The full path stays in the caption in both cases — the picker labels
+  // its options by filename, which is what distinguishes them, not by the
+  // state dir they all share.
+  document.getElementById("log-path").textContent = selected ? "(" + selected + ")" : "";
   const logEl = document.getElementById("log");
   const wasAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-  logEl.textContent = data.log_tail.join("\\n") || "(no active log)";
-  if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
+  const tail = (selected && tails[selected]) || (selected === data.active_log ? data.log_tail : []) || [];
+  logEl.textContent = tail.join("\\n") || "(no active log)";
+  if (wasAtBottom || logJumpToBottom) logEl.scrollTop = logEl.scrollHeight;
+  logJumpToBottom = false;
 }
+
+// The filename, which is `run_log.log_file_name`'s
+// `<command>-<YYYYmmdd-HHMMSS>.log` and is what tells two live logs
+// apart. Split on both separators, since the state dir is a POSIX path
+// on the devices this runs on but the page is read from Windows too.
+function logName(path) {
+  const parts = String(path).split(/[\\\\/]/);
+  return parts[parts.length - 1] || String(path);
+}
+
+document.getElementById("log-pick").addEventListener("change", ev => {
+  logSelection = ev.target.value || null;
+  // Re-fetch rather than re-render a snapshot this function doesn't
+  // keep, matching how the runs filter chip switches views.
+  logJumpToBottom = true;
+  refresh(true);
+});
 
 // Every poll costs a sqlite aggregate over the whole run history plus a
 // tail read of every live log, so a tab left in the background for a
