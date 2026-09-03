@@ -276,10 +276,14 @@ class TestOvernightArgParsing(unittest.TestCase):
         self.assertEqual(args.strategy, overnight.DEFAULT_OVERNIGHT_STRATEGY.value)
         self.assertEqual(args.strategy, overnight.Strategy.RANDOM.value)
 
-    def test_concurrency_defaults_to_two(self):
+    def test_concurrency_defaults_to_one(self):
+        # Sequential by default: concurrent `claude` processes on this device
+        # trigger Android's low-memory killer, which reaps the whole UserLand
+        # process group rather than just the overcommitting repo. See
+        # DEFAULT_OVERNIGHT_CONCURRENCY's comment in overnight.py.
         args = self.parser.parse_args(["overnight"])
         self.assertEqual(args.concurrency, overnight.DEFAULT_OVERNIGHT_CONCURRENCY)
-        self.assertEqual(args.concurrency, 2)
+        self.assertEqual(args.concurrency, 1)
 
     def test_strategy_accepts_issue_count_and_random(self):
         for value in ("issue-count", "random"):

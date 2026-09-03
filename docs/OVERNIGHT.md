@@ -28,7 +28,8 @@ to my garden while I sleep" entry point:
 2. Dispatches `gardener tend --repo <repo> --allow-merge` **in-process**
    (calls `_dispatch_tend` directly, no `gardener` subprocess-of-itself) for
    each garden repo, in batches of `--concurrency` repos at a time (default
-   `2`; pass `--concurrency 1` for strictly one after another), starting
+   `1` — strictly one after another; pass a higher `--concurrency` only on a
+   machine with memory to spare, see the note under that flag), starting
    from wherever the *previous* `overnight` run left off
    (see "Resuming across nights" below), until either the garden is
    exhausted for this run or the time budget runs out. Repos within a batch
@@ -248,7 +249,7 @@ CONCURRENCY="${GARDENER_OVERNIGHT_CONCURRENCY:-4}"
 
 Both knobs are env-overridable so a single night can be re-tuned from the
 Task Scheduler action without editing tracked code. The concurrency default
-here is deliberately `4` rather than `cmd_overnight`'s own `2`: the flag's
+here is deliberately `4` rather than `cmd_overnight`'s own `1`: the flag's
 default stays conservative for anyone invoking `gardener overnight` by hand
 on an unknown machine, whereas this script is device-specific — it only
 ever runs on this one WSL2 box, at an operator's explicit request for a

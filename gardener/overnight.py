@@ -135,13 +135,29 @@ class Strategy(str, Enum):
 # empty, how ever long that takes" if `--hours` is omitted.
 DEFAULT_OVERNIGHT_HOURS = 8.0
 
-# Two repos at a time. This device has no true process isolation and real,
-# shared CPU/RAM (see docs/OVERNIGHT.md's "no true always-on daemon
-# guarantee" caveat), so this is a deliberately modest step up from strictly
-# sequential rather than "as wide as the garden is long" — a batch is still
-# bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS either way (see
-# `batch_repos`), so the budget arithmetic is unaffected by this default.
-DEFAULT_OVERNIGHT_CONCURRENCY = 2
+# One repo at a time. This was 2 until a crash investigation showed that
+# concurrency here was killing whole overnight runs rather than speeding
+# them up.
+#
+# The device has no true process isolation and real, shared CPU/RAM (see
+# docs/OVERNIGHT.md's "no true always-on daemon guarantee" caveat). Every
+# concurrent repo dispatches its own `claude` process, and each one will
+# grow into a Node heap sized from TOTAL system RAM — with the interactive
+# session on top, that is three uncapped tenants on a phone with ~2.9 GB
+# actually available. When the collective ask exceeds the device, Android's
+# low-memory killer reaps the entire UserLand proot group: every session,
+# every dev server, and proot itself, all at once. Crashes measurably
+# clustered in this subcommand's own 22:00-01:00 window, at roughly twice
+# normal session concurrency.
+#
+# A batch is bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS either way
+# (see `batch_repos`), so the budget arithmetic is unaffected by this
+# default — sequential tending costs wall-clock, not correctness. A night
+# that reaches fewer repos still beats a night that dies at 23:00 and
+# reaches none of the remaining ones at all.
+#
+# Evidence: https://github.com/dmccoystephenson/userland-crash-investigation
+DEFAULT_OVERNIGHT_CONCURRENCY = 1
 
 # Reshuffle every run rather than always walking the garden in the same
 # alphabetical rotation. Both defaults changed together deliberately: with
