@@ -54,6 +54,13 @@ gardener/
                        detached HEAD, or diverged branch all skip rather than
                        force anything (see Usage's "Self-update" section)
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
+    usage.py         — one `startup` usage event per CLI invocation, tagged
+                       version + service=true, sent to trace; settings via
+                       GARDENER_USAGE_REPORTING_{ENABLED,ENDPOINT,KEY} (env
+                       var, then notify.env — the same precedence notify.py
+                       uses); never raises, never blocks, never prints
+    trace_client.py  — trace-client-python, vendored unmodified (stdlib
+                       only); the daemon-thread sender usage.py drives
     transcript.py    — live transcript-file discovery (encoding rule + bounded
                        poll, run from a background thread `dispatch.run_claude`
                        starts) and the `gardener tail-transcript` pretty-printer
@@ -78,7 +85,7 @@ gardener/
                        notify-severity, mocked dispatch, dev_loop,
                        merge_allowlist, garden, overnight, conventions,
                        repo_lock, notify, transcript, run_log, sessions,
-                       dashboard, selfupdate)
+                       dashboard, selfupdate, usage, trace_client)
 ```
 
 ## Relationship to a conventions repo

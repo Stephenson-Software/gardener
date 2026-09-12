@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 from gardener import (
     dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight, repo_lock,
-    selfupdate, sessions, state,
+    selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
@@ -107,11 +107,20 @@ def setUpModule():
     under `$GARDENER_STATE_DIR`/`~/.local/state/gardener`. Pointing the
     state dir at an empty temp dir closes the second. With neither
     configured, `default_notifier()` returns a `NullNotifier`.
+
+    The same fence covers usage reporting: `main()` sends one `startup`
+    event per invocation via `usage.start()`, and the two tests here that
+    drive `main` directly would otherwise report to the real trace service
+    every time the suite runs. `GARDENER_USAGE_REPORTING_ENABLED=false`
+    turns it into a no-op client (the env var wins over `notify.env`, and
+    the tmp state dir has none anyway); `tests/test_usage.py` is where the
+    real sending path is exercised, against a loopback server.
     """
     global _notifier_fence
     _notifier_fence = tempfile.TemporaryDirectory()
     os.environ.pop(notify.DISCORD_WEBHOOK_ENV_VAR, None)
     os.environ["GARDENER_STATE_DIR"] = _notifier_fence.name
+    os.environ[usage.ENV_ENABLED] = "false"
 
 
 def tearDownModule():
@@ -119,6 +128,7 @@ def tearDownModule():
     if _notifier_fence is not None:
         _notifier_fence.cleanup()
         _notifier_fence = None
+    os.environ.pop(usage.ENV_ENABLED, None)
 
 
 class TestArgParsing(unittest.TestCase):

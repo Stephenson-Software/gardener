@@ -177,7 +177,28 @@ resolved once per notifier rather than on every alert. `TestDiscordNotifier`
 scopes `GARDENER_STATE_DIR` to a tmp dir for every test in the class,
 since constructing a notifier resolves a device name and would otherwise
 read the operator's real `notify.env`; one test guards that redirection by
-asserting a device name that exists only in the tmp dir; `tests/test_garden.py` and
+asserting a device name that exists only in the tmp dir.
+`tests/test_usage.py` covers usage reporting end to end against a
+loopback `http.server` started in the test (the only server any test
+here talks to — never the real trace service): the three
+`GARDENER_USAGE_REPORTING_*` settings' precedence (env var, then the same
+name in `notify.env` under a tmp `GARDENER_STATE_DIR`, then the built-in
+default; a blank value falls through, only an explicit `0/false/no/off`
+opts out, an unreadable file degrades to a stderr warning), that the
+`startup` body is exactly `application`/`name`/two tags with nothing
+about the machine or the run in it, that `stop` right after `start` does
+not lose the event (thirty back-to-back start/stop pairs must all
+arrive — the vendored client's `close` sends what is still queued before
+stopping, which is what makes a millisecond-long run report at all), that a hung
+or unreachable server delays `stop` by at most its timeout, and
+`cli.main`'s wiring — `status` and `ps -q` each report exactly once with
+stdout untouched, `--help` reports nothing, either opt-out sends
+nothing, and the client is stopped even when the command raises.
+`tests/test_trace_client.py` is the vendored client's own suite,
+unchanged apart from its import line, against the same loopback pattern.
+`tests/test_cli.py`'s `setUpModule` fence also sets
+`GARDENER_USAGE_REPORTING_ENABLED=false`, since two tests there drive
+`main()` directly; `tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
 with real files in a tmp dir, including `order_by_issue_count` (pure sort
@@ -372,7 +393,9 @@ tmp-dir) directory tree; `tests/test_cli.py` covers `cmd_update` (with
 `selfupdate.self_update` mocked) and `cmd_overnight`'s self-update wiring
 specifically — called by default, skipped by `--no-self-update`, and
 a raising/mocked self-update never aborting the run. None of the automated
-tests hit the network or a real repo, or invoke a real `claude` process —
+tests hit the network (the usage-reporting and vendored-client suites talk
+only to a loopback server they start themselves) or a real repo, or invoke
+a real `claude` process —
 see [Manual/end-to-end verification](#manualend-to-end-verification) for
 that.
 

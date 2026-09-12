@@ -31,7 +31,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight,
-    repo_lock, run_log, selfupdate, sessions, state, transcript,
+    repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -1932,6 +1932,20 @@ def _session_target(args: argparse.Namespace) -> str:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # One `startup` usage event per invocation, off the main thread, after
+    # the arguments have parsed so a usage error or `--help` does not count
+    # as a run. Stopped on every exit path: the sender is a daemon thread,
+    # and a short run (`status`, `ps`) would otherwise end the process with
+    # the event still in flight. See `usage.py` for what is sent and how it
+    # is switched off; nothing in it can raise or write to stdout.
+    trace = usage.start()
+    try:
+        return _run(args)
+    finally:
+        usage.stop(trace)
+
+
+def _run(args: argparse.Namespace) -> int:
     log_name = getattr(args, "log_name", None)
     if log_name is None:
         return args.func(args)
