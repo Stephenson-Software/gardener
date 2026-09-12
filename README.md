@@ -183,6 +183,38 @@ export GARDENER_DEVICE_NAME="pixel-userland"
 echo 'GARDENER_DEVICE_NAME=pixel-userland' >> ~/.local/state/gardener/notify.env
 ```
 
+### Usage reporting
+
+Every invocation of the `gardener` CLI sends **one `startup` event** to
+[trace](https://github.com/Stephenson-Software/trace) at
+`https://trace.danielstephenson.dev`, so the operator can see which of
+their programs are actually being run. The event is the program name
+(`gardener`), the event name (`startup`), and two tags — gardener's
+version and `service=true` (which the trace operator page uses to hide
+hosted services from its fleet view). **Nothing else is sent**: no repo
+name, no device name, no hostname, no path, no run outcome, nothing from
+the target repos. `--help` and argument errors don't report. It is sent
+off the main thread, never raises, never writes to stdout, and an
+unreachable trace server costs a dropped event and at most a 5-second
+delay at exit — never a failed run.
+
+It is on by default. Turn it off, or point it elsewhere, the same two
+ways as alerting above (env var first, then the same name in `notify.env`):
+
+```bash
+export GARDENER_USAGE_REPORTING_ENABLED=false
+# or, in the same notify.env file as above:
+echo 'GARDENER_USAGE_REPORTING_ENABLED=false' >> ~/.local/state/gardener/notify.env
+
+# Optional — report to your own trace server instead of the default:
+#   GARDENER_USAGE_REPORTING_ENDPOINT=https://trace.example.org
+#   GARDENER_USAGE_REPORTING_KEY=<the program key that server issued>
+```
+
+The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python),
+vendored unmodified as `gardener/trace_client.py` (stdlib only, so
+gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
+
 ## Usage
 
 ```
