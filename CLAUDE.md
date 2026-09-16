@@ -220,7 +220,7 @@ record what you actually observed before changing the docstring's claims.
   short run's event, `--help`/opt-out sending nothing) against a loopback
   server it starts itself — never the real trace service — and
   `test_trace_client.py` is the vendored client's own suite with only its
-  import line changed.
+  import lines changed.
   `test_transcript.py` covers `encode_cwd` against the two real,
   empirically-confirmed examples in `transcript.py`'s module docstring
   (never invented ones — if `claude`'s actual encoding rule ever changes,
@@ -319,4 +319,4 @@ the commit.
 | `bin/run-overnight.sh` | Still matches `docs/OVERNIGHT.md`'s WSL2/Task Scheduler recipe verbatim (PATH export present, no separate log redirection now that `run_log.py` owns logging) — this is the literal file the real "Gardener Overnight" Task Scheduler job invokes nightly, not just documentation |
 | `transcript.py` module docstring | The transcript-path encoding rule (`encode_cwd`) still matches a real `claude -p` session's actual `~/.claude/projects/<encoded-cwd>/` directory naming — re-verify against a real dispatch (not assumption) before trusting the old notes if this ever seems off |
 | `tests/` | Still passes (`PYTHONPATH=. python3 -m unittest discover -s tests -v`) and still never invokes a real `claude`/`gh` process, nor sends a real notification — a test driving `cmd_tend`/`cmd_overnight` runs the alerting path too, and `notify.default_notifier()` resolves a webhook from the ambient env/`notify.env`, so an unpatched notifier posts test fixture data to the operator's real Discord (`test_cli.py`'s `setUpModule` is the backstop; patch `gardener.cli.notify.default_notifier` in the test regardless). The same goes for usage reporting: `main()` sends a `startup` event to the real trace service unless `GARDENER_USAGE_REPORTING_ENABLED=false` or `GARDENER_USAGE_REPORTING_ENDPOINT` points at a loopback stub — `test_cli.py`'s fence sets the former, `test_usage.py` the latter; any new test driving `main()` must do one or the other |
-| `README.md`'s "Usage reporting" section | What it says is sent (program name, `startup`, `version` + `service=true` tags, nothing else) still matches `usage.startup_tags()` and `usage.start()`, and the three `GARDENER_USAGE_REPORTING_*` names and their env-then-`notify.env` precedence match `usage.py` |
+| `README.md`'s "Usage reporting" section | What it says is sent (program name, `startup`, `version` + `service=true` tags, nothing else) still matches `usage.startup_tags()` and `usage.start()`, and the three `GARDENER_USAGE_REPORTING_*` names and their env-then-`notify.env` precedence match `usage.py`, as does the client-wide `TRACE_USAGE_REPORTING=off` / `DO_NOT_TRACK=1` opt-out (environment only, checked first) |

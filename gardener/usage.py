@@ -20,6 +20,14 @@ built-in default when neither is set. No new config mechanism is invented.
     GARDENER_USAGE_REPORTING_ENDPOINT   default https://trace.danielstephenson.dev
     GARDENER_USAGE_REPORTING_KEY        default: the key issued for gardener
 
+Two more variables, honoured by every trace client, turn it off as well:
+``TRACE_USAGE_REPORTING=off`` and ``DO_NOT_TRACK=1``. They are environment
+variables only (not ``notify.env`` keys) and are checked ahead of gardener's
+own setting -- here in :func:`enabled` for whichever mapping is passed, and
+again by the client's constructor against the process environment -- so
+they win even when the setting says on. Details:
+https://github.com/Stephenson-Software/trace#usage-reporting
+
 The key is a program identifier, not a secret that grants anything, which
 is why it ships as a default in code rather than in the state directory —
 an installation whose ``notify.env`` predates this module still reports.
@@ -39,7 +47,7 @@ from pathlib import Path
 from typing import Dict, Mapping, Optional
 
 from gardener import __version__, notify
-from gardener.trace_client import TraceClient
+from gardener.trace_client import TraceClient, environment_opts_out
 
 APPLICATION = "gardener"
 DEFAULT_ENDPOINT = "https://trace.danielstephenson.dev"
@@ -78,7 +86,12 @@ def _setting(name: str, env: Optional[Mapping[str, str]], config_path: Optional[
 
 
 def enabled(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = None) -> bool:
-    """Whether reporting is on. Unset means on; only an explicit no turns it off."""
+    """Whether reporting is on. Unset means on; only an explicit no turns it
+    off -- gardener's own ``GARDENER_USAGE_REPORTING_ENABLED`` (env var or
+    ``notify.env``), or the client-wide ``TRACE_USAGE_REPORTING`` /
+    ``DO_NOT_TRACK`` in the environment, which are consulted first."""
+    if environment_opts_out(os.environ if env is None else env):
+        return False
     return _setting(ENV_ENABLED, env, config_path).lower() not in _FALSE
 
 
@@ -97,8 +110,11 @@ def startup_tags() -> Dict[str, str]:
 
 def build_client(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = None) -> TraceClient:
     """A client configured from the environment/``notify.env``, or a no-op
-    one when it is switched off. Building it cannot fail: any surprise
-    yields the no-op."""
+    one when it is switched off. Always built through the client's
+    constructor, which puts the process environment's
+    ``TRACE_USAGE_REPORTING`` / ``DO_NOT_TRACK`` ahead of everything else
+    and records why it is off in ``disabled_reason``. Building it cannot
+    fail: any surprise yields the no-op."""
     try:
         return TraceClient(
             endpoint(env, config_path), APPLICATION,
@@ -126,7 +142,7 @@ def stop(client: TraceClient, timeout: float = TraceClient.TIMEOUT_SECONDS) -> N
     Closing matters more here than in a long-running service: the sender
     is a daemon thread, so process exit would cut it off mid-request, and
     `gardener status`/`gardener ps` finish in milliseconds. The client's
-    ``close`` (0.1.1+) gives whatever is still queued up to ``timeout``
+    ``close`` (0.1.1+; 0.2.0 is vendored) gives whatever is still queued up to ``timeout``
     seconds in total to be sent, then stops the thread — so exit is delayed
     by at most the client's own timeout: an unreachable trace server is a
     request that times out, not a hang. Never raises, even on something
