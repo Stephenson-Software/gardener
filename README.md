@@ -185,21 +185,29 @@ echo 'GARDENER_DEVICE_NAME=pixel-userland' >> ~/.local/state/gardener/notify.env
 
 ### Usage reporting
 
-Every invocation of the `gardener` CLI sends **one `startup` event** to
+Usage reporting is on by default: every invocation of the `gardener` CLI
+sends **one `startup` event** to
 [trace](https://github.com/Stephenson-Software/trace) at
-`https://trace.danielstephenson.dev`, so the operator can see which of
-their programs are actually being run. The event is the program name
+`https://trace.danielstephenson.dev`, carrying the program name
 (`gardener`), the event name (`startup`), and two tags — gardener's
 version and `service=true` (which the trace operator page uses to hide
 hosted services from its fleet view). **Nothing else is sent**: no repo
-name, no device name, no hostname, no path, no run outcome, nothing from
-the target repos. `--help` and argument errors don't report. It is sent
-off the main thread, never raises, never writes to stdout, and an
-unreachable trace server costs a dropped event and at most a 5-second
-delay at exit — never a failed run.
+name, no device name, no hostname, no IP address, no path, no run outcome,
+nothing from the target repos, nothing typed on the command line. `--help`
+and argument errors don't report. It is sent off the main thread, never
+raises, never writes to stdout, and an unreachable trace server costs a
+dropped event and at most a 5-second delay at exit — never a failed run.
+Being a hosted service, gardener prints no notice of its own.
 
-It is on by default. Turn it off, or point it elsewhere, the same two
-ways as alerting above (env var first, then the same name in `notify.env`):
+Turn it off any of these ways:
+
+- `GARDENER_USAGE_REPORTING_ENABLED=false` (also `0`, `no`, `off`) — gardener's
+  own switch, as an env var or the same name in `notify.env` (env var first,
+  like alerting above)
+- `TRACE_USAGE_REPORTING=off` (also `false`, `0`, `no`) in the environment —
+  turns off every program that reports to trace
+- `DO_NOT_TRACK=1` (also `true`, `yes`) in the environment — the
+  [console DNT convention](https://consoledonottrack.com), honoured the same way
 
 ```bash
 export GARDENER_USAGE_REPORTING_ENABLED=false
@@ -211,9 +219,11 @@ echo 'GARDENER_USAGE_REPORTING_ENABLED=false' >> ~/.local/state/gardener/notify.
 #   GARDENER_USAGE_REPORTING_KEY=<the program key that server issued>
 ```
 
-The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python),
-vendored unmodified as `gardener/trace_client.py` (stdlib only, so
+The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python)
+0.2.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
 gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
+
+Details: https://github.com/Stephenson-Software/trace#usage-reporting
 
 ## Usage
 

@@ -3,12 +3,16 @@ standard library's own, so the tests have no more dependencies than the
 client does."""
 import json
 import logging
+import os
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
-from gardener.trace_client import TraceClient
+from gardener.trace_client import TraceClient, environment_opts_out
+
+_ENV_VARS = ("TRACE_USAGE_REPORTING", "DO_NOT_TRACK")
 
 
 class _Capture:
@@ -30,6 +34,7 @@ def _server(capture):
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
                 "content_type": self.headers.get("Content-Type"),
+                "user_agent": self.headers.get("User-Agent"),
                 "body": body.decode("utf-8"),
             })
             self.send_response(capture.reply_status)
@@ -47,6 +52,12 @@ def _server(capture):
 
 class TraceClientTest(unittest.TestCase):
     def setUp(self):
+        # The machine running the tests may itself have opted out; every
+        # test starts from a clean environment and sets what it needs.
+        scrubbed = {k: v for k, v in os.environ.items() if k not in _ENV_VARS}
+        patcher = mock.patch.dict(os.environ, scrubbed, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.capture = _Capture()
         self.server = _server(self.capture)
         self.base_url = "http://127.0.0.1:%d" % self.server.server_address[1]
@@ -123,6 +134,88 @@ class TraceClientTest(unittest.TestCase):
             client.close()
         self.assertFalse(self.capture.arrived.wait(0.3), "nothing should have been sent")
         self.assertEqual([], self.capture.requests)
+
+    def test_disabled_reason_is_none_when_the_client_reports(self):
+        client = TraceClient(self.base_url, "MyGame", key="k")
+        self.assertTrue(client.enabled)
+        self.assertIsNone(client.disabled_reason)
+        client.close()
+        self.assertFalse(client.enabled, "close() stops reporting")
+        self.assertIsNone(client.disabled_reason, "but the reason describes how it was built")
+
+    def test_disabled_reason_names_the_config_flag_or_the_missing_key(self):
+        self.assertEqual("config", TraceClient(self.base_url, "MyGame", key="k", enabled=False).disabled_reason)
+        self.assertEqual("config", TraceClient.disabled().disabled_reason)
+        self.assertEqual("no key", TraceClient(self.base_url, "MyGame").disabled_reason)
+        self.assertEqual("no key", TraceClient(self.base_url, "MyGame", key="  ").disabled_reason)
+        self.assertEqual("config", TraceClient(self.base_url, "MyGame", enabled=False).disabled_reason,
+                         "the config flag is checked before the key")
+
+    def _assert_environment_disables(self, variable, value):
+        with mock.patch.dict(os.environ, {variable: value}):
+            self.assertTrue(environment_opts_out(), "%s=%r should opt out" % (variable, value))
+            client = TraceClient(self.base_url, "MyGame", key="k")
+            self.assertFalse(client.enabled, "%s=%r should disable the client" % (variable, value))
+            self.assertEqual("environment", client.disabled_reason)
+            client.report("startup")
+            client.close()
+        self.assertFalse(self.capture.arrived.wait(0.2), "%s=%r: nothing should have been sent" % (variable, value))
+        self.assertEqual([], self.capture.requests)
+
+    def test_TRACE_USAGE_REPORTING_off_disables_reporting_for_every_accepted_value(self):
+        for value in ("off", "false", "0", "no", "OFF", "False", "No", " off "):
+            self._assert_environment_disables("TRACE_USAGE_REPORTING", value)
+
+    def test_DO_NOT_TRACK_disables_reporting_for_every_accepted_value(self):
+        for value in ("1", "true", "yes", "TRUE", "Yes", " 1 "):
+            self._assert_environment_disables("DO_NOT_TRACK", value)
+
+    def test_other_environment_values_leave_the_program_setting_in_charge(self):
+        for variable, value in (("TRACE_USAGE_REPORTING", "on"), ("TRACE_USAGE_REPORTING", ""),
+                                ("TRACE_USAGE_REPORTING", "disabled"), ("TRACE_USAGE_REPORTING", "1"),
+                                ("DO_NOT_TRACK", "0"), ("DO_NOT_TRACK", ""), ("DO_NOT_TRACK", "false"),
+                                ("DO_NOT_TRACK", "off")):
+            with mock.patch.dict(os.environ, {variable: value}):
+                self.assertFalse(environment_opts_out(), "%s=%r is not an opt-out" % (variable, value))
+                client = TraceClient(self.base_url, "MyGame", key="k")
+                self.assertTrue(client.enabled, "%s=%r must not disable the client" % (variable, value))
+                self.assertIsNone(client.disabled_reason)
+                client.close()
+        self.assertFalse(environment_opts_out(), "an unset variable is not an opt-out")
+
+    def test_environment_wins_over_the_config_flag_and_over_the_key(self):
+        # enabled=True with a key, and the environment still says no.
+        with mock.patch.dict(os.environ, {"TRACE_USAGE_REPORTING": "off"}):
+            client = TraceClient(self.base_url, "MyGame", key="k", enabled=True)
+            self.assertEqual("environment", client.disabled_reason)
+            client.close()
+        # enabled=False AND the environment: the environment is the reason.
+        with mock.patch.dict(os.environ, {"DO_NOT_TRACK": "1"}):
+            self.assertEqual("environment",
+                             TraceClient(self.base_url, "MyGame", key="k", enabled=False).disabled_reason)
+            self.assertEqual("environment", TraceClient(self.base_url, "MyGame").disabled_reason,
+                             "the environment is checked before the key too")
+        # Once the variable is gone, the program's own setting is back in charge.
+        client = TraceClient(self.base_url, "MyGame", key="k")
+        self.assertTrue(client.enabled)
+        client.report("startup")
+        self.assertTrue(self.capture.arrived.wait(5))
+        client.close()
+
+    def test_environment_opts_out_accepts_an_explicit_mapping(self):
+        self.assertTrue(environment_opts_out({"TRACE_USAGE_REPORTING": "off"}))
+        self.assertTrue(environment_opts_out({"DO_NOT_TRACK": "yes"}))
+        self.assertFalse(environment_opts_out({}))
+        self.assertFalse(environment_opts_out({"DO_NOT_TRACK": "0", "TRACE_USAGE_REPORTING": "on"}))
+
+    def test_user_agent_names_the_client_version(self):
+        from gardener.trace_client import __version__
+        self.assertEqual("0.2.0", __version__)
+        client = TraceClient(self.base_url, "MyGame", key="k")
+        client.report("startup")
+        self.assertTrue(self.capture.arrived.wait(5))
+        client.close()
+        self.assertEqual("trace-client-python/0.2.0 (MyGame)", self.capture.requests[0]["user_agent"])
 
     def test_report_ignores_a_blank_name(self):
         client = TraceClient(self.base_url, "MyGame", key="k")

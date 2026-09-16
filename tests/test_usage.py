@@ -68,7 +68,10 @@ class _NoConfigFile:
         patcher = patch.dict(os.environ, {"GARDENER_STATE_DIR": self._tmp.name})
         patcher.start()
         self.addCleanup(patcher.stop)
-        for name in (usage.ENV_ENABLED, usage.ENV_ENDPOINT, usage.ENV_KEY):
+        # The machine running the tests may itself have opted out through
+        # the client-wide variables; every test starts from a clean slate.
+        for name in (usage.ENV_ENABLED, usage.ENV_ENDPOINT, usage.ENV_KEY,
+                     "TRACE_USAGE_REPORTING", "DO_NOT_TRACK"):
             os.environ.pop(name, None)
 
 
@@ -84,6 +87,25 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
             self.assertFalse(usage.enabled({usage.ENV_ENABLED: value}), value)
         for value in ("", "1", "true", "yes", "anything"):
             self.assertTrue(usage.enabled({usage.ENV_ENABLED: value}), repr(value))
+
+    def test_the_client_wide_variables_turn_it_off_even_when_gardener_says_on(self):
+        for variable, value in (("TRACE_USAGE_REPORTING", "off"), ("TRACE_USAGE_REPORTING", "FALSE"),
+                                ("TRACE_USAGE_REPORTING", "0"), ("TRACE_USAGE_REPORTING", "no"),
+                                ("DO_NOT_TRACK", "1"), ("DO_NOT_TRACK", "true"), ("DO_NOT_TRACK", "yes")):
+            env = {usage.ENV_ENABLED: "true", variable: value}
+            self.assertFalse(usage.enabled(env), f"{variable}={value}")
+        # Only the listed values count; anything else leaves gardener's setting in charge.
+        for variable, value in (("TRACE_USAGE_REPORTING", ""), ("TRACE_USAGE_REPORTING", "on"),
+                                ("DO_NOT_TRACK", "0"), ("DO_NOT_TRACK", "")):
+            self.assertTrue(usage.enabled({variable: value}), f"{variable}={value!r}")
+
+    def test_the_client_wide_variables_are_environment_only_not_notify_env(self):
+        # notify.env carries gardener's own setting; the client-wide switch
+        # is the process environment, the same as for every other client.
+        self.config_path.write_text("DO_NOT_TRACK=1\nTRACE_USAGE_REPORTING=off\n")
+        self.assertTrue(usage.enabled({}, self.config_path))
+        self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
+        self.assertFalse(usage.enabled({}, self.config_path))
 
     def test_endpoint_and_key_come_from_the_environment_when_set(self):
         env = {usage.ENV_ENDPOINT: " http://127.0.0.1:1/ ", usage.ENV_KEY: " k "}
@@ -130,8 +152,18 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
     def test_disabled_builds_a_client_that_sends_nothing(self):
         client = usage.build_client({usage.ENV_ENABLED: "false"})
         self.assertFalse(client.enabled)
+        self.assertEqual("config", client.disabled_reason)
         client = usage.build_client({usage.ENV_KEY: "   ", usage.ENV_ENABLED: "0"})
         self.assertFalse(client.enabled)
+
+    def test_do_not_track_in_the_process_environment_wins_over_gardener_saying_on(self):
+        # The client itself checks the process environment in its constructor,
+        # so the variable wins even past a mapping that says on.
+        with patch.dict(os.environ, {"DO_NOT_TRACK": "1"}):
+            client = usage.build_client({usage.ENV_ENABLED: "true", usage.ENV_KEY: "k"})
+        self.assertFalse(client.enabled)
+        self.assertEqual("environment", client.disabled_reason)
+        client.close()
 
     def test_a_broken_setting_yields_the_no_op_client_rather_than_raising(self):
         with patch("gardener.usage.endpoint", side_effect=RuntimeError("boom")):
@@ -268,6 +300,20 @@ class TestMainWiring(_NoConfigFile, unittest.TestCase):
     def test_opted_out_via_notify_env_sends_nothing(self):
         self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
         code, _, _ = self._main(["status"])
+        self.assertEqual(0, code)
+        self.assertFalse(self.arrived.wait(0.5))
+        self.assertEqual([], self.requests)
+
+    def test_do_not_track_sends_nothing_even_when_gardener_says_on(self):
+        with patch.dict(os.environ, {usage.ENV_ENABLED: "true", "DO_NOT_TRACK": "1"}):
+            code, _, _ = self._main(["status"])
+        self.assertEqual(0, code)
+        self.assertFalse(self.arrived.wait(0.5))
+        self.assertEqual([], self.requests)
+
+    def test_trace_usage_reporting_off_sends_nothing(self):
+        with patch.dict(os.environ, {"TRACE_USAGE_REPORTING": "off"}):
+            code, _, _ = self._main(["status"])
         self.assertEqual(0, code)
         self.assertFalse(self.arrived.wait(0.5))
         self.assertEqual([], self.requests)
