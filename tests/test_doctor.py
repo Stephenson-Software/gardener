@@ -197,6 +197,21 @@ class TestCacheClone(unittest.TestCase):
             findings = doctor.check_cache_clone(path, run_fn=run, locked_fn=_never_locked)
             self.assertEqual([f.severity for f in findings], [Severity.WARN])
 
+    def test_nested_git_repo_has_specific_double_force_remediation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _clone_dir(Path(tmp), "Owner__repo")
+            nested = path / "plugins" / "example"
+            (nested / ".git").mkdir(parents=True)
+            run = FakeRun({
+                ("git", "remote"): _completed(stdout="https://github.com/Owner/repo.git"),
+                ("git", "status"): _completed(stdout="?? plugins/\n"),
+            })
+            findings = doctor.check_cache_clone(path, run_fn=run, locked_fn=_never_locked)
+            nested_findings = [f for f in findings if "nested Git repo" in f.message]
+            self.assertEqual(len(nested_findings), 1)
+            self.assertIn("git clean -ffdx", nested_findings[0].message)
+            self.assertIn("clean -nffd", nested_findings[0].fix)
+
     def test_origin_mismatch_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _clone_dir(Path(tmp), "Owner__repo")

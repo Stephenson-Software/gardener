@@ -2939,7 +2939,7 @@ class TestCloneOrRefreshClean(unittest.TestCase):
         # stop cleaning. A stale build output must still be removed.
         self._refresh(mock_run)
         argv = self._clean_call(mock_run).args[0]
-        self.assertEqual(argv[:3], ["git", "clean", "-fdx"])
+        self.assertEqual(argv[:3], ["git", "clean", "-ffdx"])
         for build_output in ("build", "target", "dist"):
             self.assertNotIn(build_output, argv)
 
