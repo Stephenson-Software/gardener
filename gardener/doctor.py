@@ -253,11 +253,9 @@ def check_cache_clone(
     no longer matches the configured repo name, and a working tree with
     local modifications that `git checkout -B` would have to overwrite.
 
-    Untracked files are reported separately and only as a WARN: the refresh
-    runs `git clean -fdx` and is *expected* to remove them, so they only
-    matter when they'd collide with a file on the incoming branch — which
-    is a real observed failure, but a much rarer one than a modified
-    tracked file.
+    Untracked files are reported as WARN findings. Ordinary paths are
+    normally removed on refresh; nested Git repositories require the
+    double-force clean flag and receive a specific preview command.
 
     A repo another gardener process currently holds the lock on is reported
     as SKIPPED and nothing else: a tend in flight has *legitimately* dirtied
@@ -335,10 +333,27 @@ def check_cache_clone(
             Finding(
                 "cache-clone",
                 Severity.WARN,
-                f"{len(untracked)} untracked path(s) — normally harmless (the refresh runs "
-                f"`git clean -fdx`), but a collision with an incoming file fails the checkout",
+                f"{len(untracked)} untracked path(s) — review for collisions with files on the incoming branch",
                 repo=repo,
                 fix=f"git -C {repo_dir} clean -nd  # review, then drop -n to remove",
+            )
+        )
+    nested_repos = []
+    for line in untracked:
+        relative = line[3:].strip().rstrip("/\\")
+        untracked_path = repo_dir / relative
+        if relative and untracked_path.is_dir():
+            for git_marker in untracked_path.rglob(".git"):
+                nested_repos.append(str(git_marker.parent.relative_to(repo_dir)))
+    if nested_repos:
+        findings.append(
+            Finding(
+                "cache-clone",
+                Severity.WARN,
+                f"{len(nested_repos)} untracked nested Git repo(s) require double-force cleanup; "
+                f"refresh removes them with `git clean -ffdx`: {', '.join(nested_repos)}",
+                repo=repo,
+                fix=f"git -C {repo_dir} clean -nffd  # preview nested-repo removal; drop -n to remove",
             )
         )
     if not findings:

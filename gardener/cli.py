@@ -208,7 +208,8 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
                 f"cache dir {dest} exists but its origin doesn't match {repo} — refusing to reuse it"
             )
         default_branch = _default_branch_name(repo)
-        clean_cmd = ["git", "clean", "-fdx"]
+        # Two force flags are required to remove untracked nested Git repos.
+        clean_cmd = ["git", "clean", "-ffdx"]
         for keep in PRESERVED_DEPENDENCY_DIRS:
             clean_cmd += ["-e", keep]
         for cmd, cmd_timeout in (
