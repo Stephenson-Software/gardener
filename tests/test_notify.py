@@ -13,11 +13,14 @@ from unittest.mock import MagicMock, patch
 
 from gardener.notify import (
     DISCORD_COLORS,
+    DISCORD_DESCRIPTION_LIMIT,
+    DISCORD_TITLE_LIMIT,
     UNKNOWN_DEVICE_NAME,
     CompositeNotifier,
     DiscordNotifier,
     Level,
     NullNotifier,
+    clamp,
     default_notifier,
     load_device_name,
     load_webhook_url,
@@ -165,6 +168,29 @@ class TestDiscordNotifier(unittest.TestCase):
         request = mock_urlopen.call_args[0][0]
         self.assertEqual(request.full_url, "https://discord.com/api/webhooks/x/y")
         self.assertEqual(request.get_header("Content-type"), "application/json")
+
+    @patch("gardener.notify.urllib.request.urlopen")
+    def test_oversize_title_and_description_are_clamped_not_rejected(self, mock_urlopen):
+        """Discord 400s any embed over its limits, and a 400 is just a stderr
+        line here — so an oversize message was a silently dropped alert
+        (#159). The notifier clamps at presentation time so no call site
+        can reproduce that."""
+        mock_resp = MagicMock()
+        mock_resp.status = 204
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        n = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/x/y")
+        n.notify("t" * 1000, "m" * 10_000, Level.ERROR)
+
+        embed = json.loads(mock_urlopen.call_args[0][0].data)["embeds"][0]
+        self.assertEqual(len(embed["title"]), DISCORD_TITLE_LIMIT)
+        self.assertEqual(len(embed["description"]), DISCORD_DESCRIPTION_LIMIT)
+        self.assertTrue(embed["title"].endswith("…"))
+        self.assertTrue(embed["description"].endswith("…"))
+
+    def test_clamp_leaves_short_text_alone(self):
+        self.assertEqual(clamp("hello", 5), "hello")
+        self.assertEqual(clamp("hello!", 5), "hell…")
 
     @patch("gardener.notify.urllib.request.urlopen")
     def test_network_error_does_not_raise(self, mock_urlopen):

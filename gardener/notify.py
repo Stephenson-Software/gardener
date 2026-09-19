@@ -90,6 +90,18 @@ DISCORD_COLORS: dict[Level, int] = {
     Level.ERROR: 15158332,
 }
 
+# Discord's documented embed limits. Exceeding either gets the whole webhook
+# POST rejected with HTTP 400 — and since a notifier must never raise, that
+# rejection is just a stderr line nobody reads. The overnight summary hit
+# exactly this on three consecutive all-error nights (#159): the bigger the
+# failure, the longer the message, the more certain it was to be dropped.
+# Clamping here, at presentation time, mirrors how the device footer is
+# applied: every current *and future* call site is covered without having
+# to know Discord's numbers.
+DISCORD_TITLE_LIMIT = 256
+DISCORD_DESCRIPTION_LIMIT = 4096
+_TRUNCATION_MARK = "…"
+
 DISCORD_WEBHOOK_ENV_VAR = "GARDENER_DISCORD_WEBHOOK_URL"
 DEVICE_NAME_ENV_VAR = "GARDENER_DEVICE_NAME"
 
@@ -229,8 +241,8 @@ class DiscordNotifier(Notifier):
                 "username": "gardener",
                 "embeds": [
                     {
-                        "title": title,
-                        "description": message,
+                        "title": clamp(title, DISCORD_TITLE_LIMIT),
+                        "description": clamp(message, DISCORD_DESCRIPTION_LIMIT),
                         "color": DISCORD_COLORS.get(level, DISCORD_COLORS[Level.INFO]),
                         # Provenance goes in the footer, not the title:
                         # titles are already long and are what the operator
@@ -267,6 +279,14 @@ class DiscordNotifier(Notifier):
             # Covers HTTPError (subclass of URLError), connection failures,
             # timeouts, and a malformed webhook URL — never propagate.
             print(f"notify: FAILED to send to Discord: {title}: {e}", file=sys.stderr)
+
+
+def clamp(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters, ending in a truncation mark
+    when anything was removed, so the reader knows there was more."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_TRUNCATION_MARK)] + _TRUNCATION_MARK
 
 
 def default_notifier() -> Notifier:
