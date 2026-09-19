@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gardener import overnight, state
+from gardener import notify, overnight, state
 from gardener.notify import Level
 
 
@@ -428,6 +428,60 @@ class TestBuildBatchSummary(unittest.TestCase):
         summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
         self.assertIn("2 repo(s) tended", summary.title)
         self.assertIn("1 error(s)", summary.title)
+
+
+class TestBuildBatchSummaryFitsDiscord(unittest.TestCase):
+    """Three consecutive all-error nights (2026-09-16..18, 158 repos) produced
+    a ~6.7KB per-repo list that Discord rejected with HTTP 400 — so the one
+    alert that mattered most never sent (#159). The summary must always fit
+    under the embed description limit, and when it can't list every repo it
+    must keep the actionable lines and drop the quiet ones."""
+
+    def test_all_error_garden_larger_than_discords_limit_still_fits(self):
+        outcomes = [
+            overnight.RepoOutcome(repo=f"some-organization/repository-number-{i:03d}", errored=True)
+            for i in range(200)
+        ]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertLess(len(summary.message), notify.DISCORD_DESCRIPTION_LIMIT)
+        self.assertEqual(summary.level, Level.ERROR)
+        # The headline counts are what carry the totals once lines are cut.
+        self.assertIn("200 repo(s) attempted", summary.message)
+        self.assertIn("200 errored", summary.message)
+        self.assertRegex(summary.message, r"- … and \d+ more \(full list in the run log\)$")
+        self.assertIn("- some-organization/repository-number-000: ERROR", summary.message)
+
+    def test_ok_lines_are_dropped_before_errors_and_decisions(self):
+        outcomes = []
+        for i in range(120):
+            outcomes.append(overnight.RepoOutcome(repo=f"some-organization/quiet-repository-{i:03d}"))
+        outcomes.append(overnight.RepoOutcome(repo="a/needs-you", decision_needed=True))
+        outcomes.append(overnight.RepoOutcome(repo="a/broken", errored=True))
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertLess(len(summary.message), notify.DISCORD_DESCRIPTION_LIMIT)
+        lines = summary.message.splitlines()
+        # Actionable repos lead regardless of dispatch order ...
+        self.assertEqual(lines[1], "- a/broken: ERROR")
+        self.assertEqual(lines[2], "- a/needs-you: decision needed")
+        # ... and only quiet ones were cut.
+        self.assertTrue(lines[-1].startswith("- … and "))
+        self.assertNotIn("quiet-repository-119", summary.message)
+
+    def test_small_garden_is_not_truncated_but_still_leads_with_errors(self):
+        outcomes = [
+            overnight.RepoOutcome(repo="a/one"),
+            overnight.RepoOutcome(repo="a/two", errored=True),
+        ]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertNotIn("more (full list", summary.message)
+        self.assertEqual(summary.message.splitlines()[1:], ["- a/two: ERROR", "- a/one: ok, no PR"])
+
+    def test_fit_lines_trailer_is_counted_against_the_budget(self):
+        lines = [f"- org/repo-{i}: ERROR" for i in range(500)]
+        for budget in (60, 200, 1000, 3500):
+            kept = overnight._fit_lines(lines, budget)
+            self.assertLessEqual(len("\n".join(kept)), budget, budget)
+            self.assertTrue(kept[-1].startswith("- … and "), budget)
 
 
 if __name__ == "__main__":

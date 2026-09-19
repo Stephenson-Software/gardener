@@ -473,6 +473,44 @@ class BatchSummary:
     level: notify.Level
 
 
+# Discord rejects an embed whose description exceeds 4096 characters with
+# HTTP 400 (see notify.DISCORD_DESCRIPTION_LIMIT). The per-repo list below
+# is one line per attempted repo, ~40 chars each, so a full 158-repo garden
+# blows through that at ~6.7KB — confirmed on 2026-09-16/17/18, when every
+# repo errored and the one alert that mattered most was the one that never
+# sent (#159). This budget is deliberately well under the hard limit so the
+# headline line, the "not reached" clause and the notifier's own footer all
+# fit with room to spare, and it is applied *here*, in the message builder,
+# so the truncation can be meaningful (keep the actionable lines, drop the
+# boring ones) rather than a blind cut mid-line at the notifier.
+SUMMARY_LINES_BUDGET = 3500
+
+# The order per-repo lines are kept in when they don't all fit: the operator
+# reads the summary to find out what needs *doing*, so errors and decisions
+# come first and the "ok, no PR" lines are the ones that fall off the end.
+_STATUS_KEEP_PRIORITY = {"ERROR": 0, "decision needed": 1, "PR opened": 2, "merged": 3, "ok, no PR": 4}
+
+
+def _fit_lines(lines: list[str], budget: int) -> list[str]:
+    """Keep as many of `lines` (already in priority order) as fit in
+    `budget` characters when joined by newlines, then append a trailer
+    naming how many were dropped. The trailer is counted against the
+    budget too, so the result is always under it."""
+    if sum(len(line) + 1 for line in lines) <= budget:
+        return lines
+    trailer_reserve = len("- … and 9999 more (full list in the run log)\n")
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > budget - trailer_reserve:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    dropped = len(lines) - len(kept)
+    kept.append(f"- … and {dropped} more (full list in the run log)")
+    return kept
+
+
 def build_batch_summary(outcomes: list[RepoOutcome], elapsed_seconds: float, skipped: int) -> BatchSummary:
     """One digest across the whole batch, in addition to (not instead of)
     each repo's own per-repo notification (fired by `cmd_tend` itself via
@@ -490,7 +528,7 @@ def build_batch_summary(outcomes: list[RepoOutcome], elapsed_seconds: float, ski
         message = "no repos were dispatched this run (see gardener's stderr log for why)"
         level = notify.Level.INFO
     else:
-        lines = []
+        statused: list[tuple[str, str]] = []
         for o in outcomes:
             if o.errored:
                 status = "ERROR"
@@ -502,7 +540,12 @@ def build_batch_summary(outcomes: list[RepoOutcome], elapsed_seconds: float, ski
                 status = "decision needed"
             else:
                 status = "ok, no PR"
-            lines.append(f"- {o.repo}: {status}")
+            statused.append((o.repo, status))
+        # Always sorted, not only when truncating, so the summary reads the
+        # same way every night: what needs attention at the top, the quiet
+        # repos below. Stable, so within a status repos keep dispatch order.
+        statused.sort(key=lambda rs: _STATUS_KEEP_PRIORITY[rs[1]])
+        lines = _fit_lines([f"- {repo}: {status}" for repo, status in statused], SUMMARY_LINES_BUDGET)
         message = (
             f"{attempted} repo(s) attempted in {minutes:.1f}m — "
             f"{pr_opened} PR(s) opened, {pr_merged} merged, "
