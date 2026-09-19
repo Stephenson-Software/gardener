@@ -131,6 +131,39 @@ def tearDownModule():
     os.environ.pop(usage.ENV_ENABLED, None)
 
 
+class TestRunSubprocessHelper(unittest.TestCase):
+    """`cli._run` is the subprocess helper the clone/refresh path calls with
+    `cwd=`/`timeout=`. PR #156 added a second, unrelated `def _run(args)`
+    (the argparse dispatcher) later in the same module; Python kept the last
+    definition, so every `_run(["git", ...], cwd=..., timeout=...)` raised
+    `TypeError: _run() got an unexpected keyword argument 'cwd'` and three
+    consecutive nightly runs errored on all 158 repos in under a minute.
+    Nothing in the suite called the helper through the module, so CI stayed
+    green. This pins the helper's identity by calling it the way the clone
+    path does."""
+
+    def test_run_is_the_subprocess_helper_and_accepts_cwd_and_timeout(self):
+        from gardener import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res = cli._run(["pwd"], cwd=Path(tmp), timeout=15)
+        self.assertIsInstance(res, subprocess.CompletedProcess)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout.strip(), str(Path(tmp).resolve()))
+
+    def test_no_other_module_level_run_definition_shadows_the_helper(self):
+        import inspect
+
+        from gardener import cli
+
+        source = inspect.getsource(cli)
+        self.assertEqual(
+            source.count("\ndef _run("), 1,
+            "gardener/cli.py must define `_run` exactly once — a later "
+            "`def _run(` silently replaces the subprocess helper",
+        )
+
+
 class TestArgParsing(unittest.TestCase):
     def setUp(self):
         self.parser = build_parser()
