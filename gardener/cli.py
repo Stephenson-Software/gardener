@@ -1940,12 +1940,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     # is switched off; nothing in it can raise or write to stdout.
     trace = usage.start()
     try:
-        return _run(args)
+        return _dispatch(args)
     finally:
         usage.stop(trace)
 
 
-def _run(args: argparse.Namespace) -> int:
+def _dispatch(args: argparse.Namespace) -> int:
     log_name = getattr(args, "log_name", None)
     if log_name is None:
         return args.func(args)
