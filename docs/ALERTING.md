@@ -100,6 +100,18 @@ split.)
   hand to be covered — it falls into the mutation branch automatically
   unless it's literally `"report"`.
 
+One dispatch outcome deliberately never reaches `_notify_run` at all: a
+repo skipped because another gardener process holds its per-repo lock
+(see [Concurrent dispatch safety](USAGE.md#concurrent-dispatch-safety)).
+Nothing ran, so there is no `state.Run` to record and nothing to alert —
+the stderr line is the whole of the history. It used to be recorded as
+`outcome="error"`, which the first rule above turned into a `FAILED`
+alert, and two overlapping `overnight` runs on 2026-09-05 fired exactly
+that for a repo the other run tended successfully five minutes later
+(issue #152). Under `overnight` the skip still shows up in the batch
+summary, as its own "skipped (locked by another gardener process)" line
+that never lowers the summary's level.
+
 ## Self-update alerts
 
 `gardener overnight` fast-forwards gardener's own checkout before tending

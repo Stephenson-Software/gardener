@@ -169,14 +169,22 @@ which dispatches `tend` in-process) now take an exclusive, non-blocking,
 cross-process lock on the target repo (`gardener/repo_lock.py`, keyed by
 `owner/repo`, held for the full clone-through-dispatch duration) before
 touching its clone directory. If another gardener process already holds
-it, the dispatch is skipped rather than queued — you'll see an ERROR-level
-outcome/notification along the lines of "owner/repo is already being
-worked on by another gardener process" instead of a hang or a corrupted
-clone. Deliberately non-blocking: a stuck lock must never turn into
-`overnight` silently waiting out its own per-repo timeout budget. Distinct
-repos never contend with each other, so this doesn't limit
-`--concurrency`'s within-process parallelism — only two processes racing
-on the *same* repo ever hit this path.
+it, the dispatch is skipped rather than queued — you'll see a stderr line
+along the lines of "owner/repo is already being worked on by another
+gardener process" and a nonzero exit, instead of a hang or a corrupted
+clone. The skip is a skip, not a failure: nothing is recorded in the run
+history and no notification fires (it used to be recorded and alerted as
+an error, which two overlapping `overnight` runs turned into a false
+`FAILED` alert for a repo the other run tended fine minutes later — issue
+#152). Under `overnight`, a lock-skipped repo is also left out of the
+name-keyed resume cursor so it's re-attempted next run rather than
+deferred a whole cycle, and the batch summary lists it as "skipped
+(locked by another gardener process)" rather than counting it as
+attempted or errored. Deliberately non-blocking: a stuck lock must never
+turn into `overnight` silently waiting out its own per-repo timeout
+budget. Distinct repos never contend with each other, so this doesn't
+limit `--concurrency`'s within-process parallelism — only two processes
+racing on the *same* repo ever hit this path.
 
 ## Merge allow-list
 

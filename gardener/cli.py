@@ -885,9 +885,9 @@ def cmd_tend(args: argparse.Namespace) -> int:
     body — so both direct CLI use and `cmd_overnight` get it) and prints
     the dispatched result text to stdout, then returns the exit code.
     Prints nothing beyond `_dispatch_tend`'s own stderr progress lines when
-    the dispatch never actually ran (`dispatched=False` — a setup error or
-    a failed create-dev-loop bootstrap), matching this function's original
-    behavior before the `TendResult` split."""
+    the dispatch never actually ran (`dispatched=False` — a setup error, a
+    failed create-dev-loop bootstrap, or a held per-repo lock), matching
+    this function's original behavior before the `TendResult` split."""
     result = _dispatch_tend(args)
     if not result.dispatched:
         return result.exit_code
