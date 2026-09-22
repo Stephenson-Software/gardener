@@ -183,9 +183,14 @@ def _load_cursor_file(path: Path) -> dict:
     key) and by both write functions (each merges into whatever the other
     strategy already persisted, rather than clobbering it — see this
     module's docstring on why round-robin's `next_index` and issue-count/
-    random's `attempted` coexist in one file)."""
-    if not path.exists():
-        return {}
+    random's `attempted` coexist in one file).
+
+    Deliberately no `path.exists()` check before the read: a missing file
+    is just one of the `OSError`s the read itself reports, and the extra
+    `stat` was the exact call that raised a transient `ENOSYS` on the
+    Android/proot filesystem on 2026-09-05 (issue #155). Every filesystem
+    touch here is one more chance for that filesystem to lie, so the
+    function makes exactly one."""
     try:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
@@ -440,6 +445,13 @@ class RepoOutcome:
     # a repo never got a real attempt, so the resume cursor must not advance
     # past it — that is the whole reason this flag is carried up here.
     blocked: bool = False
+    # True when another gardener process held the repo's per-repo lock, so
+    # the tend was skipped before anything was cloned or dispatched. Like
+    # `blocked`, the repo never got a real attempt and the name-keyed cursor
+    # leaves it for the next run; unlike `blocked`, it says nothing about
+    # this device, so the batch carries on. Not an error either way: it is
+    # `repo_lock.py`'s exclusion working as designed (issue #152).
+    locked: bool = False
 
 
 def classify_outcome(repo: str, run: Optional[state.Run], result_text: str) -> RepoOutcome:
@@ -488,7 +500,14 @@ SUMMARY_LINES_BUDGET = 3500
 # The order per-repo lines are kept in when they don't all fit: the operator
 # reads the summary to find out what needs *doing*, so errors and decisions
 # come first and the "ok, no PR" lines are the ones that fall off the end.
-_STATUS_KEEP_PRIORITY = {"ERROR": 0, "decision needed": 1, "PR opened": 2, "merged": 3, "ok, no PR": 4}
+_STATUS_KEEP_PRIORITY = {
+    "ERROR": 0,
+    "decision needed": 1,
+    "PR opened": 2,
+    "merged": 3,
+    "skipped (locked by another gardener process)": 4,
+    "ok, no PR": 5,
+}
 
 
 def _fit_lines(lines: list[str], budget: int) -> list[str]:
@@ -516,21 +535,29 @@ def build_batch_summary(outcomes: list[RepoOutcome], elapsed_seconds: float, ski
     each repo's own per-repo notification (fired by `cmd_tend` itself via
     `_notify_run`, reused unchanged) — so the operator wakes up to one
     clear summary instead of having to piece N separate messages together
-    by hand."""
-    attempted = len(outcomes)
+    by hand.
+
+    A lock-skipped repo (`RepoOutcome.locked`) is listed but not counted as
+    attempted: nothing ran for it. It never lowers the level either — the
+    only thing it signals is that two gardener processes overlapped, which
+    is worth a line in the digest and nothing more."""
+    locked = sum(1 for o in outcomes if o.locked)
+    attempted = len(outcomes) - locked
     errored = sum(1 for o in outcomes if o.errored)
     pr_opened = sum(1 for o in outcomes if o.pr_opened)
     pr_merged = sum(1 for o in outcomes if o.pr_merged)
     decision_needed = sum(1 for o in outcomes if o.decision_needed)
     minutes = elapsed_seconds / 60
 
-    if attempted == 0:
+    if not outcomes:
         message = "no repos were dispatched this run (see gardener's stderr log for why)"
         level = notify.Level.INFO
     else:
         statused: list[tuple[str, str]] = []
         for o in outcomes:
-            if o.errored:
+            if o.locked:
+                status = "skipped (locked by another gardener process)"
+            elif o.errored:
                 status = "ERROR"
             elif o.pr_merged:
                 status = "merged"
@@ -551,11 +578,17 @@ def build_batch_summary(outcomes: list[RepoOutcome], elapsed_seconds: float, ski
             f"{pr_opened} PR(s) opened, {pr_merged} merged, "
             f"{decision_needed} awaiting a decision, {errored} errored"
         )
+        if locked:
+            message += f", {locked} skipped (locked by another gardener process)"
         if skipped:
             message += f", {skipped} not reached this run (resumes next `overnight`)"
         message += "\n" + "\n".join(lines)
 
-        if errored == attempted:
+        if attempted == 0:
+            # Every repo this run reached was locked by another process:
+            # nothing succeeded, but nothing failed either.
+            level = notify.Level.INFO
+        elif errored == attempted:
             level = notify.Level.ERROR
         elif errored or decision_needed:
             level = notify.Level.WARNING
