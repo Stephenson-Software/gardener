@@ -124,6 +124,22 @@ to my garden while I sleep" entry point:
    re-attempted whole rather than having its finished repos recorded
    individually — re-tending is idempotent enough, and this keeps the
    round-robin index's "advance by N repos" meaning intact.
+   **A failed cursor write never ends the run.** `persist_cursor` is
+   bookkeeping about a tend that has already finished, and it is guarded
+   the same way the two other post-tend bookkeeping steps
+   (`state.record_run` and the per-repo notification) already were: an
+   `OSError` is logged as `cursor write failed (non-fatal)` and the batch
+   loop carries on. It wasn't, once — a transient `ENOSYS` from the
+   Android/proot filesystem hit all three within one second on
+   2026-09-05, the two guarded steps logged and moved on, and the
+   unguarded cursor write raised out of the loop with ten of eleven
+   candidates never dispatched ([issue
+   #155](https://github.com/Stephenson-Software/gardener/issues/155)).
+   The cost of a lost write is a repo possibly re-attempted next cycle;
+   the cost of the crash was the rest of the night. For the same reason
+   the cursor reader no longer `stat`s the file before opening it — a
+   missing file is just one of the read errors it already treats as "no
+   cursor", and the pre-check was the exact call that raised.
 7. **Notifications.** Each repo's own outcome is logged and alerted via the
    *existing* `state.record_run`/`_notify_run` machinery `_dispatch_tend`
    already uses (unchanged, and safe to call from more than one thread at
@@ -131,13 +147,30 @@ to my garden while I sleep" entry point:
    Discord message per repo for free. `overnight` additionally fires **one
    summary notification at the end of the whole batch** — total repos
    attempted, how many opened a PR, how many merged, how many hit a
-   `DECISION NEEDED:` line, how many errored, and elapsed time — so you wake
+   `DECISION NEEDED:` line, how many errored, how many were skipped for a
+   held per-repo lock, and elapsed time — so you wake
    up to one clear digest instead of piecing together N separate messages.
    With no Discord webhook configured, the summary is still printed to
    stderr; the notification call itself is a clean no-op (`NullNotifier`,
    see [Alerting (optional)](../README.md#alerting-optional)), not a failure.
 8. One repo failing or timing out does not abort the batch — it's logged,
    notified, and `overnight` moves on to the next repo.
+9. **A repo skipped for a held lock is not an attempt.** If another
+   gardener process holds a repo's [per-repo
+   lock](USAGE.md#concurrent-dispatch-safety) — two `overnight` runs
+   overlapping, or a manual `tend` racing the nightly — `_dispatch_tend`
+   skips it before cloning or dispatching anything, and `overnight` treats
+   that as exactly what it is: no run is recorded, no per-repo alert
+   fires, the batch summary lists it as "skipped (locked by another
+   gardener process)" without counting it as attempted or errored, and the
+   name-keyed cursor (`issue-count`/`random`) leaves it out so it is
+   re-attempted next run rather than deferred a whole cycle. (Round-robin's
+   bare index can't single out one repo in the middle of a batch, so under
+   that strategy it comes round again next cycle like any other repo the
+   index has passed.) Before [issue
+   #152](https://github.com/Stephenson-Software/gardener/issues/152) it
+   was recorded as an error, alerted as `tend: FAILED`, and persisted as
+   attempted — for a repo the other run then tended successfully.
 
 ## Wiring it to "tend to my garden while I sleep"
 

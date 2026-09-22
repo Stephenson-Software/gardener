@@ -74,6 +74,17 @@ class TestCursor(unittest.TestCase):
         siblings = sorted(p.name for p in self.path.parent.iterdir())
         self.assertEqual(siblings, ["cursor.json"])
 
+    def test_reading_never_stats_the_file_before_opening_it(self):
+        """A `Path.exists()` check ahead of the read was the exact `stat`
+        that raised a transient `ENOSYS` on the sandbox filesystem and took
+        an overnight run down after one repo (issue #155). The read itself
+        already reports a missing file as an `OSError`, so the pre-check was
+        one more filesystem touch for no gain. Fails if it comes back:
+        `exists` raising here would propagate out of `read_cursor`."""
+        overnight.write_cursor(6, path=self.path)
+        with patch.object(Path, "exists", side_effect=OSError(38, "Function not implemented")):
+            self.assertEqual(overnight.read_cursor(path=self.path), 6)
+
 
 class TestAttemptedCursor(unittest.TestCase):
     """read_attempted/write_attempted — the name-keyed resume cursor used by
@@ -428,6 +439,50 @@ class TestBuildBatchSummary(unittest.TestCase):
         summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
         self.assertIn("2 repo(s) tended", summary.title)
         self.assertIn("1 error(s)", summary.title)
+
+    def test_locked_repo_is_listed_but_not_counted_as_attempted_or_errored(self):
+        # A repo skipped for a held lock never ran (issue #152): it gets its
+        # own line and its own headline count, and neither the attempted
+        # total, the error count, nor the level treats it as a failure.
+        outcomes = [
+            overnight.RepoOutcome(repo="a/one", pr_opened=True),
+            overnight.RepoOutcome(repo="a/two", locked=True),
+        ]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertEqual(summary.level, Level.SUCCESS)
+        self.assertIn("1 repo(s) tended, 0 error(s)", summary.title)
+        self.assertIn("1 repo(s) attempted", summary.message)
+        self.assertIn("1 skipped (locked by another gardener process)", summary.message)
+        self.assertIn("- a/two: skipped (locked by another gardener process)", summary.message)
+
+    def test_locked_count_omitted_when_zero(self):
+        outcomes = [overnight.RepoOutcome(repo="a/one")]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertNotIn("locked", summary.message)
+
+    def test_every_repo_locked_is_info_not_error(self):
+        # Without the guard, `errored == attempted` is `0 == 0` and an
+        # entirely-locked batch would alert as a total failure.
+        outcomes = [overnight.RepoOutcome(repo="a/one", locked=True)]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertEqual(summary.level, Level.INFO)
+        self.assertIn("0 repo(s) attempted", summary.message)
+
+    def test_locked_lines_sort_after_actionable_ones(self):
+        outcomes = [
+            overnight.RepoOutcome(repo="a/quiet"),
+            overnight.RepoOutcome(repo="a/locked", locked=True),
+            overnight.RepoOutcome(repo="a/broken", errored=True),
+        ]
+        summary = overnight.build_batch_summary(outcomes, 60, skipped=0)
+        self.assertEqual(
+            summary.message.splitlines()[1:],
+            [
+                "- a/broken: ERROR",
+                "- a/locked: skipped (locked by another gardener process)",
+                "- a/quiet: ok, no PR",
+            ],
+        )
 
 
 class TestBuildBatchSummaryFitsDiscord(unittest.TestCase):

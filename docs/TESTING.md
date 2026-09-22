@@ -145,7 +145,20 @@ per-repo error still does not abort the batch or hold the cursor —
 `_blocking_reason`'s three named failure-class branches and its generic
 fallback, and `_first_blocked_index`'s cursor-advance distance, are also
 pinned directly, independent of `cmd_overnight`, in `TestBlockingReason`/
-`TestFirstBlockedIndex`) and
+`TestFirstBlockedIndex`), its handling of a repo skipped for a held
+per-repo lock (`TestCmdOvernightLockSkip`: the batch is not aborted, the
+name-keyed cursor leaves the repo for the next run, the summary lists it
+as skipped rather than errored with no extra alert, and — through the real
+`_dispatch_one_for_overnight` with only `repo_lock.repo_lock` faked — that
+`TendResult.locked` reaches `RepoOutcome.locked` with no run recorded and
+no notification fired; the `cmd_align`/`cmd_tend` lock tests assert the
+same no-record/no-alert rule and the nonzero exit at their own level), its
+tolerance of a failed cursor write (`TestCmdOvernightCursorWriteFailure`:
+`write_cursor`/`write_attempted` raising `OSError` is logged as non-fatal
+and every remaining repo is still dispatched, and a write that fails once
+is covered by the next batch's successful write — asserted under a
+simulated kill so the post-loop write can't mask a lost per-batch one),
+and
 its cursor durability under a kill (a `BaseException` raised from the
 mocked dispatch, which `_dispatch_one_for_overnight`'s `except Exception`
 deliberately doesn't catch, so `cmd_overnight`'s post-loop code never runs
@@ -205,8 +218,14 @@ opt-out, which `test_usage.py` checks wins over gardener's own setting.
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
 with real files in a tmp dir, including `order_by_issue_count` (pure sort
 over an already-fetched count mapping), `random_order` (injectable
-`random.Random`), and `resume_order`/`next_attempted` (the name-keyed
-cursor's cycle-completion and reset logic); `tests/test_conventions.py`
+`random.Random`), `resume_order`/`next_attempted` (the name-keyed
+cursor's cycle-completion and reset logic), that the cursor reader never
+`stat`s the file before opening it (`Path.exists` patched to raise the
+`ENOSYS` from issue #155, with the read still succeeding), and
+`build_batch_summary`'s treatment of a lock-skipped `RepoOutcome` (listed
+under its own line and headline count, excluded from the attempted and
+error totals, never lowering the level, and an all-locked batch reading
+as INFO rather than as a total failure); `tests/test_conventions.py`
 covers `ConventionsSource.verify_complete()`'s missing-doc detection and
 `ensure_conventions()`'s clone/fetch-reset/no-refresh branches, with
 `_run_git`/`subprocess.run` mocked so no real `git` process ever runs, and

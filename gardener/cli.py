@@ -556,15 +556,11 @@ def cmd_align(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
             )
     except repo_lock.RepoLockedError as e:
+        # Neither recorded nor alerted — see `_run_tend_dispatch`'s handler
+        # for the same exception, which explains why a held lock is a skip
+        # and not a failure. The nonzero exit is kept: the caller asked for
+        # an alignment and none happened.
         print(f"gardener: {e}", file=sys.stderr)
-        locked_run = state.Run(
-            repo=args.repo,
-            mode=mode.value,
-            outcome="error",
-            timestamp=state.now_iso(),
-            gap_summary=str(e),
-        )
-        _record_and_notify(locked_run, args.state_db)
         return 1
     except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
@@ -629,10 +625,18 @@ class TendResult:
     is False for the two paths that return before the real tend dispatch
     ever runs (a setup exception, or a failed create-dev-loop bootstrap) —
     `cmd_tend` uses it to skip printing a result/timing summary for those,
-    matching its exact original behavior."""
+    matching its exact original behavior. `locked` is the third
+    `dispatched=False` path, and the only one that is not a failure — see
+    `_run_tend_dispatch`'s `RepoLockedError` handler."""
 
     exit_code: int
     dispatched: bool = True
+    # True when another gardener process held this repo's per-repo lock, so
+    # the tend was skipped before any clone or dispatch. Carried as its own
+    # flag rather than as an errored `run`, because `cmd_overnight` must
+    # treat it as "not attempted" (retry it, don't alert on it) — the
+    # opposite of what an error means there.
+    locked: bool = False
     ok: bool = False
     result_text: str = ""
     run: Optional[state.Run] = None
@@ -799,16 +803,19 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                 mode_spec=tend_mode_spec(eligible),
             )
     except repo_lock.RepoLockedError as e:
+        # A held lock is the exclusion mechanism working as designed (see
+        # repo_lock.py's module docstring: a skip-this-run condition, not a
+        # wait), so it is neither recorded as a run nor alerted. It used to
+        # be both — recorded as `outcome="error"`, which `_notify_run` turns
+        # into a `FAILED` Discord alert — and two `overnight` runs that
+        # overlapped on 2026-09-05 fired exactly that false alarm for a repo
+        # the other run then tended successfully five minutes later (issue
+        # #152). Nothing was attempted here, so there is nothing to record:
+        # the stderr line is the whole of the history, and `locked=True` is
+        # what `cmd_overnight` reads to leave the repo for the next run
+        # rather than marking it attempted.
         print(f"gardener: {e}", file=sys.stderr)
-        locked_run = state.Run(
-            repo=args.repo,
-            mode=Mode.TEND.value,
-            outcome="error",
-            timestamp=state.now_iso(),
-            gap_summary=str(e),
-        )
-        _record_and_notify(locked_run, args.state_db)
-        return TendResult(exit_code=1, dispatched=False, run=locked_run)
+        return TendResult(exit_code=1, dispatched=False, locked=True)
     except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
         print(f"gardener: error: {e}", file=sys.stderr)
         failed_run = state.Run(
@@ -878,9 +885,9 @@ def cmd_tend(args: argparse.Namespace) -> int:
     body — so both direct CLI use and `cmd_overnight` get it) and prints
     the dispatched result text to stdout, then returns the exit code.
     Prints nothing beyond `_dispatch_tend`'s own stderr progress lines when
-    the dispatch never actually ran (`dispatched=False` — a setup error or
-    a failed create-dev-loop bootstrap), matching this function's original
-    behavior before the `TendResult` split."""
+    the dispatch never actually ran (`dispatched=False` — a setup error, a
+    failed create-dev-loop bootstrap, or a held per-repo lock), matching
+    this function's original behavior before the `TendResult` split."""
     result = _dispatch_tend(args)
     if not result.dispatched:
         return result.exit_code
@@ -965,6 +972,16 @@ def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnigh
             errored=True,
             gap_summary=str(e),
             blocked=is_device_global_failure(str(e)),
+        )
+    if result.locked:
+        # No `run` to classify — nothing was attempted (see
+        # `_run_tend_dispatch`'s `RepoLockedError` handler). Handed up as
+        # its own kind of outcome so `persist_cursor` leaves the repo for
+        # the next run and the batch summary doesn't count it as an error.
+        return overnight.RepoOutcome(
+            repo=repo,
+            locked=True,
+            gap_summary="skipped — its per-repo lock was held by another gardener process",
         )
     outcome = overnight.classify_outcome(repo, result.run, result.result_text)
     outcome.blocked = result.blocked
@@ -1199,26 +1216,52 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         calling it again after the loop rewrites the same values. The
         blocked-abort rule is unchanged and simply applies as of whatever
         has been attempted at call time.
+
+        Never raises. This is bookkeeping about a tend that has already
+        finished, and it sits between the two other post-tend bookkeeping
+        steps — `_safe_record_run` and `_notify_run` — that were already
+        guarded the same way. On 2026-09-05 all three hit the same
+        transient `ENOSYS` from the sandbox filesystem within one second;
+        the two guarded ones logged and moved on, this one raised, and a
+        six-hour budget ended after one repo with ten candidates never
+        dispatched (issue #155). The cost of a lost cursor write is a repo
+        possibly re-attempted next cycle, which is nothing next to the rest
+        of the night.
         """
-        if strategy is overnight.Strategy.ROUND_ROBIN:
-            # On a blocked abort, advance only as far as the LAST repo that
-            # got a real attempt before the first blocked one — a bare index
-            # can't express "skip the middle one", so anything at or after
-            # the first blocked repo is left to be re-attempted next run.
-            # With concurrency > 1 that can mean re-tending a repo later in
-            # the same batch that did succeed; re-tending is idempotent
-            # enough (it's just another cycle) and far cheaper than silently
-            # skipping a repo.
-            advanced = _first_blocked_index(outcomes) if aborted_on_block else attempted
-            overnight.write_cursor((start_index + advanced) % len(garden_list), path=cursor_path)
-        else:
-            # Here the cursor is a set of repo names rather than a position,
-            # so it can be precise: drop exactly the blocked repos and keep
-            # every genuinely-attempted one, whatever order they ran in.
-            newly_attempted = [outcome.repo for outcome in outcomes if not outcome.blocked]
-            overnight.write_attempted(
-                overnight.next_attempted(attempted_before, cycle_reset, newly_attempted),
-                path=cursor_path,
+        try:
+            if strategy is overnight.Strategy.ROUND_ROBIN:
+                # On a blocked abort, advance only as far as the LAST repo
+                # that got a real attempt before the first blocked one — a
+                # bare index can't express "skip the middle one", so anything
+                # at or after the first blocked repo is left to be
+                # re-attempted next run. With concurrency > 1 that can mean
+                # re-tending a repo later in the same batch that did succeed;
+                # re-tending is idempotent enough (it's just another cycle)
+                # and far cheaper than silently skipping a repo. The same
+                # bare-index limit means a lock-skipped repo IS advanced
+                # past here (it comes round again next cycle, like any other
+                # repo the index has passed) — only the name-keyed branch
+                # below can single it out.
+                advanced = _first_blocked_index(outcomes) if aborted_on_block else attempted
+                overnight.write_cursor((start_index + advanced) % len(garden_list), path=cursor_path)
+            else:
+                # Here the cursor is a set of repo names rather than a
+                # position, so it can be precise: drop exactly the blocked
+                # and lock-skipped repos — neither got a real attempt — and
+                # keep every genuinely-attempted one, whatever order they
+                # ran in.
+                newly_attempted = [
+                    outcome.repo for outcome in outcomes if not (outcome.blocked or outcome.locked)
+                ]
+                overnight.write_attempted(
+                    overnight.next_attempted(attempted_before, cycle_reset, newly_attempted),
+                    path=cursor_path,
+                )
+        except OSError as e:
+            print(
+                f"gardener: overnight: cursor write failed (non-fatal): {e} — the repos "
+                "attempted so far this run may be re-attempted next cycle",
+                file=sys.stderr,
             )
 
     for repo_batch in overnight.batch_repos(order, concurrency):

@@ -1427,24 +1427,26 @@ class TestCmdAlign(unittest.TestCase):
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
-    def test_repo_already_locked_skips_the_dispatch_and_notifies(
+    def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
         self, mock_lock, mock_run_claude, mock_default_notifier
     ):
         # Another gardener process (a manual invocation, or an overlapping
         # overnight run) holding this repo's lock must short-circuit before
         # any clone/dispatch happens — never silently proceed to clone or
-        # dispatch claude against the same working tree.
+        # dispatch claude against the same working tree. It is a skip, not
+        # a failure (issue #152): nothing is recorded, no FAILED alert fires,
+        # and the only trace is the stderr line. The exit code stays
+        # nonzero — no alignment happened.
         mock_notifier = mock_default_notifier.return_value
 
-        with redirect_stderr(io.StringIO()):
+        with redirect_stderr(io.StringIO()) as err:
             exit_code = cmd_align(self._args())
 
         self.assertEqual(exit_code, 1)
         mock_run_claude.assert_not_called()
-        mock_notifier.notify.assert_called_once()
-        _title, message, level = mock_notifier.notify.call_args[0]
-        self.assertEqual(level, Level.ERROR)
-        self.assertIn("already being worked on", message)
+        mock_notifier.notify.assert_not_called()
+        self.assertEqual(state.list_runs(db_path=self.state_db), [])
+        self.assertIn("already being worked on", err.getvalue())
 
 
 class TestCmdTendNotifications(unittest.TestCase):
@@ -1821,26 +1823,45 @@ class TestCmdTendNotifications(unittest.TestCase):
     @patch("gardener.cli.run_claude")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
-    def test_repo_already_locked_skips_the_dispatch_and_notifies(
+    def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
         self, mock_lock, mock_clone, mock_run_claude, mock_default_notifier
     ):
         # Guards the exact scenario `gardener overnight` and a manual
         # `gardener tend`/`gardener align` racing each other against the
         # same repo is meant to prevent: never clone into or dispatch
         # against a repo another gardener process already holds the lock
-        # for (see repo_lock.py's module docstring).
+        # for (see repo_lock.py's module docstring). And the skip is
+        # reported as a skip: it used to be recorded as `outcome="error"`
+        # and alerted as `tend: FAILED`, which two overlapping overnight
+        # runs turned into a false alarm for a repo that was tended fine
+        # minutes later (issue #152).
         mock_notifier = mock_default_notifier.return_value
 
-        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+        with redirect_stderr(io.StringIO()) as err, patch("sys.stdout", new=io.StringIO()):
             exit_code = cmd_tend(self._args())
 
         self.assertEqual(exit_code, 1)
         mock_clone.assert_not_called()
         mock_run_claude.assert_not_called()
-        mock_notifier.notify.assert_called_once()
-        _title, message, level = mock_notifier.notify.call_args[0]
-        self.assertEqual(level, Level.ERROR)
-        self.assertIn("already being worked on", message)
+        mock_notifier.notify.assert_not_called()
+        self.assertEqual(state.list_runs(db_path=self.state_db), [])
+        self.assertIn("already being worked on", err.getvalue())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
+    def test_repo_already_locked_is_flagged_on_the_result_for_overnight(
+        self, mock_lock, mock_default_notifier
+    ):
+        # `cmd_overnight` reads this flag (via `_dispatch_one_for_overnight`)
+        # to leave the repo for the next run instead of marking it attempted.
+        from gardener.cli import _dispatch_tend
+
+        with redirect_stderr(io.StringIO()):
+            result = _dispatch_tend(self._args())
+
+        self.assertTrue(result.locked)
+        self.assertFalse(result.dispatched)
+        self.assertIsNone(result.run)
 
 
 class TestFormatDenial(unittest.TestCase):
@@ -3200,6 +3221,218 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
         for repo in self.calls:
             if repo != "owner/b":
                 self.assertIn(repo, attempted)
+
+
+class TestCmdOvernightLockSkip(unittest.TestCase):
+    """A repo skipped because another gardener process holds its per-repo
+    lock never got an attempt, so `cmd_overnight` must neither count it as
+    an error nor mark it attempted for the cycle.
+
+    Regression coverage for a real incident (2026-09-05, issue #152): two
+    `overnight` runs overlapped, the second skipped
+    `Stephenson-Software/SimpleAccountRegistry` for the held lock, recorded
+    it as an error, fired `tend: FAILED` to Discord, and persisted it as
+    attempted — while the run that held the lock tended it successfully
+    five minutes later."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, strategy="round-robin", concurrency=1):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=concurrency, strategy=strategy, random_seed=None, self_update=False,
+        )
+
+    def _fake_dispatch_tend(self, locked: set):
+        """Mirrors what the real `_run_tend_dispatch` returns on a held lock:
+        no run recorded, `locked=True`, nothing else set."""
+        def fake(args):
+            self.calls.append(args.repo)
+            if args.repo in locked:
+                return TendResult(exit_code=1, dispatched=False, locked=True)
+            run = state.Run(
+                repo=args.repo, mode="tend", outcome="tend",
+                timestamp=state.now_iso(), gap_summary="",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, run=run)
+        return fake
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_locked_repo_does_not_abort_the_batch(self, mock_dispatch_tend, mock_default_notifier):
+        # Unlike a device-global failure, a held lock is about one repo and
+        # says nothing about the rest of the garden.
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/a"})
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/a", "owner/b", "owner/c"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_name_keyed_cursor_leaves_the_locked_repo_for_the_next_run(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # The whole point: the repo the other process was tending is
+        # re-attempted next run rather than deferred a full cycle.
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/b"})
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args(strategy="random"))
+        attempted = overnight.read_attempted(path=self.cursor_file)
+        self.assertNotIn("owner/b", attempted)
+        self.assertEqual(sorted(attempted), ["owner/a", "owner/c"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_summary_reports_the_skip_without_counting_it_as_an_error(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend({"owner/b"})
+        mock_notifier = mock_default_notifier.return_value
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(self._args())
+        # Only the batch summary — no per-repo FAILED alert for the skip
+        # (the real per-repo alert path lives in the mocked-out dispatch, so
+        # what this pins is that `cmd_overnight` adds none of its own).
+        mock_notifier.notify.assert_called_once()
+        title, message, level = mock_notifier.notify.call_args.args
+        self.assertEqual(level, Level.SUCCESS)
+        self.assertIn("2 repo(s) tended, 0 error(s)", title)
+        self.assertIn("- owner/b: skipped (locked by another gardener process)", message)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.repo_lock.repo_lock")
+    def test_real_lock_handler_reaches_overnight_as_a_locked_outcome(
+        self, mock_lock, mock_default_notifier
+    ):
+        # End to end through the real `_dispatch_tend` (only the lock is
+        # faked), so the `TendResult.locked` → `RepoOutcome.locked` wiring
+        # is exercised rather than assumed from the mocked shape above.
+        from gardener.cli import _dispatch_one_for_overnight
+
+        mock_lock.side_effect = repo_lock.RepoLockedError("owner/a is already being tended")
+        with redirect_stderr(io.StringIO()):
+            outcome = _dispatch_one_for_overnight("owner/a", self._args())
+        self.assertTrue(outcome.locked)
+        self.assertFalse(outcome.errored)
+        self.assertFalse(outcome.blocked)
+        mock_default_notifier.return_value.notify.assert_not_called()
+        self.assertEqual(state.list_runs(db_path=self.state_db), [])
+
+
+class TestCmdOvernightCursorWriteFailure(unittest.TestCase):
+    """A failed cursor write must not end the run. Regression coverage for
+    a real incident (2026-09-05, issue #155): a transient `ENOSYS` from the
+    sandbox filesystem hit `state.record_run`, the Discord notification and
+    `persist_cursor` within one second — the first two were guarded and
+    logged `(non-fatal)`, the third raised out of `cmd_overnight`, and ten
+    of eleven candidates were never dispatched. Every test here fails
+    against the unguarded `persist_cursor`."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.cursor_file = tmp / "cursor.json"
+        self.state_db = tmp / "state.sqlite3"
+        self.calls: list[str] = []
+        for repo in ("owner/a", "owner/b", "owner/c"):
+            garden.add(repo, path=self.garden_file)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _args(self, strategy="round-robin"):
+        return argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=self.cursor_file, state_db=self.state_db,
+            concurrency=1, strategy=strategy, random_seed=None, self_update=False,
+        )
+
+    def _fake_dispatch_tend(self):
+        def fake(args):
+            self.calls.append(args.repo)
+            run = state.Run(
+                repo=args.repo, mode="tend", outcome="tend",
+                timestamp=state.now_iso(), gap_summary="",
+            )
+            state.record_run(run, db_path=args.state_db)
+            return TendResult(exit_code=0, ok=True, run=run)
+        return fake
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.overnight.write_cursor", side_effect=OSError(38, "Function not implemented"))
+    def test_round_robin_cursor_write_failure_is_logged_and_the_batch_continues(
+        self, mock_write, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+        with redirect_stderr(io.StringIO()) as err:
+            exit_code = cmd_overnight(self._args())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/a", "owner/b", "owner/c"])
+        self.assertIn("cursor write failed (non-fatal)", err.getvalue())
+        self.assertIn("Function not implemented", err.getvalue())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.overnight.write_attempted", side_effect=OSError(38, "Function not implemented"))
+    def test_name_keyed_cursor_write_failure_is_logged_and_the_batch_continues(
+        self, mock_write, mock_dispatch_tend, mock_default_notifier
+    ):
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+        with redirect_stderr(io.StringIO()) as err:
+            exit_code = cmd_overnight(self._args(strategy="random"))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(self.calls), 3)
+        self.assertIn("cursor write failed (non-fatal)", err.getvalue())
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli._dispatch_tend")
+    def test_a_write_that_fails_once_does_not_lose_the_next_batch_s_write(
+        self, mock_dispatch_tend, mock_default_notifier
+    ):
+        # The blip is transient (the same path succeeded moments later in
+        # the real incident): the write after it must still land, carrying
+        # everything attempted so far — `persist_cursor` is computed from
+        # the accumulated outcomes, not this batch's alone. The run is then
+        # killed (as in the kill tests below) so the post-loop write can't
+        # paper over a lost per-batch one.
+        real_write = overnight.write_cursor
+        failures = iter([True, False])
+
+        def flaky_write(index, path=None):
+            if next(failures, False):
+                raise OSError(38, "Function not implemented")
+            real_write(index, path=path)
+
+        fake = self._fake_dispatch_tend()
+
+        def fake_until_killed(args):
+            if args.repo == "owner/c":
+                raise KeyboardInterrupt("simulated task-swipe kill")
+            return fake(args)
+
+        mock_dispatch_tend.side_effect = fake_until_killed
+        with patch("gardener.cli.overnight.write_cursor", side_effect=flaky_write):
+            with redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+                cmd_overnight(self._args())
+        # owner/a's write was lost; owner/b's landed and covered both.
+        self.assertEqual(self.calls, ["owner/a", "owner/b"])
+        self.assertEqual(overnight.read_cursor(path=self.cursor_file), 2)
 
 
 class TestCmdOvernightCursorSurvivesAKill(unittest.TestCase):
