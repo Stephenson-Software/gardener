@@ -169,7 +169,7 @@ where the budget/headroom logic specifically is under test,
 `time.monotonic` mocked too, so timing assertions never depend on
 wall-clock jitter. `tests/test_cli.py` also covers the target-repo refresh's
 `git clean` invocation with `_run` mocked (dependency caches excluded via
-`-e`, build outputs still cleaned, the clean step's longer timeout, and a
+`-e`, build outputs and nested git repos still cleaned via `-ffdx`, the clean step's longer timeout, and a
 failing clean still raising with the full command in the message), and
 `main()`'s `log_name` wiring — that `build_parser()` sets it only on the
 dispatching subcommands (`align`/`tend`/`overnight`) and leaves it unset on
