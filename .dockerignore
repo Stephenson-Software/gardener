@@ -1,0 +1,9 @@
+# Only pyproject.toml, README.md, LICENSE and gardener/ are copied; keep the
+# build context to roughly those.
+.git
+tests
+docs
+issues
+bin
+*.egg-info
+**/__pycache__
