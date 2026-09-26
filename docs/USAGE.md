@@ -45,7 +45,10 @@ gardener update [--check]
   table or as a plot of plants) and
   a live-updating tail of the most recently written `tend`/`overnight` run
   log (see [Run logs](#run-logs) — a dispatching run writes one itself;
-  auto-refreshes every 4s). Three
+  auto-refreshes every 4s). `/live` on the same server is a
+  [live view](DASHBOARD.md#the-live-view) of the overnight run in
+  progress — what each slot is doing, run pace, and how close the usage
+  window is to running out. Three
   [progress bars](DASHBOARD.md) sit under the session stats — the cycle
   over the whole garden (read from the resume cursor, not from a log), the
   running invocation's time budget, and the current batch. "Currently

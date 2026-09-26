@@ -202,6 +202,46 @@ class TestTailLines(unittest.TestCase):
             self.assertEqual(result, [f"line{i:06d}" for i in range(1990, 2000)])
 
 
+class TestSplitGluedLines(unittest.TestCase):
+    """Concurrent dispatch threads' `print`s interleave as
+    `<msg A><msg B>\n\n`; the fixtures are verbatim lines from real
+    overnight logs."""
+
+    def test_glued_messages_are_split_back_apart(self):
+        self.assertEqual(
+            dashboard.split_glued_lines([
+                "gardener: finished tending kingdom-community/github-actionsgardener: tending "
+                "Dans-Plugins/dpc-mcp-server (allow_merge=True)gardener: tending "
+                "Stephenson-Software/trace (allow_merge=True)",
+            ]),
+            [
+                "gardener: finished tending kingdom-community/github-actions",
+                "gardener: tending Dans-Plugins/dpc-mcp-server (allow_merge=True)",
+                "gardener: tending Stephenson-Software/trace (allow_merge=True)",
+            ],
+        )
+
+    def test_a_repo_named_gardener_is_not_split(self):
+        line = "- Stephenson-Software/gardener: PR opened"
+        self.assertEqual(dashboard.split_glued_lines([line]), [line])
+
+    def test_ordinary_lines_pass_through(self):
+        lines = ["gardener: tending o/a (allow_merge=True)", "some build output", ""]
+        self.assertEqual(dashboard.split_glued_lines(lines), lines)
+
+    def test_a_glued_start_line_now_reads_as_in_flight(self):
+        # Before the split, the second repo on this line never matched the
+        # `^`-anchored TENDING_RE and was never shown as running.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "overnight-20260925-200554.log"
+            log.write_text(
+                "gardener: tending o/a (allow_merge=True)gardener: tending o/b (allow_merge=True)\n\n"
+                "gardener: finished tending o/a\n"
+            )
+            self.assertEqual(dashboard.parse_in_progress(dashboard.tail_lines(log)), ["o/b"])
+            self.assertEqual(len(dashboard.head_lines(log, n=2)), 2)
+
+
 class TestParseInProgress(unittest.TestCase):
     def test_no_lines_is_empty(self):
         self.assertEqual(dashboard.parse_in_progress([]), [])

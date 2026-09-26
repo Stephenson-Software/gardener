@@ -257,7 +257,10 @@ Discord 4xx returned as an ordinary response — distinct from `urlopen`
 raising `HTTPError`, and reached by a different branch — and a `notify.env`
 that exists but can't be read; `tests/test_dashboard.py`
 covers the dashboard's pure log-parsing and status-assembly functions —
-`find_active_log`, `find_active_logs` (the recency window and its exact
+`split_glued_lines` (verbatim glued lines from real overnight logs, where
+two dispatch threads' `print`s interleaved, split back apart; a repo named
+`gardener` left intact; and a glued `tending` line now reading as in
+flight), `find_active_log`, `find_active_logs` (the recency window and its exact
 boundary under an injected clock, its newest-log fallback, and that the
 window outlasts a silent `tend` dispatch), `tail_lines`,
 `parse_in_progress` (including the `finished tending` marker clearing a
@@ -415,7 +418,21 @@ deliberately uncovered line — plus
 tmp-dir) directory tree; `tests/test_cli.py` covers `cmd_update` (with
 `selfupdate.self_update` mocked) and `cmd_overnight`'s self-update wiring
 specifically — called by default, skipped by `--no-self-update`, and
-a raising/mocked self-update never aborting the run. None of the automated
+a raising/mocked self-update never aborting the run. `tests/test_live.py`
+covers the dashboard's `/live` view: the batch/clone/transcript log
+parsing (including a transcript matched to its repo by clone directory
+when concurrent dispatches announce theirs out of order, and the real
+`transcript.log_transcript_when_found` line read back by the real parser),
+`TranscriptCache`'s incremental reads (a half-written last line left for
+the next poll, a shrunk file re-read, tools and per-message token usage
+counted once, the `rate_limit` error line Claude Code writes), the
+usage-limit hit clustering and trailing-spend band — including that a
+*successful* run whose summary discusses rate limits is never a hit —
+`state.runs_since`, and `build_live` end to end over a synthetic state dir
+(slot phases, the quiet-slot flag, a limit failure raising the hit, and a
+log with no live session reading as stopped); `tests/test_cli.py`'s
+batch-line round trip also asserts `live.current_batch_lines` names every
+repo `cmd_overnight` actually batched. None of the automated
 tests hit the network (the usage-reporting and vendored-client suites talk
 only to a loopback server they start themselves) or a real repo, or invoke
 a real `claude` process —

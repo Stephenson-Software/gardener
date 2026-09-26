@@ -251,6 +251,33 @@ def find_active_logs(
     return [newest] if newest else []
 
 
+# `print(msg, file=sys.stderr)` writes the message and its newline as two
+# separate writes, so two `overnight --concurrency N` dispatch threads
+# printing at the same moment interleave as `<msg A><msg B>\n\n` — measured
+# on every overnight log on the box this was found on (3–28 glued lines
+# each), e.g. `gardener: tending o/a (allow_merge=True)gardener: tending
+# o/b (allow_merge=True)`. Every progress regex here is anchored at `^`, so
+# the second message on such a line was invisible: a repo whose `tending`
+# line was glued never showed as in flight, and one whose `finished
+# tending` line was glued stayed in flight for the life of the log. The
+# split point is a message prefix directly after a non-space character —
+# except after `/`, because a repo named `gardener` legitimately prints
+# `owner/gardener: PR opened` mid-line.
+_GLUED_MESSAGE_RE = re.compile(r"(?<=[^\s/])(?=(?:gardener|notify): )")
+
+
+def split_glued_lines(lines: list[str]) -> list[str]:
+    """`lines` with every glued line (see `_GLUED_MESSAGE_RE`) split back
+    into the separate messages it was written as."""
+    out: list[str] = []
+    for line in lines:
+        if "gardener: " in line[1:] or "notify: " in line[1:]:
+            out.extend(_GLUED_MESSAGE_RE.split(line))
+        else:
+            out.append(line)
+    return out
+
+
 def tail_lines(path: Path, n: int = 400) -> list[str]:
     """Return the last `n` lines of `path` without loading the entire file.
 
@@ -281,7 +308,7 @@ def tail_lines(path: Path, n: int = 400) -> list[str]:
             collected.append(chunk)
             newlines_found += chunk.count(b"\n")
         raw = b"".join(reversed(collected))
-    lines = raw.decode("utf-8", errors="replace").splitlines()
+    lines = split_glued_lines(raw.decode("utf-8", errors="replace").splitlines())
     return lines[-n:]
 
 
@@ -299,12 +326,12 @@ def head_lines(path: Path, n: int = 200) -> list[str]:
     except OSError:
         return []
     with f:
-        lines = []
+        lines: list[str] = []
         for line in f:
-            lines.append(line.rstrip("\n"))
+            lines.extend(split_glued_lines([line.rstrip("\n")]))
             if len(lines) >= n:
                 break
-    return lines
+    return lines[:n]
 
 
 def log_started_at(path: Path) -> Optional[float]:
@@ -1210,6 +1237,7 @@ PAGE_HTML = """<!doctype html>
   <h1><span aria-hidden="true">🌱</span> gardener dashboard</h1>
   <span class="sub" id="updated">loading…</span>
   <span id="stale-badge">⚠ stale</span>
+  <a class="sub" href="/live" style="margin-left:auto">live view →</a>
 </header>
 <!-- The page rewrites every panel on a 4 s poll and had no live region at
      all, so a tend starting, the error count moving, or the page going
@@ -2586,6 +2614,15 @@ def _status_query(query: str) -> dict:
     return kwargs
 
 
+def _live():
+    """`gardener.live`, imported on first use: it builds on this module's
+    log-parsing helpers, so importing it at the top of this one would be
+    circular."""
+    from gardener import live
+
+    return live
+
+
 class _DashboardHandler(BaseHTTPRequestHandler):
     state_dir: Optional[Path] = None
 
@@ -2623,6 +2660,18 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 # spamming stderr, so without this an error left no trace
                 # at all beyond the traceback socketserver prints.
                 print(f"gardener dashboard: /api/status failed: {exc!r}", file=sys.stderr)
+                error_body = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
+                self._send(500, "application/json; charset=utf-8", error_body.encode("utf-8"))
+                return
+            self._send(200, "application/json; charset=utf-8", body)
+        elif parsed.path == "/live":
+            self._send(200, "text/html; charset=utf-8", _live().LIVE_PAGE_HTML.encode("utf-8"))
+        elif parsed.path == "/api/live":
+            # Same "a real 500, never zero bytes" rule as /api/status above.
+            try:
+                body = json.dumps(_live().build_live(state_dir=self.state_dir)).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - a dashboard poll must never kill the socket
+                print(f"gardener dashboard: /api/live failed: {exc!r}", file=sys.stderr)
                 error_body = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
                 self._send(500, "application/json; charset=utf-8", error_body.encode("utf-8"))
                 return
