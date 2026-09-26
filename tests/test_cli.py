@@ -2956,11 +2956,14 @@ class TestCloneOrRefreshClean(unittest.TestCase):
 
     @patch("gardener.cli._run")
     def test_clean_still_removes_everything_else(self, mock_run):
-        # -fdx is retained: the point is to keep dependency caches, not to
-        # stop cleaning. A stale build output must still be removed.
+        # -x is retained: the point is to keep dependency caches, not to
+        # stop cleaning. A stale build output must still be removed. The
+        # doubled -f is what removes a nested git repo (a dev-loop run's
+        # reference clone) — a single -f skips those, so they survived
+        # every refresh.
         self._refresh(mock_run)
         argv = self._clean_call(mock_run).args[0]
-        self.assertEqual(argv[:3], ["git", "clean", "-fdx"])
+        self.assertEqual(argv[:3], ["git", "clean", "-ffdx"])
         for build_output in ("build", "target", "dist"):
             self.assertNotIn(build_output, argv)
 

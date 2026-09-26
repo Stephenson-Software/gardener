@@ -439,8 +439,11 @@ permanently gone. Only the transport error `gh` appends to it may classify.
 
 Each `tend`/`align` run refreshes its cached clone
 (`~/.cache/gardener/repos/<owner>__<repo>`) with fetch + `checkout -B` +
-`git clean -fdx`, so no leftover state from a previous run can leak into
-the next one. The clean explicitly **preserves** a short list of dependency
+`git clean -ffdx`, so no leftover state from a previous run can leak into
+the next one. The `-f` is doubled because a single one makes `git clean`
+skip any untracked directory holding its own git repo — the reference
+clones a dev-loop run leaves behind (`.pv-*/`, `.ref-*/`) survived every
+refresh that way until it was. The clean explicitly **preserves** a short list of dependency
 caches (`cli.py`'s `PRESERVED_DEPENDENCY_DIRS`: `node_modules`, `.venv`,
 `venv`, `.gradle`) via `git clean`'s `-e` flag, which is still honored when
 `-x` is passed. Build *outputs* (`build/`, `target/`, `dist/`) are

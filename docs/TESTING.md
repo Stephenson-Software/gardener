@@ -169,7 +169,7 @@ where the budget/headroom logic specifically is under test,
 `time.monotonic` mocked too, so timing assertions never depend on
 wall-clock jitter. `tests/test_cli.py` also covers the target-repo refresh's
 `git clean` invocation with `_run` mocked (dependency caches excluded via
-`-e`, build outputs still cleaned, the clean step's longer timeout, and a
+`-e`, build outputs and nested git repos still cleaned via `-ffdx`, the clean step's longer timeout, and a
 failing clean still raising with the full command in the message), and
 `main()`'s `log_name` wiring — that `build_parser()` sets it only on the
 dispatching subcommands (`align`/`tend`/`overnight`) and leaves it unset on
@@ -385,7 +385,9 @@ liveness, and the clock all injected so nothing real is ever signalled;
 test invokes a real `git`, `gh`, or network call — including the two
 severity rules the command's exit code depends on (a modified tracked file
 is an ERROR, an untracked-only tree is a WARN, since the refresh's `git
-clean -fdx` is meant to remove those) and the two "don't cry wolf" ones (an
+clean -ffdx` is meant to remove those — with the prescribed fix doubling
+`-f` too, and untracked directories holding a nested git repo counted in
+the message, `.git` file or directory, at any depth) and the two "don't cry wolf" ones (an
 unresolvable repo is SKIPPED rather than reported as renamed, because
 offline/rate-limited/deleted are the same answer from `gh`; and a repo whose
 per-repo lock is currently held is skipped without shelling out to git at

@@ -243,6 +243,23 @@ def check_state_dir(state_dir: Path) -> list[Finding]:
     return findings
 
 
+def _contains_nested_repo(repo_dir: Path, porcelain_line: str) -> bool:
+    """Whether a `?? path/` entry from `git status --porcelain` is, or
+    contains, its own git repo. Walks the directory rather than asking
+    `git clean -nd`, whose dry run silently omits a nested repo sitting at
+    the top of an untracked directory (it only reports ones a level
+    deeper), and status itself only ever shows the outermost untracked
+    directory. A `.git` *file* counts too — that's a worktree or a
+    submodule's gitdir pointer."""
+    path = porcelain_line[3:].strip().strip('"')
+    if not path.endswith("/"):
+        return False
+    for _, dirnames, filenames in os.walk(repo_dir / path):
+        if ".git" in dirnames or ".git" in filenames:
+            return True
+    return False
+
+
 def check_cache_clone(
     repo_dir: Path,
     run_fn: RunFn = _default_run,
@@ -254,10 +271,14 @@ def check_cache_clone(
     local modifications that `git checkout -B` would have to overwrite.
 
     Untracked files are reported separately and only as a WARN: the refresh
-    runs `git clean -fdx` and is *expected* to remove them, so they only
+    runs `git clean -ffdx` and is *expected* to remove them, so they only
     matter when they'd collide with a file on the incoming branch — which
     is a real observed failure, but a much rarer one than a modified
-    tracked file.
+    tracked file. The prescribed fix doubles the `-f` for the same reason
+    the refresh does: 2026-09-19's sweep found every untracked path in two
+    clones was a nested git repo (reference clones a dev-loop run left
+    behind), and the `clean -fd` this used to prescribe removed none of
+    them.
 
     A repo another gardener process currently holds the lock on is reported
     as SKIPPED and nothing else: a tend in flight has *legitimately* dirtied
@@ -331,14 +352,22 @@ def check_cache_clone(
             )
         )
     if untracked:
+        nested = sum(1 for line in untracked if _contains_nested_repo(repo_dir, line))
+        nested_note = (
+            f" ({nested} of them holding a nested git repo, which plain `git clean -fd` skips)"
+            if nested
+            else ""
+        )
         findings.append(
             Finding(
                 "cache-clone",
                 Severity.WARN,
-                f"{len(untracked)} untracked path(s) — normally harmless (the refresh runs "
-                f"`git clean -fdx`), but a collision with an incoming file fails the checkout",
+                f"{len(untracked)} untracked path(s){nested_note} — the next refresh's "
+                f"`git clean -ffdx` removes them, and a collision with an incoming file fails "
+                f"the checkout; review first, since an interrupted tend's uncommitted output "
+                f"lands here too",
                 repo=repo,
-                fix=f"git -C {repo_dir} clean -nd  # review, then drop -n to remove",
+                fix=f"git -C {repo_dir} clean -nffd  # review, then drop -n to remove",
             )
         )
     if not findings:
