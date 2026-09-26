@@ -46,6 +46,31 @@ export GARDENER_HUB_OPERATOR_BASIC_SHA256='<digest from step 2>'
 gardener hub serve --host 0.0.0.0 --port 8765 --data-dir /var/lib/gardener-hub
 ```
 
+### In a container
+
+The repo's `Dockerfile` builds an image that runs only the hub:
+`python:3.12-slim`, a non-root user, the store in the `/data` volume
+(`/data/hub/gardener.sqlite3`), and a `HEALTHCHECK` on `/healthz`. Pass the
+settings below as environment variables:
+
+```bash
+docker build -t gardener-hub .
+docker run -d --name gardener-hub -p 127.0.0.1:8765:8765 -v gardener-hub-data:/data \
+  -e GARDENER_HUB_DEVICE_TOKENS='box:<digest>' \
+  -e GARDENER_HUB_OPERATOR_BASIC_SHA256='<digest>' gardener-hub
+```
+
+With no operator credential, the container exits with status 2 instead of
+serving. Measured on a 2-vCPU Linode, it idled at about 16 MiB after twenty
+dashboard polls, so a 64–128 MiB limit is plenty.
+
+Back up the store with SQLite's online backup, not a file copy (the store
+is in WAL mode):
+
+```bash
+docker exec gardener-hub python -c "import sqlite3; s=sqlite3.connect('/data/hub/gardener.sqlite3'); d=sqlite3.connect('/data/hub/backup.sqlite3'); s.backup(d)"
+```
+
 Put TLS in front of it (a reverse proxy) before exposing it beyond
 localhost. Device tokens and the operator password travel in headers.
 
