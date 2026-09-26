@@ -55,6 +55,11 @@ gardener/
                        at the start of `gardener overnight`; a dirty tree,
                        detached HEAD, or diverged branch all skip rather than
                        force anything (see Usage's "Self-update" section)
+    hub.py           — optional shared run history (RFC 0007): the device side
+                       (hub.env config, outbox push after every record,
+                       `hub sync`) and the hub itself (`hub serve`: the
+                       dashboard handler behind basic/UserAuth auth over a
+                       combined store, plus the /api/v1 push/read endpoints)
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     usage.py         — one `startup` usage event per CLI invocation, tagged
                        version + service=true, sent to trace; settings via

@@ -31,7 +31,7 @@ from string import Template
 from typing import Optional
 
 from gardener import (
-    conventions, dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight,
+    conventions, dashboard, dev_loop, doctor, garden, hub, merge_allowlist, notify, overnight,
     repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
@@ -535,6 +535,10 @@ def _safe_record_run(run: state.Run, db_path: Optional[Path]) -> None:
         state.record_run(run, db_path=db_path)
     except Exception as e:  # noqa: BLE001 - recording must never break the run it reports on
         print(f"gardener: state.record_run failed (non-fatal): {e}", file=sys.stderr)
+        return
+    # Local first, then the copy: with a hub configured (RFC 0007), the
+    # outbox goes out now. A no-op without one, and never raises.
+    hub.push_after_record(db_path)
 
 
 def _record_and_notify(run: state.Run, db_path: Optional[Path]) -> None:
@@ -1526,18 +1530,82 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
+    all_devices = getattr(args, "all_devices", False)
+    if all_devices:
+        config = hub.load_config()
+        if config is None:
+            print(f"error: --all-devices needs a hub; set {hub.URL_ENV}", file=sys.stderr)
+            return 2
+        try:
+            runs = hub.fetch_runs(config, repo=args.repo, limit=args.limit)
+        except hub.HubError as e:
+            print(f"error: could not read the hub: {e}", file=sys.stderr)
+            return 1
+    else:
+        runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
     if not runs:
         print("no runs recorded yet")
         return 0
-    header = f"{'timestamp':<20} {'repo':<32} {'mode':<11} {'outcome':<10} summary"
+    device_col = f"{'device':<14} " if all_devices else ""
+    header = f"{'timestamp':<20} {device_col}{'repo':<32} {'mode':<11} {'outcome':<10} summary"
     print(header)
     print("-" * len(header))
     for r in runs:
         summary = (r.gap_summary or "").replace("\n", " ")
         if len(summary) > 60:
             summary = summary[:57] + "..."
-        print(f"{r.timestamp:<20} {r.repo:<32} {r.mode:<11} {r.outcome:<10} {summary}")
+        device = f"{(r.device or '—'):<14} " if all_devices else ""
+        print(f"{r.timestamp:<20} {device}{r.repo:<32} {r.mode:<11} {r.outcome:<10} {summary}")
+    return 0
+
+
+def cmd_hub_serve(args: argparse.Namespace) -> int:
+    data_dir = args.data_dir or state.default_state_dir() / "hub"
+    return hub.serve(host=args.host, port=args.port, data_dir=data_dir)
+
+
+def cmd_hub_sync(args: argparse.Namespace) -> int:
+    """Drain this device's whole outbox to the hub, with no deadline: the
+    backfill after configuring a device, and the manual retry after an
+    outage. Safe to repeat — the hub ignores runs it already holds."""
+    config = hub.load_config()
+    if config is None:
+        print(f"error: no hub configured; set {hub.URL_ENV} and {hub.TOKEN_ENV}", file=sys.stderr)
+        return 2
+    result = hub.push_pending(config, db_path=args.state_db, deadline_seconds=None)
+    print(f"pushed {result.pushed} run(s); {result.remaining} still queued")
+    if result.error:
+        print(f"error: {result.error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_hub_status(args: argparse.Namespace) -> int:
+    """This device's side of the hub: whether one is configured, and how
+    much of the history is still waiting to be pushed. Local only — it
+    doesn't contact the hub, so it answers the same with no signal."""
+    config = hub.load_config()
+    count, oldest = state.pending_push_summary(db_path=args.state_db)
+    if config is None:
+        print(f"no hub configured ({hub.URL_ENV} unset): run history is local only")
+        return 0
+    print(f"hub:    {config.url}")
+    print(f"device: {notify.load_device_name()} (locally; the hub names runs after the token)")
+    if not config.token:
+        print(f"error: {hub.TOKEN_ENV} is not set, so nothing can be pushed", file=sys.stderr)
+        return 1
+    print(f"queued: {count} run(s) not yet pushed" + (f", oldest {oldest}" if oldest else ""))
+    return 0
+
+
+def cmd_hub_token(args: argparse.Namespace) -> int:
+    """Mint a device token. The token goes in that device's hub.env; only
+    the digest line goes on the hub, so the hub never holds a usable one."""
+    token = hub.mint_token()
+    print(f"device token (put in {args.device}'s hub.env as {hub.TOKEN_ENV}=…):")
+    print(f"  {token}")
+    print(f"hub entry (append to {hub.DEVICE_TOKENS_ENV}, comma-separated):")
+    print(f"  {args.device}:{hub.token_digest(token)}")
     return 0
 
 
@@ -1956,8 +2024,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=20,
         help="How many most-recent runs to show (default 20)",
     )
+    status.add_argument(
+        "--all-devices", action="store_true",
+        help="Read the hub's combined history instead of this device's (needs GARDENER_HUB_URL)",
+    )
     status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     status.set_defaults(func=cmd_status)
+
+    hub_parser = sub.add_parser(
+        "hub",
+        help="Share run history across devices through a hub (optional; see docs/HUB.md)",
+    )
+    hub_sub = hub_parser.add_subparsers(dest="hub_command", required=True)
+    hub_serve = hub_sub.add_parser(
+        "serve",
+        help="Run the hub: accept pushes from devices and serve the dashboard over them",
+    )
+    hub_serve.add_argument("--host", default="127.0.0.1",
+                           help="Interface to bind (default 127.0.0.1; 0.0.0.0 in a container)")
+    hub_serve.add_argument("--port", type=int, default=dashboard.DEFAULT_PORT,
+                           help=f"Port (default {dashboard.DEFAULT_PORT})")
+    hub_serve.add_argument(
+        "--data-dir", type=Path, default=None,
+        help="Where the hub keeps its store (default: <state dir>/hub)",
+    )
+    hub_serve.set_defaults(func=cmd_hub_serve)
+    hub_sync = hub_sub.add_parser(
+        "sync", help="Push every run the hub hasn't acknowledged yet (the backfill)",
+    )
+    hub_sync.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    hub_sync.set_defaults(func=cmd_hub_sync)
+    hub_status = hub_sub.add_parser(
+        "status", help="Show this device's hub settings and how many runs are queued",
+    )
+    hub_status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    hub_status.set_defaults(func=cmd_hub_status)
+    hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
+    hub_token.add_argument("--device", required=True,
+                           help="The name the hub will show this device's runs under")
+    hub_token.set_defaults(func=cmd_hub_token)
 
     tail_transcript = sub.add_parser(
         "tail-transcript",

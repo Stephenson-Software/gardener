@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, doctor, garden, live, merge_allowlist, notify, overnight, repo_lock,
+    dashboard, dev_loop, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
     selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -119,6 +119,10 @@ def setUpModule():
     global _notifier_fence
     _notifier_fence = tempfile.TemporaryDirectory()
     os.environ.pop(notify.DISCORD_WEBHOOK_ENV_VAR, None)
+    # A device configured for a hub (RFC 0007) would otherwise push every
+    # run a test records to the operator's real hub. hub.env lives in the
+    # state dir, which the next line already fences.
+    os.environ.pop(hub.URL_ENV, None)
     os.environ["GARDENER_STATE_DIR"] = _notifier_fence.name
     os.environ[usage.ENV_ENABLED] = "false"
 

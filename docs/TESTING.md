@@ -206,8 +206,8 @@ since constructing a notifier resolves a device name and would otherwise
 read the operator's real `notify.env`; one test guards that redirection by
 asserting a device name that exists only in the tmp dir.
 `tests/test_usage.py` covers usage reporting end to end against a
-loopback `http.server` started in the test (the only server any test
-here talks to — never the real trace service): the three
+loopback `http.server` started in the test (never the real trace
+service): the three
 `GARDENER_USAGE_REPORTING_*` settings' precedence (env var, then the same
 name in `notify.env` under a tmp `GARDENER_STATE_DIR`, then the built-in
 default; a blank value falls through, only an explicit `0/false/no/off`
@@ -227,7 +227,29 @@ it also covers the client-wide `TRACE_USAGE_REPORTING` / `DO_NOT_TRACK`
 opt-out, which `test_usage.py` checks wins over gardener's own setting.
 `tests/test_cli.py`'s `setUpModule` fence also sets
 `GARDENER_USAGE_REPORTING_ENABLED=false`, since two tests there drive
-`main()` directly; `tests/test_garden.py` and
+`main()` directly, and unsets `GARDENER_HUB_URL`, so a hub-configured
+device's suite never pushes fixture runs to its real hub (`hub.env` is
+covered by the same temp state dir).
+`tests/test_hub.py` runs a real hub (`hub.HubHandler` on a loopback port
+over a temp store) and a real device store, so every push is the actual
+HTTP round trip and the actual inserts. UserAuth is a loopback stub
+speaking the contract `hub.UserAuthClient` documents. It covers the
+device side: `hub.env`/env precedence, the outbox draining oldest first
+in batches, the dispatch-path deadline leaving the rest queued, an
+unreachable hub never raising and keeping the run queued, recording a run
+pushing it through `cli._safe_record_run`, and `hub sync` backfilling a
+pre-RFC-0007 history and being a no-op the second time. On the hub side
+it covers idempotency (a re-sent batch stores nothing twice), a token
+storing every row under its own device name whatever the row claims, an unknown outcome refused and left
+queued, every non-`/healthz` route refusing anonymous requests, a device
+token reading `/api/v1/` but not the dashboard, the garden as the union of
+pushed lists, and `/live` named per-device. For UserAuth sign-in:
+redirect to `/login`, cookie attributes, the operator allowlist enforced
+both at sign-in *and* on every cookie (a token minted at UserAuth directly
+is refused), identical failure pages for a wrong password and an unknown
+user, one `/session/validate` per cache window, and sign-out revoking.
+Each security check was mutation-probed: removing it fails a test here.
+`tests/test_garden.py` and
 `tests/test_overnight.py` cover the garden JSON list and `overnight.py`'s
 pure rotation/batching/budget/resume-cursor/outcome-classification logic
 with real files in a tmp dir, including `order_by_issue_count` (pure sort

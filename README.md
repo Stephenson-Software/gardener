@@ -49,6 +49,11 @@ it*. See [Usage](#usage) below for the full command set.
   CLI by hand to see what it's doing; `/live` shows what each concurrent
   slot is doing right now and how close the run is to its usage limit. See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- **`gardener hub`** (optional): one run history across every device that
+  runs gardener. Devices still write locally first and push a copy, so a
+  hub that is down costs nothing but delay. The hub serves the normal
+  dashboard over the combined history, behind basic auth and/or UserAuth
+  sign-in. See [docs/HUB.md](docs/HUB.md).
 - **`gardener doctor`**: a read-only pre-flight check over gardener's own
   local state — the CLIs it shells out to, the state directory, every
   cache clone's refresh-readiness, and whether each garden/allow-list

@@ -214,6 +214,27 @@ See also [Merge allow-list mechanics](SAFETY.md#merge-allow-list-mechanics)
 in the safety model for exactly how this is enforced at the tool-scoping
 level.
 
+## `gardener hub` — sharing run history across devices
+
+Optional. Without it every device's run history stays local, exactly as
+before. With it, every device pushes its runs to one hub that serves the
+dashboard over all of them. [docs/HUB.md](HUB.md) has the full setup; the
+commands are:
+
+| Command | What it does |
+|---|---|
+| `gardener hub serve [--host H] [--port P] [--data-dir D]` | Runs the hub. Refuses to start without an operator credential. `--host` defaults to `127.0.0.1`; use `0.0.0.0` in a container behind TLS. `--data-dir` defaults to `<state dir>/hub`. |
+| `gardener hub token --device NAME` | Mints a device token, printing the token (for the device's `hub.env`) and the `NAME:sha256` entry for the hub's `GARDENER_HUB_DEVICE_TOKENS`. |
+| `gardener hub sync` | Pushes every run this device hasn't had acknowledged, with no time limit: the backfill after configuring a device, and the retry after an outage. Safe to repeat. |
+| `gardener hub status` | Shows this device's hub URL, device name, and how many runs are queued. Local only; doesn't contact the hub. |
+| `gardener status --all-devices` | Reads the hub's combined history instead of this device's, with a device column. |
+
+A device is configured by `GARDENER_HUB_URL` and `GARDENER_HUB_TOKEN`, from
+the environment or from `hub.env` in the state directory. Once set, every
+recorded run pushes the outbox after the local write, bounded to 20 s on
+the dispatch path. A failed push prints a `NOTE` line, leaves the runs
+queued, and never fails the run.
+
 ## `gardener doctor` — pre-flight check on gardener's own state
 
 `gardener doctor` is a read-only health check over everything an
