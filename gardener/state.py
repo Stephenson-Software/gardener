@@ -282,6 +282,48 @@ def list_runs(
     ]
 
 
+def runs_since(since: datetime, db_path: Optional[Path] = None) -> list[Run]:
+    """Every run recorded at or after `since`, oldest first.
+
+    `list_runs` is a row window, which is the wrong shape for "what has
+    this overnight invocation finished so far" and "what was spent in the
+    last five hours" — both are time windows, and a row count reaches back
+    however far it has to. The comparison is done on parsed timestamps
+    rather than as a SQL string comparison, for the same reason
+    `_parse_timestamp` is defensive: the db is a plain file an operator can
+    edit. The scan is newest-first by primary key and stops at the first
+    row older than `since`, so it reads the window and one row more rather
+    than the whole table."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return []
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    found: list[Run] = []
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute("SELECT * FROM runs ORDER BY id DESC"):
+            when = _parse_timestamp(r["timestamp"])
+            if when is not None and when < since:
+                break
+            found.append(
+                Run(
+                    id=r["id"],
+                    repo=r["repo"],
+                    timestamp=r["timestamp"],
+                    mode=r["mode"],
+                    gap_summary=r["gap_summary"],
+                    outcome=r["outcome"],
+                    exit_code=r["exit_code"],
+                    duration_ms=r["duration_ms"],
+                    cost_usd=r["cost_usd"],
+                    claude_session_id=r["claude_session_id"],
+                )
+            )
+    found.reverse()
+    return found
+
+
 def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
     """A recorded `timestamp` as an aware datetime, or None if it can't be
     read as one.

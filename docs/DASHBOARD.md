@@ -2,7 +2,8 @@
 
 Covers the headline session panel, the three progress bars an `overnight`
 run drives, the garden view — the panel the dashboard is mostly *for* —
-and what the page does when it can no longer reach the server behind it.
+what the page does when it can no longer reach the server behind it, and
+the separate [live view](#the-live-view) at `/live`.
 
 ## The Latest session panel
 
@@ -361,3 +362,40 @@ Transitions — live↔stale, and the set of in-flight repos changing — are
 also written to a visually hidden `role="status"` live region, so a
 screen reader learns about them at all. Deliberately only on transitions:
 the heartbeat caption changes every four seconds and would babble.
+
+## The live view
+
+`/live` (linked from the main page's header) answers one question — *what
+is the overnight run doing right now* — and leaves history and the garden
+to the main page. It polls `/api/live` every 3 s and ticks its clocks every
+second in between. `live.py`'s module docstring is the source of truth for
+where each fact comes from; in short:
+
+| Panel | Shows | Source |
+|---|---|---|
+| **Header** | Running / Finished / Aborted / Stopped, session id, start, time left and when the budget ends, tonight's list and the garden cycle | `parse_overnight_start`/`log_started_at` over the newest `overnight-*.log`; `sessions.list_sessions` for liveness; `parse_run_end` for how it ended |
+| **Alerts** | A usage-limit hit, a run whose process is gone, a slot quiet for `STALL_SECONDS`, spend inside the past-hit band, slots idle waiting on their batch | Derived from the panels below |
+| **Slots** | One card per repo in the current batch: phase (cloning, preparing, running, done · waiting, stopped), its clock, its latest tool call and what it last said, tool-call and token counts; a finished repo's recorded result | The batch line, `checked out at` + `session transcript` lines, the transcript itself via `TranscriptCache`, and `state.runs_since` for results |
+| **Pace** | Finished, errors, spend, average repo time, repos and dollars per hour, and a projection of how many more repos fit in the budget | `state.runs_since(run start)` |
+| **Usage limit** | Trailing-5 h gardener spend against the band of the same figure measured just before each recent hit, and the recent hits | `state.runs_since(30 days)`, `live.limit_hits` |
+| **Finished this run** | Every run recorded since the run started, newest first, `#N` references linked | `state.runs_since(run start)` |
+
+Two properties of `cmd_overnight` shape the slots panel. A batch is
+waited on as a whole, so a slot whose repo finished early stays on screen
+as *done · waiting* until the slowest repo in its batch finishes — that
+idle capacity is the thing worth seeing, and an alert names the repo
+holding the batch. And the log lines of concurrent dispatches interleave,
+so a transcript is tied to its repo by clone directory
+(`transcript.encode_cwd`), never by where its line fell in the log.
+
+The usage gauge is a proxy and says so on the page: Claude Code records
+the limit only once it has been hit, gardener's `cost_usd` is the
+API-equivalent figure `claude -p` reports rather than the plan's meter,
+and interactive Claude use shares the same window without appearing here.
+Over the history it was built against, hits fell between $69 and $161 of
+trailing-5 h spend — which is why it is drawn as a band and the "near"
+alert fires at the band's lower edge.
+
+`LIVE_SCHEMA` works like `PAYLOAD_SCHEMA`: a tab left open across a
+self-update refuses a payload it doesn't understand and asks to be
+reloaded instead of rendering it.

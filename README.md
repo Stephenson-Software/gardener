@@ -46,7 +46,8 @@ it*. See [Usage](#usage) below for the full command set.
 - **`gardener dashboard`**: a local, read-only web UI over `gardener
   status`'s own run history plus every `tend`/`overnight` log still being
   written to, so an unattended overnight run doesn't require polling the
-  CLI by hand to see what it's doing. See
+  CLI by hand to see what it's doing; `/live` shows what each concurrent
+  slot is doing right now and how close the run is to its usage limit. See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
 - **`gardener doctor`**: a read-only pre-flight check over gardener's own
   local state — the CLIs it shells out to, the state directory, every

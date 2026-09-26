@@ -79,13 +79,17 @@ gardener/
                        garden/allow-list files, and the active run log;
                        build_garden_rows() joins the first three into the
                        garden view's table/plant-plot rows
+    live.py          — the dashboard's /live page: per-slot activity read
+                       incrementally from each dispatch's transcript, run
+                       pace, and the usage-limit gauge (see Dashboard's
+                       "The live view")
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests, one test_<module>.py per module above
                        that has runtime logic (state, cli parsing/templating/
                        notify-severity, mocked dispatch, dev_loop,
                        merge_allowlist, garden, overnight, conventions,
                        repo_lock, notify, transcript, run_log, sessions,
-                       dashboard, selfupdate, usage, trace_client)
+                       dashboard, live, selfupdate, usage, trace_client)
 ```
 
 ## Relationship to a conventions repo

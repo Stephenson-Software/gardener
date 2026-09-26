@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, doctor, garden, merge_allowlist, notify, overnight, repo_lock,
+    dashboard, dev_loop, doctor, garden, live, merge_allowlist, notify, overnight, repo_lock,
     selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -2411,6 +2411,12 @@ class TestCmdOvernight(unittest.TestCase):
                 self.assertEqual(
                     [dashboard.parse_batch_progress([line]) for line in batch_lines],
                     expected,
+                )
+                # The live view reads the same line for the batch's repos
+                # (its slots); every garden repo appears in exactly one.
+                self.assertEqual(
+                    sorted(r for line in batch_lines for r in live.current_batch_lines([line])[0]),
+                    ["owner/a", "owner/b", "owner/c"],
                 )
 
     @patch("gardener.cli.notify.default_notifier")
