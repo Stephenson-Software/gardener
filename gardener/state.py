@@ -4,10 +4,14 @@ One row per dispatched `claude` run gardener records — `align`, `tend`,
 and the one-off `create-dev-loop` bootstrap dispatch that `tend` runs
 first when a target repo has no `<slug>-dev-loop` skill yet (see
 `cli.py`'s `_dispatch_tend`). This is deliberately the only place
-gardener keeps state across runs — no config daemon, no server, just a
-local db file next to everything else gardener caches
-(`~/.local/state/gardener/` by default, overridable for tests via
-`GARDENER_STATE_DIR`).
+gardener keeps state across runs — no config daemon, just a local db file
+next to everything else gardener caches (`~/.local/state/gardener/` by
+default, overridable for tests via `GARDENER_STATE_DIR`).
+
+A hub (`hub.py`, RFC 0007) is an optional *copy*, not a replacement: the
+local file is always written first and stays the device's record. The hub
+stores the same `runs` table, fed by every device's pushes, which is why
+every reader here orders by time rather than by `id` (`NEWEST_FIRST`).
 """
 from __future__ import annotations
 
@@ -705,6 +709,95 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
         )
         for r in rows
     }
+
+
+def pending_push(db_path: Optional[Path] = None, limit: int = 100) -> list[Run]:
+    """Runs a hub has not acknowledged yet (`pushed_at IS NULL`), oldest
+    first, so an outbox that drains in several batches sends history in
+    the order it happened. Reads through the writer path: the outbox only
+    exists once the migration has added `pushed_at`."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return []
+    with closing(_connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM runs WHERE pushed_at IS NULL ORDER BY timestamp, id LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_row_to_run(r) for r in rows]
+
+
+def pending_push_summary(db_path: Optional[Path] = None) -> tuple[int, Optional[str]]:
+    """How many runs are waiting for a hub, and the timestamp of the oldest.
+    A read: an unmigrated db has no outbox column yet, so it reports
+    every row as waiting, which is what the first push will send."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return 0, None
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
+        if "pushed_at" not in _columns(conn):
+            count, oldest = conn.execute("SELECT COUNT(*), MIN(timestamp) FROM runs").fetchone()
+        else:
+            count, oldest = conn.execute(
+                "SELECT COUNT(*), MIN(timestamp) FROM runs WHERE pushed_at IS NULL"
+            ).fetchone()
+    return count, oldest
+
+
+def mark_pushed(run_uuids: list[str], when: str, db_path: Optional[Path] = None) -> None:
+    """Record that a hub acknowledged these runs. Only the uuids the hub
+    listed as held are passed here, so a run the hub refused stays in the
+    outbox."""
+    if not run_uuids:
+        return
+    db_path = db_path or default_db_path()
+    with closing(_connect(db_path)) as conn:
+        conn.executemany(
+            "UPDATE runs SET pushed_at = ? WHERE run_uuid = ? AND pushed_at IS NULL",
+            [(when, u) for u in run_uuids],
+        )
+        conn.commit()
+
+
+def insert_runs(runs: list[Run], db_path: Optional[Path] = None) -> list[str]:
+    """Store runs pushed from a device, and return the uuids of every one
+    of them the store now holds.
+
+    Idempotent by `run_uuid`: a run already present is left alone, not
+    updated, and still reported as held. A device whose previous push
+    succeeded but whose copy of the response was lost resends the same
+    batch, and this is what makes that safe."""
+    if not runs:
+        return []
+    db_path = db_path or default_db_path()
+    with closing(_connect(db_path)) as conn:
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO runs
+                    (repo, timestamp, mode, gap_summary, outcome,
+                     exit_code, duration_ms, cost_usd, claude_session_id,
+                     run_uuid, device)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_uuid) DO NOTHING
+                """,
+                [
+                    (r.repo, r.timestamp, r.mode, r.gap_summary, r.outcome,
+                     r.exit_code, r.duration_ms, r.cost_usd, r.claude_session_id,
+                     r.run_uuid, r.device)
+                    for r in runs
+                ],
+            )
+        uuids = [r.run_uuid for r in runs]
+        placeholders = ",".join("?" for _ in uuids)
+        held = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT run_uuid FROM runs WHERE run_uuid IN ({placeholders})", uuids
+            )
+        }
+    return [u for u in uuids if u in held]
 
 
 def now_iso() -> str:

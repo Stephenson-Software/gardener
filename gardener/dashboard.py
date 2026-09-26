@@ -526,7 +526,18 @@ def build_status(
     log_tail_lines: int = 400,
     repo: Optional[str] = None,
     history_days: int = 14,
+    garden_repos: Optional[list[str]] = None,
+    allowed_repos: Optional[list[str]] = None,
+    hub: bool = False,
 ) -> dict:
+    """The `/api/status` payload.
+
+    `garden_repos`/`allowed_repos` replace the two opt-in list files when
+    given. The hub (`gardener/hub.py`, RFC 0007) passes the union of what
+    each device last pushed, since its own state dir holds no garden. `hub`
+    marks the payload as coming from a store that combines devices, so the
+    page can say that the log-backed panels are per-device instead of
+    rendering them empty, which would read as "nothing is running"."""
     base = state_dir or state.default_state_dir()
     db_path = base / "gardener.sqlite3"
     logs_dir = default_logs_dir(base)
@@ -601,10 +612,12 @@ def build_status(
     # there "the last 40" is exactly what it claims to be.
     session = state.session_stats(db_path=db_path)
 
-    garden_repos = _safe_list(lambda: garden.list_garden(path=base / "garden.json"))
-    allowed_repos = _safe_list(
-        lambda: merge_allowlist.list_allowed(path=base / "merge_allowlist.json")
-    )
+    if garden_repos is None:
+        garden_repos = _safe_list(lambda: garden.list_garden(path=base / "garden.json"))
+    if allowed_repos is None:
+        allowed_repos = _safe_list(
+            lambda: merge_allowlist.list_allowed(path=base / "merge_allowlist.json")
+        )
     garden_rows = build_garden_rows(
         garden_repos, allowed_repos, state.repo_stats(db_path=db_path), in_progress
     )
@@ -633,6 +646,7 @@ def build_status(
     return {
         "schema": PAYLOAD_SCHEMA,
         "generated_at": state.now_iso(),
+        "hub": hub,
         # Echoed back so the page can caption the runs table with the
         # filter actually applied, rather than assuming its own request
         # shape survived.
@@ -872,6 +886,10 @@ PAGE_HTML = """<!doctype html>
   td.repo { white-space: nowrap; font-family: var(--mono); font-size: 0.8rem; }
   td.summary { color: var(--text); }
   td.device { white-space: nowrap; color: var(--muted); }
+  /* Log-backed panels a hub has no data for; see renderHubChrome. */
+  .is-hub .log-panel, .is-hub #live-link, .is-hub #cycle, .is-hub #budget, .is-hub #batch { display: none; }
+  #hub-user { margin-left: auto; }
+  .is-hub #hub-user + #live-link { margin-left: 0; }
   .outcome-error { color: var(--err); }
   .outcome-tend, .outcome-created { color: var(--accent); }
   pre#log {
@@ -1244,7 +1262,8 @@ PAGE_HTML = """<!doctype html>
   <h1><span aria-hidden="true">🌱</span> gardener dashboard</h1>
   <span class="sub" id="updated">loading…</span>
   <span id="stale-badge">⚠ stale</span>
-  <a class="sub" href="/live" style="margin-left:auto">live view →</a>
+  <span class="sub" id="hub-user" hidden></span>
+  <a class="sub" id="live-link" href="/live" style="margin-left:auto">live view →</a>
 </header>
 <!-- The page rewrites every panel on a 4 s poll and had no live region at
      all, so a tend starting, the error count moving, or the page going
@@ -2397,7 +2416,23 @@ function renderBudget(run) {
     + (pct == null ? "" : `<div class="progress-bar"><div style="width:${pct}%"></div></div>`);
 }
 
+// A hub (RFC 0007) serves this page over the run history of every device,
+// but logs, sessions, and the overnight cursor stay on the device that
+// wrote them. Those panels say so rather than render empty, since an empty
+// "Currently tending" reads as "nothing is running".
+function renderHubChrome(data) {
+  document.body.classList.toggle("is-hub", !!data.hub);
+  const who = document.getElementById("hub-user");
+  if (data.hub && data.hub_user) {
+    who.hidden = false;
+    who.innerHTML = `signed in as ${esc(data.hub_user)} · <a href="/logout">sign out</a>`;
+  } else {
+    who.hidden = true;
+  }
+}
+
 function renderStatus(data) {
+  renderHubChrome(data);
   // The window is stated, never implied: this panel used to be headed
   // "Tonight" over whatever the last 40 rows happened to span (issue #105).
   const st = data.stats;
@@ -2415,7 +2450,7 @@ function renderStatus(data) {
     <div class="stat"><div class="n">${st.session_run_count}</div><div class="l">runs</div></div>
     <div class="stat"><div class="n">${fmtCost(st.session_cost_usd)}</div><div class="l">cost</div></div>
     <div class="stat${st.session_error_count ? " is-err" : ""}"><div class="n">${st.session_error_count}</div><div class="l">errors</div></div>
-    <div class="stat${liveCount ? " is-live" : ""}"><div class="n">${liveCount}</div><div class="l">in flight</div></div>
+    <div class="stat${liveCount ? " is-live" : ""}"><div class="n">${data.hub ? "—" : liveCount}</div><div class="l">in flight</div></div>
   `;
 
   renderCycle(data.overnight_cycle);
@@ -2433,7 +2468,9 @@ function renderStatus(data) {
     : `<div class="empty">no overnight batch in this log</div>`;
 
   const ip = document.getElementById("in-progress");
-  ip.innerHTML = liveCount
+  ip.innerHTML = data.hub
+    ? `<span class="empty">per-device: open the dashboard on the device that is dispatching</span>`
+    : liveCount
     ? data.in_progress.map(r =>
         `<span class="pill live" title="${esc(r)}">${esc(r)}</span>`).join("")
     : `<span class="empty">nothing in flight</span>`;
