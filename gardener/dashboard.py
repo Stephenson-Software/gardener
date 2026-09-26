@@ -1659,10 +1659,9 @@ let selectedPlant = null;
 // Seconds/minutes granularity, unlike fmtAge's days — this describes how
 // old the snapshot on screen is during a run of failed 4 s polls, where
 // "just now" would be wrong within half a minute.
-function fmtSince(iso) {
-  const t = Date.parse(iso ?? "");
-  if (isNaN(t)) return "unknown age";
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+// An elapsed time in ms as "12s ago" / "3m ago" / "2h ago".
+function fmtAgo(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return s + "s ago";
   if (s < 3600) return Math.round(s / 60) + "m ago";
   return Math.round(s / 3600) + "h ago";
@@ -2112,6 +2111,14 @@ try { showGardenView(localStorage.getItem("gardenView") || "plot"); } catch (e) 
 // on rendering the last good snapshot, and a dashboard whose server died
 // used to look like a healthy one with a small caption (issue #116).
 let lastGoodAt = null;
+// When THIS browser received that snapshot, on its own clock. Every age the
+// page measures comes from this, never from `lastGoodAt`: that is the
+// server's clock, and subtracting it from `Date.now()` folds any skew
+// between the two machines into the page's sense of its own freshness. A
+// viewer whose clock ran ~10 s ahead of a remote hub (a WSL box, measured)
+// saw a page that went "stale" a second after every successful poll and
+// never recovered (/live already corrects for this with its skewMs).
+let lastGoodReceivedAt = null;
 let consecutiveFailures = 0;
 let runsRepoFilter = null;
 
@@ -2128,6 +2135,7 @@ function announce(msg) {
 function markFresh(generatedAt) {
   const wasStale = document.body.classList.contains("stale");
   lastGoodAt = generatedAt;
+  lastGoodReceivedAt = Date.now();
   consecutiveFailures = 0;
   document.body.classList.remove("stale");
   // First successful poll: the skeleton comes off, and every panel stops
@@ -2147,7 +2155,7 @@ function markStale(reason) {
   document.getElementById("updated").textContent =
     (neverLoaded
       ? "no data yet"
-      : "stale — showing data from " + fmtSince(lastGoodAt))
+      : "stale — showing data from " + fmtAgo(Date.now() - lastGoodReceivedAt))
     + " · " + reason + " (" + failed + ")";
   // "never loaded" is a different state from "went stale", and the panels
   // have to say so too rather than only the caption: on a cold start whose
@@ -2179,8 +2187,8 @@ const POLL_TIMEOUT_MS = 10000;
 // stopped happening still goes stale on time.
 const STALE_AFTER_MS = 3 * 4000;
 setInterval(() => {
-  if (lastGoodAt === null || document.body.classList.contains("stale")) return;
-  if (Date.now() - Date.parse(lastGoodAt) > STALE_AFTER_MS) markStale("no response");
+  if (lastGoodReceivedAt === null || document.body.classList.contains("stale")) return;
+  if (Date.now() - lastGoodReceivedAt > STALE_AFTER_MS) markStale("no response");
 }, 1000);
 
 async function refresh(force) {

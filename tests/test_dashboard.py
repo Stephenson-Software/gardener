@@ -1185,12 +1185,21 @@ class TestPageHtmlInvariants(unittest.TestCase):
 
     def test_the_stale_caption_reports_the_snapshot_age_not_a_static_string(self):
         """The point of the staleness treatment is answering "how old is
-        what I'm looking at". `generated_at` is already in the payload, so
-        the caption is built from it via the seconds-granularity formatter
-        rather than `fmtAge`, whose smallest bucket ("just now") covers the
-        first hour."""
-        self.assertIn("fmtSince(lastGoodAt)", dashboard.PAGE_HTML)
+        what I'm looking at", via the seconds-granularity formatter rather
+        than `fmtAge`, whose smallest bucket ("just now") covers the first
+        hour."""
+        self.assertIn("fmtAgo(Date.now() - lastGoodReceivedAt)", dashboard.PAGE_HTML)
         self.assertNotIn("fetch failed — retrying…", dashboard.PAGE_HTML)
+
+    def test_page_age_is_measured_on_the_browsers_clock_not_the_servers(self):
+        """`generated_at` is the server's clock. Subtracting it from the
+        browser's `Date.now()` folds the skew between the two machines into
+        the page's freshness: a viewer ~10 s ahead of a remote hub saw the
+        page go stale a second after every successful poll, forever. Every
+        age is measured from when the browser received the snapshot."""
+        self.assertIn("lastGoodReceivedAt = Date.now();", dashboard.PAGE_HTML)
+        self.assertIn("Date.now() - lastGoodReceivedAt > STALE_AFTER_MS", dashboard.PAGE_HTML)
+        self.assertNotIn("Date.parse(lastGoodAt)", dashboard.PAGE_HTML)
 
 
 class TestLiveLogPicker(unittest.TestCase):

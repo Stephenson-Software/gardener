@@ -350,7 +350,11 @@ Three failures the caption alone used to miss:
   be live. Every fetch now carries an `AbortController` timeout, and a
   separate one-second ticker re-derives the caption's age from the last
   good payload, so a page whose polls simply stopped happening still goes
-  stale on time.
+  stale on time. That age is measured from when *the browser* received the
+  payload, on its own clock, and never by subtracting the server's
+  `generated_at` from the browser's clock. With a remote hub those are two
+  machines, and a viewer whose clock ran ~10 s ahead saw the page go stale a
+  second after every successful poll.
 - **A payload the page doesn't understand.** Missing keys stringify to
   `"undefined"` rather than throwing, so a renamed key rendered
   `undefined runs` / `undefined errors` under a confident heartbeat.
