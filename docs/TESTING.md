@@ -385,7 +385,9 @@ liveness, and the clock all injected so nothing real is ever signalled;
 test invokes a real `git`, `gh`, or network call — including the two
 severity rules the command's exit code depends on (a modified tracked file
 is an ERROR, an untracked-only tree is a WARN, since the refresh's `git
-clean -fdx` is meant to remove those) and the two "don't cry wolf" ones (an
+clean -ffdx` is meant to remove those — with the prescribed fix doubling
+`-f` too, and untracked directories holding a nested git repo counted in
+the message, `.git` file or directory, at any depth) and the two "don't cry wolf" ones (an
 unresolvable repo is SKIPPED rather than reported as renamed, because
 offline/rate-limited/deleted are the same answer from `gh`; and a repo whose
 per-repo lock is currently held is skipped without shelling out to git at

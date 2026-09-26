@@ -10,7 +10,7 @@ gets its own clone directory), but nothing stops a second, independent
 `gardener align`/`gardener tend`/`gardener overnight` invocation (run by
 hand, or two overlapping `overnight` runs) from targeting a repo another
 process is already mid-dispatch on. Two processes cloning/checking out/
-`git clean -fdx`-ing the same working tree concurrently is exactly the
+`git clean -ffdx`-ing the same working tree concurrently is exactly the
 failure mode that has corrupted `.git/objects` in this ecosystem before —
 a documented `git worktree add`/`remove` corruption incident from a
 separate local project. That was a different mechanism (concurrent

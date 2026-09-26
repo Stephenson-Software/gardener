@@ -68,7 +68,7 @@ REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/(?!\.\.?$)[A-Za-z0-9.][A-Za-z
 REFRESH_TIMEOUT_SECONDS = 60
 CLEAN_TIMEOUT_SECONDS = 300
 
-# Directories `git clean -fdx` is told to leave alone during a refresh.
+# Directories `git clean -ffdx` is told to leave alone during a refresh.
 #
 # These are dependency caches: large, expensive to recreate, never part of
 # the repo's source, and — unlike a build output directory — not something
@@ -208,7 +208,11 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
                 f"cache dir {dest} exists but its origin doesn't match {repo} — refusing to reuse it"
             )
         default_branch = _default_branch_name(repo)
-        clean_cmd = ["git", "clean", "-fdx"]
+        # -ff, not -f: a single -f makes `git clean` skip any untracked
+        # directory that is itself a git repo (or contains one), so the
+        # reference clones a dev-loop run leaves behind (`.pv-*/`, `.ref-*/`)
+        # survived every refresh and accumulated one tend at a time.
+        clean_cmd = ["git", "clean", "-ffdx"]
         for keep in PRESERVED_DEPENDENCY_DIRS:
             clean_cmd += ["-e", keep]
         for cmd, cmd_timeout in (

@@ -187,7 +187,7 @@ class TestCacheClone(unittest.TestCase):
             self.assertEqual(errors[0].repo, "Owner/repo")
 
     def test_untracked_only_is_a_warning_not_an_error(self):
-        # The refresh runs `git clean -fdx` and is meant to remove these.
+        # The refresh runs `git clean -ffdx` and is meant to remove these.
         with tempfile.TemporaryDirectory() as tmp:
             path = _clone_dir(Path(tmp), "Owner__repo")
             run = FakeRun({
@@ -196,6 +196,42 @@ class TestCacheClone(unittest.TestCase):
             })
             findings = doctor.check_cache_clone(path, run_fn=run, locked_fn=_never_locked)
             self.assertEqual([f.severity for f in findings], [Severity.WARN])
+            self.assertNotIn("nested git repo", findings[0].message)
+
+    def test_untracked_fix_removes_nested_repos_too(self):
+        # 2026-09-19: every untracked path in two clones was a nested git
+        # repo, and the `clean -nd` this used to prescribe (then `-fd`)
+        # removed none of them — git skips a nested repo unless -f is
+        # given twice.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _clone_dir(Path(tmp), "Owner__repo")
+            run = FakeRun({
+                ("git", "remote"): _completed(stdout="https://github.com/Owner/repo.git"),
+                ("git", "status"): _completed(stdout="?? scratch.md\n"),
+            })
+            findings = doctor.check_cache_clone(path, run_fn=run, locked_fn=_never_locked)
+            self.assertIn("clean -nffd", findings[0].fix)
+
+    def test_nested_git_repos_are_called_out(self):
+        # A `.git` directory at the top of an untracked dir (`.pv-x/`), one
+        # a level deeper (`.pv-y/inner/`), and a `.git` file (a worktree or
+        # submodule pointer) all count; a plain untracked dir does not.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _clone_dir(Path(tmp), "Owner__repo")
+            (path / ".pv-x" / ".git").mkdir(parents=True)
+            (path / ".pv-y" / "inner" / ".git").mkdir(parents=True)
+            (path / ".ref-z").mkdir()
+            (path / ".ref-z" / ".git").write_text("gitdir: elsewhere\n")
+            (path / "plain" / "sub").mkdir(parents=True)
+            run = FakeRun({
+                ("git", "remote"): _completed(stdout="https://github.com/Owner/repo.git"),
+                ("git", "status"): _completed(
+                    stdout="?? .pv-x/\n?? .pv-y/\n?? .ref-z/\n?? plain/\n?? scratch.md\n"
+                ),
+            })
+            findings = doctor.check_cache_clone(path, run_fn=run, locked_fn=_never_locked)
+            self.assertEqual([f.severity for f in findings], [Severity.WARN])
+            self.assertIn("5 untracked path(s) (3 of them holding a nested git repo", findings[0].message)
 
     def test_origin_mismatch_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
