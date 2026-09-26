@@ -85,6 +85,50 @@ class TestState(unittest.TestCase):
         self.assertEqual(len(rows), 2)
 
 
+class TestLatestSuccessAt(unittest.TestCase):
+    """What `cli.find_orphaned_pr` compares a marked PR's creation time
+    against (issue #164) — so only a *successful* run of the named mode on
+    the named repo may count."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _record(self, repo, mode, outcome, timestamp):
+        state.record_run(
+            state.Run(repo=repo, mode=mode, outcome=outcome, timestamp=timestamp),
+            db_path=self.db_path,
+        )
+
+    def test_missing_db_returns_none(self):
+        self.assertIsNone(state.latest_success_at("a/b", "tend", db_path=self.db_path))
+
+    def test_newest_successful_run_of_that_repo_and_mode(self):
+        self._record("a/b", "tend", "tend", "2026-09-01T00:00:00+00:00")
+        self._record("a/b", "tend", "tend", "2026-09-03T00:00:00+00:00")
+        # Inserted last, so newest by id: the answer must come from the
+        # timestamps, not insertion order.
+        self._record("a/b", "tend", "tend", "2026-09-02T00:00:00+00:00")
+        got = state.latest_success_at("a/b", "tend", db_path=self.db_path)
+        self.assertEqual(got.isoformat(), "2026-09-03T00:00:00+00:00")
+
+    def test_errors_other_repos_other_modes_and_bad_timestamps_are_ignored(self):
+        self._record("a/b", "tend", "tend", "2026-09-01T00:00:00+00:00")
+        self._record("a/b", "tend", "error", "2026-09-05T00:00:00+00:00")
+        self._record("a/other", "tend", "tend", "2026-09-05T00:00:00+00:00")
+        self._record("a/b", "create-dev-loop", "created", "2026-09-05T00:00:00+00:00")
+        self._record("a/b", "tend", "tend", "not a timestamp")
+        got = state.latest_success_at("a/b", "tend", db_path=self.db_path)
+        self.assertEqual(got.isoformat(), "2026-09-01T00:00:00+00:00")
+
+    def test_no_successful_run_returns_none(self):
+        self._record("a/b", "tend", "error", "2026-09-05T00:00:00+00:00")
+        self.assertIsNone(state.latest_success_at("a/b", "tend", db_path=self.db_path))
+
+
 class TestRepoStats(unittest.TestCase):
     """`repo_stats` is what the dashboard's garden plot draws a plant from,
     so it aggregates the *whole* history, not a recent-N window."""

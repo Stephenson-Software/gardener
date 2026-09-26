@@ -152,6 +152,18 @@ branch from the default branch — see `dev_loop.py`'s `build_tend_prompt`
 for the exact instructions. Once a human merges or closes that PR, it
 naturally stops matching on the next run — no separate cleanup needed.
 
+The marker can't tell an interrupted run's PR apart from one a run
+*deliberately* left open — handed off for a human to merge or to perform
+a manual verification the run couldn't. So a marked PR only counts as
+orphaned if it was created after the repo's newest *successful* `tend` in
+this device's run history (`state.latest_success_at`): a `tend` that
+finished after the PR existed either opened it or was already handed it,
+and ended on purpose. An errored or timed-out `tend` doesn't count, since
+that is the interruption this exists to recover from. The history is
+per-device, so a PR another device handed off is picked up once here
+before it, too, reads as handed off; an unreadable state db disables this
+filter rather than the check.
+
 ## Concurrent dispatch safety
 
 Nothing stops two independent `gardener` invocations from targeting the

@@ -324,6 +324,30 @@ def runs_since(since: datetime, db_path: Optional[Path] = None) -> list[Run]:
     return found
 
 
+def latest_success_at(repo: str, mode: str, db_path: Optional[Path] = None) -> Optional[datetime]:
+    """When `repo` last recorded a `mode` run whose outcome is in
+    `SUCCESS_OUTCOMES`, or None if it never has (or the db doesn't exist).
+
+    Every writer records `timestamp` *after* the dispatch returns, so this
+    is when the newest successful run finished, not when it started — which
+    is what `cli.py`'s `find_orphaned_pr` needs: a `tend` that completed
+    after a marked PR was opened either opened that PR itself or was handed
+    it as a continuation, and either way ended deliberately rather than
+    being interrupted (issue #164). Rows whose timestamp can't be parsed are
+    skipped rather than raised, per `_parse_timestamp`."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return None
+    placeholders = ",".join("?" for _ in SUCCESS_OUTCOMES)
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
+        rows = conn.execute(
+            f"SELECT timestamp FROM runs WHERE repo = ? AND mode = ? AND outcome IN ({placeholders})",
+            (repo, mode, *sorted(SUCCESS_OUTCOMES)),
+        ).fetchall()
+    parsed = [when for (value,) in rows if (when := _parse_timestamp(value)) is not None]
+    return max(parsed, default=None)
+
+
 def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
     """A recorded `timestamp` as an aware datetime, or None if it can't be
     read as one.
