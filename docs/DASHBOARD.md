@@ -58,6 +58,22 @@ days of history read as one morning. `?repo=` and `?limit=` on
 `/api/status` narrow it — `state.list_runs()` always accepted both, and
 nothing ever passed them.
 
+Every run records the **device** that dispatched it (`GARDENER_DEVICE_NAME`,
+else the notify.env value, else the hostname — the same name an alert's
+footer carries). The table grows a **Device** column only when the rows in
+its window come from more than one device (`multi_device` in the payload).
+A device's own store only ever holds its own runs, so the column appears
+on a store that combines devices (RFC 0007's hub) and stays out of the way
+everywhere else.
+
+Every reader orders runs by **timestamp**, newest first, with `id` as the
+tie-break (`state.NEWEST_FIRST`). In a local store the two orders are the
+same. In a combined store they are not: a device that was offline pushes
+its runs late, and `id` order would put last night's runs in this
+morning's session. A timestamp that doesn't start like a date sorts after
+every readable one, so an operator-edited row can't stand in for the
+latest session.
+
 ## Overnight progress: three different denominators
 
 Three progress bars sit under the session stats while an `overnight` run is

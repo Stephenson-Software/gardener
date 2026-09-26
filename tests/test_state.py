@@ -370,25 +370,46 @@ class TestSessionStats(unittest.TestCase):
         self._record("2026-08-09T01:05:00+00:00", repo="owner/b")
         self.assertEqual(state.session_stats(db_path=self.db_path).runs, 2)
 
-    def test_an_unreadable_timestamp_ends_the_session_rather_than_joining_it(self):
+    def test_an_unreadable_timestamp_sorts_oldest_and_ends_the_walk(self):
         self._record("2026-08-09T01:00:00+00:00")
         self._record("not a timestamp")
         self._record("2026-08-09T02:00:00+00:00")
 
-        # The two readable runs either side of the unreadable one are not
-        # silently merged across it — the walk stops where it can no longer
-        # reason about the gap.
+        # Recency is the timestamp, not the insertion order, and an
+        # unreadable one has no place in time: it sorts after every
+        # readable row, where the walk stops at it rather than folding it
+        # into the session.
         got = state.session_stats(db_path=self.db_path)
-        self.assertEqual(got.runs, 1)
-        self.assertEqual(got.started_at, "2026-08-09T02:00:00+00:00")
+        self.assertEqual(got.runs, 2)
+        self.assertEqual(got.started_at, "2026-08-09T01:00:00+00:00")
+        self.assertEqual(got.ended_at, "2026-08-09T02:00:00+00:00")
 
     def test_an_unreadable_newest_timestamp_does_not_swallow_the_history(self):
         self._record("2026-08-09T01:00:00+00:00")
         self._record("")
 
+        # Recorded last, but it is not the latest session: that would
+        # replace the real one with a single row nobody can place.
         got = state.session_stats(db_path=self.db_path)
         self.assertEqual(got.runs, 1)
-        self.assertEqual(got.started_at, "")
+        self.assertEqual(got.started_at, "2026-08-09T01:00:00+00:00")
+
+    def test_rows_inserted_out_of_time_order_are_read_in_time_order(self):
+        # A combined store (the hub) receives a device's runs when it
+        # pushes them, so a phone that was offline all night inserts last
+        # night's runs after this morning's. `id` order would put them in
+        # this morning's session.
+        self._record("2026-08-10T09:00:00+00:00")
+        self._record("2026-08-09T01:00:00+00:00")
+        self._record("2026-08-09T02:00:00+00:00")
+
+        got = state.session_stats(db_path=self.db_path)
+        self.assertEqual(got.runs, 1)
+        self.assertEqual(got.started_at, "2026-08-10T09:00:00+00:00")
+        self.assertEqual(
+            [r.timestamp for r in state.list_runs(db_path=self.db_path)],
+            ["2026-08-10T09:00:00+00:00", "2026-08-09T02:00:00+00:00", "2026-08-09T01:00:00+00:00"],
+        )
 
     def test_naive_and_zulu_timestamps_are_read_as_utc(self):
         # Nothing gardener writes looks like either, but the db is a plain
@@ -658,3 +679,136 @@ class TestReadPathDoesNotWrite(unittest.TestCase):
                 self.assertIn("no such table", str(missing.exception))
             finally:
                 writer.rollback()
+
+
+#: The `runs` schema every gardener before RFC 0007 created, verbatim, so
+#: the migration is tested against the shape real devices actually hold.
+_LEGACY_SCHEMA = """
+CREATE TABLE runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    gap_summary TEXT,
+    outcome TEXT NOT NULL,
+    exit_code INTEGER,
+    duration_ms INTEGER,
+    cost_usd REAL,
+    claude_session_id TEXT
+);
+"""
+
+
+class TestDeviceIdentityMigration(unittest.TestCase):
+    """RFC 0007's `run_uuid`/`device`/`pushed_at` columns, added to a db an
+    older gardener created without losing or rewriting what it holds."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "gardener.sqlite3"
+        env = patch.dict("os.environ", {"GARDENER_DEVICE_NAME": "test-box"}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _legacy_db(self, rows):
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
+            conn.execute(_LEGACY_SCHEMA)
+            conn.executemany(
+                "INSERT INTO runs (repo, timestamp, mode, outcome, gap_summary) VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+    def _columns(self):
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
+            return [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
+
+    def _record(self, timestamp="2026-09-26T01:00:00+00:00", outcome="tend", **kw):
+        run = state.Run(repo="owner/a", mode="tend", outcome=outcome, timestamp=timestamp, **kw)
+        state.record_run(run, db_path=self.db_path)
+        return run
+
+    def test_a_new_run_gets_a_uuid_and_this_devices_name(self):
+        run = self._record()
+        self.assertEqual(run.device, "test-box")
+        self.assertEqual(len(run.run_uuid), 36)
+        got = state.list_runs(db_path=self.db_path)[0]
+        self.assertEqual((got.run_uuid, got.device), (run.run_uuid, "test-box"))
+
+    def test_a_run_that_already_has_an_identity_keeps_it(self):
+        run = self._record(run_uuid="11111111-1111-1111-1111-111111111111", device="phone")
+        got = state.list_runs(db_path=self.db_path)[0]
+        self.assertEqual((got.run_uuid, got.device), (run.run_uuid, "phone"))
+
+    def test_the_same_uuid_cannot_be_stored_twice(self):
+        self._record(run_uuid="11111111-1111-1111-1111-111111111111")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._record(run_uuid="11111111-1111-1111-1111-111111111111")
+
+    def test_a_legacy_db_gains_the_columns_and_keeps_every_row(self):
+        self._legacy_db([
+            ("owner/a", "2026-07-20T03:45:58+00:00", "tend", "tend", "first"),
+            ("owner/b", "2026-07-21T03:45:58+00:00", "align", "error", "second"),
+        ])
+        self._record(timestamp="2026-09-26T01:00:00+00:00")
+
+        self.assertEqual(self._columns()[-3:], ["run_uuid", "device", "pushed_at"])
+        runs = state.list_runs(db_path=self.db_path)
+        self.assertEqual([r.gap_summary for r in runs], [None, "second", "first"])
+        self.assertEqual({r.device for r in runs}, {"test-box"})
+        self.assertEqual(len({r.run_uuid for r in runs}), 3)
+
+    def test_a_legacy_rows_uuid_is_deterministic(self):
+        self._legacy_db([("owner/a", "2026-07-20T03:45:58+00:00", "tend", "tend", None)])
+        self._record()
+        legacy = state.list_runs(db_path=self.db_path)[-1]
+        self.assertEqual(
+            legacy.run_uuid,
+            state.legacy_run_uuid("test-box", legacy.id, "2026-07-20T03:45:58+00:00"),
+        )
+
+    def test_a_reader_on_an_unmigrated_db_neither_raises_nor_migrates(self):
+        # Readers never migrate (see `_connect`): a dashboard polling a db
+        # no writer has opened since the upgrade must still render.
+        self._legacy_db([("owner/a", "2026-07-20T03:45:58+00:00", "tend", "tend", None)])
+        runs = state.list_runs(db_path=self.db_path)
+        self.assertEqual((runs[0].run_uuid, runs[0].device), (None, None))
+        self.assertEqual(state.session_stats(db_path=self.db_path).runs, 1)
+        self.assertNotIn("run_uuid", self._columns())
+
+    def test_concurrent_first_writes_on_a_legacy_db_both_land(self):
+        # `overnight` records from a thread pool; the first two records
+        # after an upgrade both find the columns missing. Without the
+        # migration's write lock one of them fails on `duplicate column`
+        # and that run is never recorded.
+        import threading
+
+        self._legacy_db([("owner/a", "2026-07-20T03:45:58+00:00", "tend", "tend", None)])
+        barrier = threading.Barrier(4)
+        errors = []
+
+        def write(n):
+            barrier.wait()
+            try:
+                self._record(timestamp=f"2026-09-26T0{n}:00:00+00:00")
+            except Exception as e:  # noqa: BLE001 - collected for the assertion
+                errors.append(e)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(state.list_runs(db_path=self.db_path)), 5)
+
+    def test_the_newest_row_per_repo_is_the_latest_timestamp_not_the_last_insert(self):
+        self._record(timestamp="2026-09-26T09:00:00+00:00", outcome="error")
+        # Pushed later, from a device that was offline: older run.
+        run = state.Run(repo="owner/a", mode="tend", outcome="tend",
+                        timestamp="2026-09-25T01:00:00+00:00")
+        state.record_run(run, db_path=self.db_path)
+        self.assertEqual(state.repo_stats(db_path=self.db_path)["owner/a"].last_outcome, "error")

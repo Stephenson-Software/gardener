@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,9 +31,61 @@ CREATE TABLE IF NOT EXISTS runs (
     exit_code INTEGER,
     duration_ms INTEGER,
     cost_usd REAL,
-    claude_session_id TEXT
+    claude_session_id TEXT,
+    run_uuid TEXT,
+    device TEXT,
+    pushed_at TEXT
 );
 """
+
+#: Columns added after the original schema, in the order `_migrate` adds
+#: them to a db created before they existed. `CREATE TABLE IF NOT EXISTS`
+#: is a no-op on an existing table, so an older db only gains these through
+#: `_migrate`; a new one is created with them already present.
+#:
+#: - `run_uuid` is a run's identity across devices. `id` is a per-file
+#:   autoincrement, so two devices' run #412 are different runs, and a
+#:   store that combines them (the hub, RFC 0007) needs a key that
+#:   doesn't collide.
+#: - `device` is which machine dispatched the run (`notify.load_device_name`,
+#:   the same name an alert's footer carries).
+#: - `pushed_at` is when a hub acknowledged the row, NULL until then. It is
+#:   only meaningful in a device's local store.
+ADDED_COLUMNS = (
+    ("run_uuid", "TEXT"),
+    ("device", "TEXT"),
+    ("pushed_at", "TEXT"),
+)
+
+#: The index statements `_migrate` ensures. The unique index is what makes
+#: `run_uuid` an identity rather than a label: a second row claiming the
+#: same uuid is refused by sqlite, not by every caller remembering to
+#: check. The timestamp index serves the recency ordering every reader
+#: below uses.
+INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS runs_run_uuid ON runs(run_uuid)",
+    "CREATE INDEX IF NOT EXISTS runs_timestamp ON runs(timestamp)",
+)
+
+#: Namespace for the deterministic uuids `_migrate` gives rows recorded
+#: before `run_uuid` existed. Fixed forever: changing it would give every
+#: backfilled row a second identity.
+LEGACY_RUN_NAMESPACE = uuid.UUID("5b8f7a4e-3c1d-4e2a-9f60-6a7d2c0b9e11")
+
+#: Recency order for every reader. Not `id`: in a store that combines
+#: devices, rows arrive in push order, so a phone that was offline all
+#: night inserts its runs after the box's morning ones, and `id` order
+#: would interleave two nights. `now_iso()` writes fixed-width UTC, so the
+#: string order is the time order; `id` breaks the ties that
+#: second-resolution timestamps produce inside one concurrent batch.
+#: A row whose timestamp doesn't start like a date (the db is a plain file
+#: an operator can edit) has no place in time at all, so it sorts after
+#: every readable row: as "newest" it would stand in for the latest
+#: session and hide the real one.
+NEWEST_FIRST = (
+    "ORDER BY (timestamp GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*') DESC, "
+    "timestamp DESC, id DESC"
+)
 
 
 def default_state_dir() -> Path:
@@ -180,6 +233,107 @@ class Run:
     cost_usd: Optional[float] = None
     claude_session_id: Optional[str] = None
     id: Optional[int] = None
+    run_uuid: Optional[str] = None
+    device: Optional[str] = None
+
+
+def _row_to_run(r: sqlite3.Row) -> Run:
+    """A `runs` row as a `Run`, tolerating a db that predates the
+    `ADDED_COLUMNS`. Readers never migrate (see `_connect`), so a dashboard
+    polling a db no writer has opened since upgrading still sees the old
+    columns only, and must render rather than raise."""
+    keys = r.keys()
+    return Run(
+        id=r["id"],
+        repo=r["repo"],
+        timestamp=r["timestamp"],
+        mode=r["mode"],
+        gap_summary=r["gap_summary"],
+        outcome=r["outcome"],
+        exit_code=r["exit_code"],
+        duration_ms=r["duration_ms"],
+        cost_usd=r["cost_usd"],
+        claude_session_id=r["claude_session_id"],
+        run_uuid=r["run_uuid"] if "run_uuid" in keys else None,
+        device=r["device"] if "device" in keys else None,
+    )
+
+
+def local_device_name() -> str:
+    """This device's name, for rows it records. Deferred import: `notify`
+    owns the resolution (env, then notify.env, then hostname) so an alert
+    and a run row can never name the same machine differently."""
+    from gardener import notify
+
+    return notify.load_device_name()
+
+
+def legacy_run_uuid(device: str, row_id: int, timestamp: str) -> str:
+    """The uuid `_migrate` assigns a row recorded before `run_uuid` existed.
+
+    Deterministic rather than random so the backfill needs no
+    bookkeeping to be safe: it runs inside one transaction, and the same
+    row always gets the same value."""
+    return str(uuid.uuid5(LEGACY_RUN_NAMESPACE, f"{device}:{row_id}:{timestamp}"))
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a db created by an older gardener up to `ADDED_COLUMNS`.
+
+    Additive only: columns are added, never dropped or retyped, and the
+    only rows touched are the ones whose new columns are NULL. Every row a
+    device's local store holds before this runs was dispatched by that
+    device (the store was never shared), so a NULL `device` is filled with
+    this device's name. All in one transaction, so an interrupted
+    migration leaves the db as it was.
+
+    `BEGIN IMMEDIATE` takes the write lock *before* reading which columns
+    exist: `overnight` records from several threads, and on the first run
+    after an upgrade two of them would otherwise both see a column missing,
+    both `ALTER TABLE`, and the loser's `duplicate column` error would cost
+    that run its record."""
+    if not _needs_migration(conn):
+        for statement in INDEXES:
+            conn.execute(statement)
+        conn.commit()
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        present = _columns(conn)
+        for name, kind in ADDED_COLUMNS:
+            if name not in present:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {kind}")
+        device = local_device_name()
+        conn.execute("UPDATE runs SET device = ? WHERE device IS NULL", (device,))
+        rows = conn.execute(
+            "SELECT id, device, timestamp FROM runs WHERE run_uuid IS NULL"
+        ).fetchall()
+        conn.executemany(
+            "UPDATE runs SET run_uuid = ? WHERE id = ?",
+            [(legacy_run_uuid(d, i, t), i) for i, d, t in rows],
+        )
+        for statement in INDEXES:
+            conn.execute(statement)
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def _columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+
+
+def _needs_migration(conn: sqlite3.Connection) -> bool:
+    """Whether any `ADDED_COLUMNS` is missing or any row lacks an identity.
+    Checked without a lock on every writer open; the common case (an
+    already-migrated db) costs a pragma and one scan of a table that grows
+    by a row per dispatch."""
+    if any(name not in _columns(conn) for name, _ in ADDED_COLUMNS):
+        return True
+    return conn.execute(
+        "SELECT 1 FROM runs WHERE run_uuid IS NULL OR device IS NULL LIMIT 1"
+    ).fetchone() is not None
 
 
 def _connect(db_path: Path, ensure_schema: bool = True) -> sqlite3.Connection:
@@ -212,19 +366,29 @@ def _connect(db_path: Path, ensure_schema: bool = True) -> sqlite3.Connection:
     if ensure_schema:
         conn.execute(SCHEMA)
         conn.commit()
+        _migrate(conn)
     return conn
 
 
 def record_run(run: Run, db_path: Optional[Path] = None) -> int:
-    """Insert a run row, return its id."""
+    """Insert a run row, return its id.
+
+    A run without a `run_uuid` or `device` gets them here, and they are
+    written back onto `run` so the caller holds the identity the row was
+    stored under."""
     db_path = db_path or default_db_path()
+    if run.run_uuid is None:
+        run.run_uuid = str(uuid.uuid4())
+    if run.device is None:
+        run.device = local_device_name()
     with closing(_connect(db_path)) as conn:
         cur = conn.execute(
             """
             INSERT INTO runs
                 (repo, timestamp, mode, gap_summary, outcome,
-                 exit_code, duration_ms, cost_usd, claude_session_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 exit_code, duration_ms, cost_usd, claude_session_id,
+                 run_uuid, device)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.repo,
@@ -236,6 +400,8 @@ def record_run(run: Run, db_path: Optional[Path] = None) -> int:
                 run.duration_ms,
                 run.cost_usd,
                 run.claude_session_id,
+                run.run_uuid,
+                run.device,
             ),
         )
         conn.commit()
@@ -255,31 +421,17 @@ def list_runs(
         conn.row_factory = sqlite3.Row
         if repo:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM runs WHERE repo = ?
-                ORDER BY id DESC LIMIT ?
+                {NEWEST_FIRST} LIMIT ?
                 """,
                 (repo, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)
+                f"SELECT * FROM runs {NEWEST_FIRST} LIMIT ?", (limit,)
             ).fetchall()
-    return [
-        Run(
-            id=r["id"],
-            repo=r["repo"],
-            timestamp=r["timestamp"],
-            mode=r["mode"],
-            gap_summary=r["gap_summary"],
-            outcome=r["outcome"],
-            exit_code=r["exit_code"],
-            duration_ms=r["duration_ms"],
-            cost_usd=r["cost_usd"],
-            claude_session_id=r["claude_session_id"],
-        )
-        for r in rows
-    ]
+    return [_row_to_run(r) for r in rows]
 
 
 def runs_since(since: datetime, db_path: Optional[Path] = None) -> list[Run]:
@@ -291,7 +443,7 @@ def runs_since(since: datetime, db_path: Optional[Path] = None) -> list[Run]:
     however far it has to. The comparison is done on parsed timestamps
     rather than as a SQL string comparison, for the same reason
     `_parse_timestamp` is defensive: the db is a plain file an operator can
-    edit. The scan is newest-first by primary key and stops at the first
+    edit. The scan is newest-first (`NEWEST_FIRST`) and stops at the first
     row older than `since`, so it reads the window and one row more rather
     than the whole table."""
     db_path = db_path or default_db_path()
@@ -302,24 +454,11 @@ def runs_since(since: datetime, db_path: Optional[Path] = None) -> list[Run]:
     found: list[Run] = []
     with closing(_connect(db_path, ensure_schema=False)) as conn:
         conn.row_factory = sqlite3.Row
-        for r in conn.execute("SELECT * FROM runs ORDER BY id DESC"):
+        for r in conn.execute(f"SELECT * FROM runs {NEWEST_FIRST}"):
             when = _parse_timestamp(r["timestamp"])
             if when is not None and when < since:
                 break
-            found.append(
-                Run(
-                    id=r["id"],
-                    repo=r["repo"],
-                    timestamp=r["timestamp"],
-                    mode=r["mode"],
-                    gap_summary=r["gap_summary"],
-                    outcome=r["outcome"],
-                    exit_code=r["exit_code"],
-                    duration_ms=r["duration_ms"],
-                    cost_usd=r["cost_usd"],
-                    claude_session_id=r["claude_session_id"],
-                )
-            )
+            found.append(_row_to_run(r))
     found.reverse()
     return found
 
@@ -379,8 +518,9 @@ def session_stats(
     `gap_seconds`, or once the window would span more than
     `max_span_seconds` in total — the rows are streamed rather than
     fetched, and the walk breaks out, so this reads at most a day's rows
-    rather than the whole table even though the query has no LIMIT (the
-    ordering is on the primary key, so there is no sort to pay for either).
+    rather than the whole table even though the query has no LIMIT. The
+    `NEWEST_FIRST` ordering is a sort over the table, which at one row per
+    dispatch is a few thousand rows.
 
     An empty or missing db is a zeroed `SessionStats`, not an error: the
     dashboard renders before anything has ever been dispatched."""
@@ -394,7 +534,7 @@ def session_stats(
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
             "SELECT id, repo, mode, timestamp, outcome, gap_summary, cost_usd, duration_ms "
-            "FROM runs ORDER BY id DESC"
+            f"FROM runs {NEWEST_FIRST}"
         ):
             current = _parse_timestamp(row["timestamp"])
             # Measured from the newest run rather than from the previous
@@ -534,14 +674,20 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
             """,
             (*successes, ERROR_OUTCOME, *successes),
         ).fetchall()
-        # The newest row per repo, for its outcome. `MAX(id)` rather than
-        # `MAX(timestamp)`: timestamps are second-resolution, so two runs
-        # of a concurrent batch recorded in the same second would tie,
-        # while the autoincrement id never does.
+        # The newest row per repo, for its outcome, in `NEWEST_FIRST` order:
+        # the timestamp first, because in a combined store `MAX(id)` is the
+        # row pushed last, not the run that finished last; then `id`,
+        # because timestamps are second-resolution and two runs of a
+        # concurrent batch recorded in the same second would tie.
         latest = {
             r["repo"]: r["outcome"]
             for r in conn.execute(
-                "SELECT repo, outcome FROM runs WHERE id IN (SELECT MAX(id) FROM runs GROUP BY repo)"
+                f"""
+                SELECT repo, outcome FROM runs AS outer_runs
+                WHERE id = (
+                    SELECT id FROM runs WHERE repo = outer_runs.repo {NEWEST_FIRST} LIMIT 1
+                )
+                """
             ).fetchall()
         }
     return {
