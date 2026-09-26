@@ -34,7 +34,9 @@ gardener/
                        ThreadPoolExecutor) tend dispatch
     conventions.py   — resolves the configured conventions repo URL (no
                        built-in default) and clones/refreshes its local cache
-    state.py         — SQLite-backed run history, plus repo_stats()'s
+    state.py         — SQLite-backed run history (each row carrying a
+                       run_uuid and the device that dispatched it), plus
+                       repo_stats()'s
                        all-time per-repo aggregates for the garden view and
                        session_stats()' newest-contiguous-burst window for
                        the dashboard's headline panel

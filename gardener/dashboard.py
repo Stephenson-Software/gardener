@@ -664,9 +664,15 @@ def build_status(
                 "summary": r.gap_summary,
                 "duration_ms": r.duration_ms,
                 "cost_usd": r.cost_usd,
+                "device": r.device,
             }
             for r in runs
         ],
+        # Whether the runs above came from more than one device, so the
+        # page shows a Device column only when it can tell rows apart: a
+        # single device's store (every local one) would repeat one name
+        # down the whole table.
+        "multi_device": len({r.device for r in runs if r.device}) > 1,
         # Named `session_*` rather than the `recent_*` these replaced: the
         # numbers now mean a different window, and a renamed key breaks a
         # `curl /api/status | jq` check loudly, where a silently
@@ -865,6 +871,7 @@ PAGE_HTML = """<!doctype html>
   th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; }
   td.repo { white-space: nowrap; font-family: var(--mono); font-size: 0.8rem; }
   td.summary { color: var(--text); }
+  td.device { white-space: nowrap; color: var(--muted); }
   .outcome-error { color: var(--err); }
   .outcome-tend, .outcome-created { color: var(--accent); }
   pre#log {
@@ -1178,7 +1185,7 @@ PAGE_HTML = """<!doctype html>
       font-size: 0.85rem; font-weight: 600;
     }
     td.repo::before { content: none; }
-    td.time, td.mode, td.outcome, td.cost { order: 2; flex: 0 0 auto; font-size: 0.78rem; }
+    td.time, td.mode, td.outcome, td.cost, td.device { order: 2; flex: 0 0 auto; font-size: 0.78rem; }
     td.time::before, td.cost::before { content: none; }
     td.summary { order: 3; flex: 1 0 100%; margin-top: 0.35rem; font-size: 0.85rem; }
     td.summary::before { content: none; }
@@ -1337,6 +1344,7 @@ PAGE_HTML = """<!doctype html>
         <th scope="col">Time</th><th scope="col">Repo</th><th scope="col">Mode</th>
         <th scope="col">Outcome</th><th scope="col">Time taken</th><th scope="col">Cost</th>
         <th scope="col">Summary</th>
+        <th scope="col" class="device-col" hidden>Device</th>
       </tr></thead>
       <tbody id="runs"></tbody>
     </table>
@@ -2454,16 +2462,18 @@ function renderStatus(data) {
   // renders via td::before once the thead is hidden — see the stylesheet.
   // Guarded by a signature for the same reason the garden table is: an
   // unconditional rebuild destroys any text selection within 4 s (#126).
-  const runsSig = JSON.stringify([filt, data.runs.map(r => r.id ?? r.timestamp + r.repo)]);
+  const multiDevice = !!data.multi_device;
+  const runsSig = JSON.stringify([filt, multiDevice, data.runs.map(r => r.id ?? r.timestamp + r.repo)]);
   if (runsSig !== lastRunsSig) {
     lastRunsSig = runsSig;
+    for (const th of document.querySelectorAll("#runs-panel .device-col")) th.hidden = !multiDevice;
     let lastDay = null;
     document.getElementById("runs").innerHTML = data.runs.map(r => {
       // A muted separator whenever the calendar day changes, so four days
       // of rows can't read as one morning.
       const day = r.timestamp ? String(r.timestamp).slice(0, 10) : "";
       const sep = day && day !== lastDay && lastDay !== null
-        ? `<tr class="is-empty day-sep" role="row"><td colspan="7" role="cell">${esc(day)}</td></tr>` : "";
+        ? `<tr class="is-empty day-sep" role="row"><td colspan="${multiDevice ? 8 : 7}" role="cell">${esc(day)}</td></tr>` : "";
       lastDay = day;
       return sep + `
       <tr role="row">
@@ -2474,8 +2484,9 @@ function renderStatus(data) {
         <td class="dur num" role="cell" data-label="Time taken">${esc(fmtDur(r.duration_ms))}</td>
         <td class="cost" role="cell" data-label="Cost">${fmtCost(r.cost_usd)}</td>
         <td class="summary" role="cell" data-label="Summary">${linkifyRefs(r.summary, r.repo)}</td>
+        ${multiDevice ? `<td class="device" role="cell" data-label="Device">${esc(r.device || "—")}</td>` : ""}
       </tr>`;
-    }).join("") || `<tr class="is-empty" role="row"><td colspan="7" class="empty" role="cell">no runs recorded yet</td></tr>`;
+    }).join("") || `<tr class="is-empty" role="row"><td colspan="${multiDevice ? 8 : 7}" class="empty" role="cell">no runs recorded yet</td></tr>`;
   }
 
   renderLog(data);

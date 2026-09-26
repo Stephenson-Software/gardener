@@ -42,7 +42,12 @@ resolves it — `state.py`, `garden.py`, `merge_allowlist.py`,
 `sessions.py` each carry their own private copy of that resolution, so one
 test asserts all nine helpers land under the override and another that they all fall back to
 `~/.local/state/gardener`, filenames asserted verbatim so a rename that
-would orphan a deployed box's on-disk state is caught too. It otherwise
+would orphan a deployed box's on-disk state is caught too.
+`TestDeviceIdentityMigration` builds a db with the pre-RFC-0007 schema
+verbatim and asserts the migration adds `run_uuid`/`device`/`pushed_at`
+without changing any existing row, gives legacy rows deterministic uuids,
+leaves a *reader* on an unmigrated db working and the db untouched, and
+that recency is the timestamp rather than the insertion order. It otherwise
 uses a real sqlite3 file in a tmp dir (including `daily_stats`' per-day
 rollup — grouping, newest-first ordering, the `days` limit, and null
 `cost_usd`/`duration_ms` not poisoning the sums; `session_stats`'

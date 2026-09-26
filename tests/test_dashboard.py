@@ -542,6 +542,29 @@ class TestBuildStatus(unittest.TestCase):
         self.assertEqual(result["stats"]["session_started_at"], "2026-07-19T00:00:00+00:00")
         self.assertEqual(result["stats"]["session_ended_at"], "2026-07-19T00:00:00+00:00")
 
+    def _record_on(self, device, timestamp):
+        state.record_run(
+            state.Run(repo="owner/repo", mode="tend", outcome="tend",
+                      timestamp=timestamp, device=device),
+            db_path=self.state_dir / "gardener.sqlite3",
+        )
+
+    def test_one_devices_runs_are_not_marked_multi_device(self):
+        self._record_on("box", "2026-07-19T00:00:00+00:00")
+        self._record_on("box", "2026-07-19T01:00:00+00:00")
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertFalse(result["multi_device"])
+        self.assertEqual(result["runs"][0]["device"], "box")
+
+    def test_runs_from_two_devices_are_marked_multi_device(self):
+        # What a hub's combined store holds (RFC 0007): the page shows a
+        # Device column only then.
+        self._record_on("box", "2026-07-19T00:00:00+00:00")
+        self._record_on("phone", "2026-07-19T01:00:00+00:00")
+        result = dashboard.build_status(state_dir=self.state_dir)
+        self.assertTrue(result["multi_device"])
+        self.assertEqual([r["device"] for r in result["runs"]], ["phone", "box"])
+
     def test_stats_cover_the_session_not_the_run_limit_window(self):
         """The panel these feed names the window it shows, so the numbers
         have to be that window: a fixed row count reaches back into a
