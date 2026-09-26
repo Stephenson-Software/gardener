@@ -1583,6 +1583,9 @@ class TestCmdTendNotifications(unittest.TestCase):
             exit_code = cmd_tend(self._args())
 
         self.assertEqual(exit_code, 0)
+        # The run's own state db, so the hand-off filter (issue #164) reads
+        # the same history this run is about to be recorded in.
+        mock_orphan.assert_called_once_with("owner/name", db_path=self._args().state_db)
         mock_run_claude.assert_called_once()
         _args, kwargs = mock_run_claude.call_args
         self.assertIn("#238", kwargs["prompt"])
@@ -2278,6 +2281,81 @@ class TestFindOrphanedPR(unittest.TestCase):
         with patch("gardener.cli._run") as mock_run:
             self.assertIsNone(find_orphaned_pr("owner/name"))
             mock_run.assert_not_called()
+
+    # Issue #164: a marked PR that a *completed* tend opened or was handed
+    # is a deliberate hand-off, not interrupted work. These use a real
+    # sqlite3 file in a tmp dir, same as test_state.py.
+
+    def _db_with(self, *runs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "gardener.sqlite3"
+        for repo, mode, outcome, timestamp in runs:
+            state.record_run(
+                state.Run(repo=repo, mode=mode, outcome=outcome, timestamp=timestamp), db_path=db
+            )
+        return db
+
+    def _marked(self, *prs):
+        return self._completed(stdout=json.dumps([
+            {"number": n, "headRefName": f"feature/pr-{n}", "body": dev_loop.ORPHAN_MARKER,
+             "createdAt": created}
+            for n, created in prs
+        ]))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_pr_handed_off_by_a_completed_tend_is_not_an_orphan(self, mock_run, mock_which):
+        mock_run.return_value = self._marked((151, "2026-09-24T10:00:00Z"))
+        db = self._db_with(("owner/name", "tend", "tend", "2026-09-24T11:30:00+00:00"))
+        self.assertIsNone(find_orphaned_pr("owner/name", db_path=db))
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_pr_opened_after_the_last_completed_tend_is_still_an_orphan(self, mock_run, mock_which):
+        """The interrupted case this lookup exists for: the run that opened
+        the PR never recorded, so the newest completed tend predates it."""
+        mock_run.return_value = self._marked((151, "2026-09-24T10:00:00Z"))
+        db = self._db_with(("owner/name", "tend", "tend", "2026-09-23T03:00:00+00:00"))
+        self.assertEqual(find_orphaned_pr("owner/name", db_path=db).number, 151)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_errored_or_other_repo_or_other_mode_runs_do_not_count_as_a_hand_off(self, mock_run, mock_which):
+        """A timed-out tend records `error` — that *is* an interruption, so
+        continuing it is right. Another repo's success, or a create-dev-loop
+        bootstrap, says nothing about this PR."""
+        mock_run.return_value = self._marked((151, "2026-09-24T10:00:00Z"))
+        db = self._db_with(
+            ("owner/name", "tend", "error", "2026-09-24T11:00:00+00:00"),
+            ("owner/other", "tend", "tend", "2026-09-24T11:00:00+00:00"),
+            ("owner/name", "create-dev-loop", "created", "2026-09-24T11:00:00+00:00"),
+        )
+        self.assertEqual(find_orphaned_pr("owner/name", db_path=db).number, 151)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_newer_interrupted_pr_is_found_past_an_older_handed_off_one(self, mock_run, mock_which):
+        mock_run.return_value = self._marked(
+            (100, "2026-09-20T10:00:00Z"), (200, "2026-09-24T10:00:00Z"),
+        )
+        db = self._db_with(("owner/name", "tend", "tend", "2026-09-21T00:00:00+00:00"))
+        self.assertEqual(find_orphaned_pr("owner/name", db_path=db).number, 200)
+
+    @patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+    @patch("gardener.cli._run")
+    def test_unreadable_run_history_falls_back_to_the_marker_alone(self, mock_run, mock_which):
+        """A db file with no `runs` table raises on the read path; that must
+        disable the filter, not sink the check."""
+        mock_run.return_value = self._marked((151, "2026-09-24T10:00:00Z"))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "gardener.sqlite3"
+        db.write_bytes(b"")
+        with redirect_stderr(io.StringIO()) as err:
+            orphan = find_orphaned_pr("owner/name", db_path=db)
+        self.assertEqual(orphan.number, 151)
+        self.assertIn("could not read run history", err.getvalue())
 
 
 class TestCmdOvernight(unittest.TestCase):

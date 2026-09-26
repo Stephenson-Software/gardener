@@ -66,7 +66,11 @@ edge and injectable, that unbroken sub-threshold activity is still capped
 at the maximum span (measured back from the newest run, so a chain of runs
 can't grow into a multi-day window), that a session spans every repo rather
 than one, and that an unreadable timestamp ends the session instead of
-silently folding two nights together. `tests/test_cli.py` covers argument
+silently folding two nights together. `latest_success_at` — what
+`find_orphaned_pr` tells a handed-off PR from an interrupted one by — is
+covered for taking the newest *timestamp* rather than the newest row, and
+for ignoring errored runs, other repos, other modes and unparseable
+timestamps. `tests/test_cli.py` covers argument
 parsing (including `repo_arg`, the `type=` callable that rejects a
 malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
@@ -102,7 +106,12 @@ wiring and thin pass-through behavior (path/follow forwarded to
 (their structurally-identical list/add/remove branches, over the merge
 allow-list and the garden respectively), `fetch_open_issue_count`/`fetch_issue_counts`
 (the `issue-count` strategy's `gh`-calling side) with `_run` mocked the
-same way `find_orphaned_pr`'s own tests are, and `cmd_overnight` with
+same way `find_orphaned_pr`'s own tests are — those also run against a
+real tmp-dir sqlite3 db for the hand-off filter (a marked PR created before
+the repo's newest successful `tend` is not an orphan, an errored `tend` or
+another repo's run doesn't count as that, a newer interrupted PR is still
+found past an older handed-off one, and an unreadable db falls back to the
+marker alone), and `cmd_overnight` with
 `_dispatch_tend` itself mocked — including its `--concurrency` batching
 (one test asserts every repo in a `ThreadPoolExecutor`-dispatched batch
 still gets attempted regardless of completion order, another asserts

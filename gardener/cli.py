@@ -20,6 +20,7 @@ import random
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -238,12 +239,28 @@ def current_branch(repo_dir: Path) -> str:
     return res.stdout.strip() or "main"
 
 
-def find_orphaned_pr(repo: str, timeout: int = 30) -> Optional[dev_loop.OrphanedPR]:
+def find_orphaned_pr(
+    repo: str, timeout: int = 30, db_path: Optional[Path] = None
+) -> Optional[dev_loop.OrphanedPR]:
     """Look for an open PR on `repo` that carries `dev_loop.ORPHAN_MARKER`
     in its body — i.e. one opened by a previous `tend` dispatch that never
     got to record a completed `state.Run` (this device killing the whole
     `gardener overnight` process mid-dispatch is the expected cause, see
-    overnight.py's resume-cursor caveat). Best-effort: any `gh` failure
+    overnight.py's resume-cursor caveat).
+
+    The marker alone can't tell that apart from a PR a run *deliberately*
+    left open — handed off for a human's merge or manual verification — so
+    a marked PR created before `repo`'s newest successful `tend` in the run
+    history is not an orphan: that run either opened it or was already
+    handed it, and finished. Without this, every later dispatch was told
+    the hand-off was interrupted work and spent its whole run re-deriving
+    the same decision (issue #164). A timed-out or errored `tend` doesn't
+    count, since that is exactly the interruption this exists to recover
+    from. The history is this device's own, so a PR another device handed
+    off is still picked up once here; an unreadable db just disables the
+    filter rather than failing the check.
+
+    Best-effort: any `gh` failure
     (not authenticated, network hiccup, malformed JSON) is treated the same
     as "no orphan found" rather than raised, since this check must never be
     the reason a normal `tend` dispatch fails outright — it's an
@@ -275,6 +292,19 @@ def find_orphaned_pr(repo: str, timeout: int = 30) -> Optional[dev_loop.Orphaned
     except json.JSONDecodeError:
         return None
     candidates = [pr for pr in prs if dev_loop.ORPHAN_MARKER in (pr.get("body") or "")]
+    if candidates:
+        try:
+            completed_at = state.latest_success_at(repo, Mode.TEND.value, db_path=db_path)
+        except (sqlite3.Error, OSError) as e:
+            print(f"gardener: NOTE — could not read run history for {repo} (non-fatal): {e}",
+                  file=sys.stderr)
+            completed_at = None
+        if completed_at is not None:
+            candidates = [
+                pr for pr in candidates
+                if (created := state._parse_timestamp(pr.get("createdAt"))) is None
+                or created > completed_at
+            ]
     if not candidates:
         return None
     candidates.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)
@@ -693,7 +723,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
             print(f"gardener: {args.repo} checked out at {target_dir}", file=sys.stderr)
             branch = current_branch(target_dir)
 
-            orphaned_pr = find_orphaned_pr(args.repo)
+            orphaned_pr = find_orphaned_pr(args.repo, db_path=args.state_db)
             if orphaned_pr is not None:
                 print(
                     f"gardener: found orphaned PR #{orphaned_pr.number} (branch "
