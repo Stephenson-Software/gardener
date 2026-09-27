@@ -111,7 +111,10 @@ gardener hub sync
 ```
 
 `gardener hub status` shows the device's settings and how many runs are
-still queued, without contacting the hub. `sync` is safe to repeat. Every run carries a `run_uuid`, and the hub
+still queued, then asks the hub (one request) how many runs it holds under
+this device's token name. It prints a match, or `MISMATCH` and exits 1, so
+it is the per-device count check in one command. With the hub unreachable
+it says so, and the local lines still answer. `sync` is safe to repeat. Every run carries a `run_uuid`, and the hub
 ignores a uuid it already holds. After that, every recorded run pushes the
 outbox automatically. On the dispatch path that push is bounded (5 s per
 request, 20 s in total). A longer backlog is left for the next run or the
@@ -135,7 +138,23 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `POST /api/v1/runs` | device token | Body `{"runs": [...], "garden"?, "merge_allowlist"?}`, at most 500 runs. Answers `{"held": [uuid, ...]}`, listing every uuid from the batch the hub now holds. A row with an unknown `outcome` or a malformed uuid, repo, or timestamp refuses the whole batch with a 400 naming the field; the device keeps it queued. |
 | `GET /api/v1/runs?repo=&limit=` | device token or operator | Newest runs across devices (`gardener status --all-devices`) |
 | `GET /api/v1/latest-success?repo=&mode=` | device token or operator | When `repo` last recorded a successful `mode` run on any device. Nothing in gardener consults this yet (RFC 0007 phase 2). |
+| `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
+
+## Watching the devices
+
+A device can't report that its nightly job stopped running; only
+something off the device can see that nothing new arrived. The hub
+answers that from its store, with two commands meant to run where the hub
+runs (for the container, `docker exec gardener-hub gardener hub ...`):
+
+| Command | What it prints |
+|---|---|
+| `gardener hub devices [--json] [--data-dir D]` | Per device: run count, newest run, and latest session, flagged `QUIET` when no run has arrived in 36 h and `ALL-ERRORS` when every run in the latest session errored. A device that has never pushed isn't listed. |
+| `gardener hub digest [--hours N] [--data-dir D]` | A short plain-text summary of the last N hours (default 24): per device runs, successes, errors, spend, and the repos that errored, plus any quiet device. |
+
+Neither sends anything itself. Alerting and posting are the deployment's
+job; the reference deployment calls both from its box-side health monitor.
 
 ## Upgrading
 

@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import uuid
 from contextlib import closing, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -296,7 +297,7 @@ class TestHubStatusCommand(_HubTestCase):
         self.assertEqual(self._status()[:2], (0, "no hub configured (GARDENER_HUB_URL unset): "
                                                 "run history is local only\n"))
 
-    def test_reports_the_queue_without_contacting_the_hub(self):
+    def test_reports_the_queue_even_when_the_hub_is_unreachable(self):
         self.record("2026-09-26T01:00:00+00:00")
         self.record("2026-09-26T02:00:00+00:00")
         os.environ[hub.URL_ENV] = "http://127.0.0.1:9"
@@ -304,6 +305,35 @@ class TestHubStatusCommand(_HubTestCase):
         code, out, _ = self._status()
         self.assertEqual(code, 0)
         self.assertIn("queued: 2 run(s) not yet pushed, oldest 2026-09-26T01:00:00+00:00", out)
+        self.assertIn("on hub: unknown, the hub could not be asked", out)
+
+    def _configure(self):
+        os.environ[hub.URL_ENV] = self.hub.url
+        os.environ[hub.TOKEN_ENV] = DEVICE_TOKEN
+
+    def test_matches_what_this_device_pushed_under_its_token_name(self):
+        """The local name (`box` here, `localhost` on the real phone) and the
+        hub's (the token's) differ by design; the hub's `you` bridges them."""
+        self._configure()
+        for hour in (1, 2, 3):
+            self.record(f"2026-09-26T0{hour}:00:00+00:00")
+        hub.push_pending(self.config, db_path=self.db_path)
+        self.record("2026-09-26T04:00:00+00:00")
+        code, out, _ = self._status()
+        self.assertIn("queued: 1 run(s)", out)
+        self.assertIn("on hub: 3 run(s) as 'box', matching the 3 pushed from here", out)
+        self.assertEqual(code, 0)
+
+    def test_a_count_mismatch_exits_1(self):
+        self._configure()
+        self.record("2026-09-26T01:00:00+00:00")
+        hub.push_pending(self.config, db_path=self.db_path)
+        stray = state.Run(repo="owner/a", mode="tend", outcome="tend", device="box",
+                          timestamp="2026-09-26T05:00:00+00:00", run_uuid=str(uuid.uuid4()))
+        state.insert_runs([stray], db_path=self.hub.db_path)
+        code, out, _ = self._status()
+        self.assertEqual(code, 1)
+        self.assertIn("on hub: 2 run(s) as 'box', but 1 were pushed from here: MISMATCH", out)
 
     def test_a_url_without_a_token_is_an_error(self):
         os.environ[hub.URL_ENV] = "http://127.0.0.1:9"
@@ -496,6 +526,89 @@ class TestUserAuthSignIn(_HubTestCase):
 
     def test_basic_auth_still_works_alongside_sign_in(self):
         self.assertEqual(self.hub.request("GET", "/api/status", _basic(OPERATOR))[0], 200)
+
+
+class TestDeviceHealth(_HubTestCase):
+    """What only the hub can see: each device's last run, its latest
+    session, whether it has gone quiet, and the daily digest over all of
+    them. `now` is injected; the stores are real."""
+
+    NOW = hub.datetime(2026, 9, 27, 12, 0, tzinfo=hub.timezone.utc)
+
+    def put(self, device, timestamp, outcome="tend", repo="owner/a", cost=0.5):
+        state.insert_runs([state.Run(
+            repo=repo, mode="tend", outcome=outcome, timestamp=timestamp, device=device,
+            cost_usd=cost, run_uuid=str(uuid.uuid4()),
+        )], db_path=self.hub.db_path)
+
+    def summaries(self):
+        return {d["device"]: d for d in hub.device_summaries(self.hub.db_path, now=self.NOW)}
+
+    def test_a_device_quiet_past_36_hours_is_flagged_and_one_within_it_is_not(self):
+        self.put("box", "2026-09-27T03:00:00+00:00")
+        self.put("phone", "2026-09-25T23:00:00+00:00")  # 37 h before NOW
+        got = self.summaries()
+        self.assertFalse(got["box"]["quiet"])
+        self.assertEqual(got["box"]["quiet_seconds"], 9 * 3600)
+        self.assertTrue(got["phone"]["quiet"])
+
+    def test_the_36_hour_boundary(self):
+        self.put("box", "2026-09-26T00:00:00+00:00")  # exactly 36 h
+        self.assertFalse(self.summaries()["box"]["quiet"])
+
+    def test_sessions_are_per_device_so_nights_do_not_interleave(self):
+        """The box's all-error night must not be diluted by the phone's
+        successful runs recorded in between."""
+        for minute in (0, 20, 40):
+            self.put("box", f"2026-09-27T02:{minute:02d}:00+00:00", outcome="error")
+            self.put("phone", f"2026-09-27T02:{minute + 10:02d}:00+00:00")
+        got = self.summaries()
+        self.assertEqual(got["box"]["last_session"]["runs"], 3)
+        self.assertTrue(got["box"]["last_session"]["all_errors"])
+        self.assertFalse(got["phone"]["last_session"]["all_errors"])
+
+    def test_one_success_clears_all_errors(self):
+        self.put("box", "2026-09-27T02:00:00+00:00", outcome="error")
+        self.put("box", "2026-09-27T02:30:00+00:00")
+        self.assertFalse(self.summaries()["box"]["last_session"]["all_errors"])
+
+    def test_the_devices_endpoint_names_the_callers_device(self):
+        self.put("box", "2026-09-27T03:00:00+00:00")
+        status, _, body = self.hub.request(
+            "GET", "/api/v1/devices", {"Authorization": f"Bearer {PHONE_TOKEN}"})
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["you"], "phone")
+        self.assertEqual([d["device"] for d in payload["devices"]], ["box"])
+        status, _, body = self.hub.request("GET", "/api/v1/devices", _basic(OPERATOR))
+        self.assertIsNone(json.loads(body)["you"])
+        self.assertEqual(self.hub.request("GET", "/api/v1/devices")[0], 401)
+
+    def test_devices_command_prints_json_for_the_watchdog(self):
+        self.put("box", "2026-09-27T03:00:00+00:00", outcome="error")
+        args = cli.build_parser().parse_args(
+            ["hub", "devices", "--json", "--data-dir", str(self.hub.data_dir)])
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(args.func(args), 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["quiet_after_seconds"], 36 * 3600)
+        self.assertTrue(payload["devices"][0]["last_session"]["all_errors"])
+
+    def test_digest_counts_the_window_per_device(self):
+        self.put("box", "2026-09-26T11:00:00+00:00", cost=9.0)  # 25 h ago: outside
+        self.put("box", "2026-09-27T02:00:00+00:00", cost=1.25)
+        self.put("box", "2026-09-27T03:00:00+00:00", outcome="error", repo="owner/broken", cost=0.25)
+        self.put("phone", "2026-09-25T20:00:00+00:00")
+        text = hub.digest(self.hub.db_path, hours=24, now=self.NOW)
+        self.assertIn("**box**: 2 run(s), 1 ok, 1 error(s), $1.50", text)
+        self.assertIn("  errored: owner/broken", text)
+        self.assertIn("**phone**: no runs in the last 24 h (last run 2026-09-25T20:00:00+00:00)", text)
+        self.assertIn("Total: 2 run(s), $1.50 over the last 24 h.", text)
+        self.assertIn("Quiet for over 36 h: phone", text)
+
+    def test_digest_of_an_empty_hub(self):
+        self.assertEqual(hub.digest(self.hub.db_path, now=self.NOW),
+                         "No runs have reached the hub in the last 24 h.")
 
 
 class TestMintToken(unittest.TestCase):

@@ -1581,9 +1581,12 @@ def cmd_hub_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_hub_status(args: argparse.Namespace) -> int:
-    """This device's side of the hub: whether one is configured, and how
-    much of the history is still waiting to be pushed. Local only — it
-    doesn't contact the hub, so it answers the same with no signal."""
+    """This device's side of the hub: whether one is configured, how much
+    of the history is still waiting to be pushed, and whether the hub holds
+    exactly what this device has pushed. The last part is one request
+    (`hub.REQUEST_TIMEOUT_SECONDS`); with no signal it says so and the
+    local lines still answer. Exits 1 on a mismatch, so it can be scripted
+    as the per-device count check RFC 0007 gates the orphaned-PR check on."""
     config = hub.load_config()
     count, oldest = state.pending_push_summary(db_path=args.state_db)
     if config is None:
@@ -1595,6 +1598,50 @@ def cmd_hub_status(args: argparse.Namespace) -> int:
         print(f"error: {hub.TOKEN_ENV} is not set, so nothing can be pushed", file=sys.stderr)
         return 1
     print(f"queued: {count} run(s) not yet pushed" + (f", oldest {oldest}" if oldest else ""))
+    try:
+        answer = hub.fetch_devices(config)
+    except hub.HubError as e:
+        print(f"on hub: unknown, the hub could not be asked ({e})")
+        return 0
+    me = answer.get("you")
+    held = next(
+        (d.get("runs", 0) for d in answer.get("devices", []) if d.get("device") == me), 0
+    )
+    pushed = state.count_runs(db_path=args.state_db) - count
+    if held == pushed:
+        print(f"on hub: {held} run(s) as {me!r}, matching the {pushed} pushed from here")
+        return 0
+    print(f"on hub: {held} run(s) as {me!r}, but {pushed} were pushed from here: MISMATCH")
+    return 1
+
+
+def cmd_hub_devices(args: argparse.Namespace) -> int:
+    """Every device in a hub's store: run count, newest run, how long it has
+    been quiet, and its latest session. Reads the store directly, so it runs
+    where the hub does (`docker exec gardener-hub gardener hub devices`),
+    which is what the gateway's watchdog calls."""
+    data_dir = args.data_dir or state.default_state_dir() / "hub"
+    summaries = hub.device_summaries(data_dir / "gardener.sqlite3")
+    if args.json:
+        print(json.dumps({"devices": summaries, "quiet_after_seconds": hub.QUIET_AFTER_SECONDS}))
+        return 0
+    if not summaries:
+        print("no device has pushed to this hub yet")
+        return 0
+    for d in summaries:
+        session = d["last_session"]
+        flags = [f for f, on in (("QUIET", d["quiet"]), ("ALL-ERRORS", session["all_errors"])) if on]
+        print(f"{d['device']}: {d['runs']} run(s), last {d['last_run_at'] or 'never'}; "
+              f"latest session {session['runs']} run(s), {session['errors']} error(s)"
+              + (f"  [{', '.join(flags)}]" if flags else ""))
+    return 0
+
+
+def cmd_hub_digest(args: argparse.Namespace) -> int:
+    """A plain-text summary of the last `--hours` across every device in a
+    hub's store, for a once-a-day post (the gateway's digest timer)."""
+    data_dir = args.data_dir or state.default_state_dir() / "hub"
+    print(hub.digest(data_dir / "gardener.sqlite3", hours=args.hours))
     return 0
 
 
@@ -2059,6 +2106,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hub_status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     hub_status.set_defaults(func=cmd_hub_status)
+    hub_devices = hub_sub.add_parser(
+        "devices", help="On the hub: each device's run count, newest run, and latest session",
+    )
+    hub_devices.add_argument("--data-dir", type=Path, default=None,
+                             help="The hub's store directory (default: <state dir>/hub)")
+    hub_devices.add_argument("--json", action="store_true", help="Print JSON, for scripts")
+    hub_devices.set_defaults(func=cmd_hub_devices)
+    hub_digest = hub_sub.add_parser(
+        "digest", help="On the hub: a plain-text summary of recent runs across devices",
+    )
+    hub_digest.add_argument("--data-dir", type=Path, default=None,
+                            help="The hub's store directory (default: <state dir>/hub)")
+    hub_digest.add_argument("--hours", type=float, default=24,
+                            help="How far back to summarize (default 24)")
+    hub_digest.set_defaults(func=cmd_hub_digest)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
     hub_token.add_argument("--device", required=True,
                            help="The name the hub will show this device's runs under")
