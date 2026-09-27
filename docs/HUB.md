@@ -120,6 +120,29 @@ outbox automatically. On the dispatch path that push is bounded (5 s per
 request, 20 s in total). A longer backlog is left for the next run or the
 next `gardener hub sync`.
 
+### Live heartbeats
+
+While a dispatching command (`align`, `tend`, `overnight`) runs, a device
+with a hub also sends it a **heartbeat**: a small snapshot of what it is
+doing now (repos in flight, the batch, the overnight budget, and each
+slot's phase, idle time, stalled flag and whether a rate limit was seen).
+It sends one at the start, one every `GARDENER_HUB_HEARTBEAT_SECONDS`
+(default 60; `0` turns them off), and a final one when the command exits.
+`gardener hub status` shows the setting. On a phone, set it slower to save
+battery and data:
+
+```
+GARDENER_HUB_HEARTBEAT_SECONDS=300
+```
+
+A heartbeat carries **no log lines, tool inputs, model text, or local
+paths**, only structured fields, and the hub drops any field it doesn't
+name. A failed beat is dropped, not queued (the next one replaces it), and
+failures back off up to 10 minutes with one `NOTE` per session. A hub
+without the route answers 404, and the device stops heartbeating for that
+session, so upgrading devices before the hub is harmless. The design is RFC
+0010.
+
 ## What the hub shows
 
 | Panel | On the hub |
@@ -138,6 +161,7 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `POST /api/v1/runs` | device token | Body `{"runs": [...], "garden"?, "merge_allowlist"?}`, at most 500 runs. Answers `{"held": [uuid, ...]}`, listing every uuid from the batch the hub now holds. A row with an unknown `outcome` or a malformed uuid, repo, or timestamp refuses the whole batch with a 400 naming the field; the device keeps it queued. |
 | `GET /api/v1/runs?repo=&limit=` | device token or operator | Newest runs across devices (`gardener status --all-devices`) |
 | `GET /api/v1/latest-success?repo=&mode=` | device token or operator | When `repo` last recorded a successful `mode` run on any device. `tend`'s orphaned-PR check asks this before continuing a marked PR, so a PR one device handed off isn't taken for interrupted work on another (see [Orphaned-PR check](#orphaned-pr-check)). |
+| `POST /api/v1/heartbeat` | device token | A live-state snapshot (see "Live heartbeats"), at most 16 KiB. The hub keeps only the latest per device, filed under the token's name, and ignores a beat older than the stored one for the same session. An unknown slot phase or a malformed field gets a 400 naming it. |
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
 

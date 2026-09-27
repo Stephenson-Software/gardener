@@ -32,8 +32,8 @@ from string import Template
 from typing import Optional
 
 from gardener import (
-    conventions, dashboard, dev_loop, doctor, garden, hub, merge_allowlist, notify, overnight,
-    repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
+    conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
+    overnight, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -1617,6 +1617,8 @@ def cmd_hub_status(args: argparse.Namespace) -> int:
         return 0
     print(f"hub:    {config.url}")
     print(f"device: {notify.load_device_name()} (locally; the hub names runs after the token)")
+    print(f"heartbeat: every {config.heartbeat_seconds} s while dispatching"
+          if config.heartbeat_seconds > 0 else f"heartbeat: off ({hub.HEARTBEAT_ENV}=0)")
     if not config.token:
         print(f"error: {hub.TOKEN_ENV} is not set, so nothing can be pushed", file=sys.stderr)
         return 1
@@ -2234,4 +2236,5 @@ def _dispatch(args: argparse.Namespace) -> int:
                     f"`gardener stop {session.short_id}`)",
                     file=sys.stderr,
                 )
-            return args.func(args)
+            with heartbeat.running(session):
+                return args.func(args)
