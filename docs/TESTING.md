@@ -242,7 +242,12 @@ the sender's final `ending` beat, the 404 switch-off, one `NOTE` per
 session, backoff doubling to its cap, and a snapshot error never raising;
 `heartbeat.running` end to end (off with no hub or `0`, an idle row left
 after a dispatch, its thread stopped); and `build_snapshot` over a real
-log carrying structure but no log text or local path.
+log carrying structure but no log text or local path (and its start time
+sent as UTC). `TestHubStatusPayload` covers the hub's `/api/status`: `in_progress` as
+the union over live devices only (stale and idle excluded), each device's
+state, batch and budget under `live_devices`, and a local dashboard's
+payload unchanged. The page's per-device rendering has no JS test runner
+here; it was verified by rendering a seeded hub with Playwright.
 `tests/test_hub.py` runs a real hub (`hub.HubHandler` on a loopback port
 over a temp store) and a real device store, so every push is the actual
 HTTP round trip and the actual inserts. UserAuth is a loopback stub
