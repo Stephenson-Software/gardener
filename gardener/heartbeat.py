@@ -32,6 +32,7 @@ from __future__ import annotations
 import sys
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -58,6 +59,10 @@ def build_snapshot(
     in_progress, batch, overnight_run = dashboard.progress_from_logs(active_logs, lines_by_log)
     if overnight_run is not None:
         overnight_run = {k: v for k, v in overnight_run.items() if k != "log"}
+        # `build_status` writes this as the device's naive local time, which
+        # the local page reads correctly and a hub viewer in another
+        # timezone would not. Sent as UTC.
+        overnight_run["started_at"] = _utc(overnight_run.get("started_at"))
     slots = [
         {
             "repo": slot["repo"],
@@ -89,6 +94,17 @@ def build_snapshot(
         "overnight_run": overnight_run,
         "slots": slots,
     }
+
+
+def _utc(value: Optional[str]) -> Optional[str]:
+    """A naive local ISO time as aware UTC; an aware one converted; None or
+    an unreadable one as None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc).isoformat(timespec="seconds")
+    except ValueError:
+        return None
 
 
 class Heartbeat:

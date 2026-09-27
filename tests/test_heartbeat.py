@@ -245,6 +245,10 @@ class TestBuildSnapshot(unittest.TestCase):
         self.assertEqual(snap["in_progress"], ["o/a", "o/b"])
         self.assertEqual(snap["batch_progress"], {"start": 1, "end": 2, "total": 10})
         self.assertEqual(snap["overnight_run"]["strategy"], "random")
+        # Sent as UTC, not the device's naive local time.
+        self.assertTrue(snap["overnight_run"]["started_at"].endswith("+00:00"))
+        self.assertEqual(heartbeat._utc("2026-09-27T01:00:00+02:00"), "2026-09-26T23:00:00+00:00")
+        self.assertIsNone(heartbeat._utc("soon"))
         self.assertEqual([(s["repo"], s["phase"]) for s in snap["slots"]],
                          [("o/a", "preparing"), ("o/b", "cloning")])
         self.assertNotIn("SECRET", json.dumps(snap))
