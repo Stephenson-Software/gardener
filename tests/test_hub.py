@@ -12,6 +12,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -21,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from gardener import cli, hub, state
+from gardener import cli, dev_loop, hub, state
 
 DEVICE_TOKEN = "box-token-for-tests"
 PHONE_TOKEN = "phone-token-for-tests"
@@ -609,6 +610,99 @@ class TestDeviceHealth(_HubTestCase):
     def test_digest_of_an_empty_hub(self):
         self.assertEqual(hub.digest(self.hub.db_path, now=self.NOW),
                          "No runs have reached the hub in the last 24 h.")
+
+
+class TestOrphanCheckConsultsHub(_HubTestCase):
+    """RFC 0007 phase 2: `find_orphaned_pr` hides a marked PR that a
+    completed tend on ANY device postdates, taking the later of this
+    device's history and the hub's, and never fails over the hub. `gh` is
+    mocked; the hub and both stores are real."""
+
+    PR_CREATED = "2026-09-24T10:00:00Z"
+    BEFORE = "2026-09-24T09:00:00+00:00"
+    AFTER = "2026-09-24T11:00:00+00:00"
+
+    def setUp(self):
+        super().setUp()
+        self.configure(self.hub.url, DEVICE_TOKEN)
+        which = patch("gardener.cli.shutil.which", return_value="/usr/bin/gh")
+        which.start()
+        self.addCleanup(which.stop)
+        gh = patch("gardener.cli._run", return_value=subprocess.CompletedProcess(
+            args=["gh"], returncode=0, stderr="", stdout=json.dumps([
+                {"number": 151, "headRefName": "feature/x", "body": dev_loop.ORPHAN_MARKER,
+                 "createdAt": self.PR_CREATED},
+            ]),
+        ))
+        gh.start()
+        self.addCleanup(gh.stop)
+
+    def configure(self, url, token=None):
+        lines = [f"{hub.URL_ENV}={url}"] + ([f"{hub.TOKEN_ENV}={token}"] if token else [])
+        (self.state_dir / hub.CONFIG_FILENAME).write_text("\n".join(lines) + "\n")
+
+    def phone_tend(self, timestamp, outcome="tend"):
+        run = state.Run(repo="owner/a", mode="tend", outcome=outcome, timestamp=timestamp,
+                        device="phone", run_uuid=str(uuid.uuid4()))
+        status, _, _ = self.hub.request(
+            "POST", "/api/v1/runs", {"Authorization": f"Bearer {PHONE_TOKEN}"},
+            json.dumps({"runs": [hub.run_to_wire(run)]}),
+        )
+        self.assertEqual(status, 200)
+
+    def orphan(self):
+        with redirect_stderr(io.StringIO()) as err:
+            found = cli.find_orphaned_pr("owner/a", db_path=self.db_path)
+        return (found.number if found else None), err.getvalue()
+
+    def test_a_hand_off_on_another_device_is_not_an_orphan_here(self):
+        self.record(timestamp=self.BEFORE)
+        self.phone_tend(self.AFTER)
+        self.assertEqual(self.orphan(), (None, ""))
+
+    def test_the_later_answer_wins_when_it_is_this_devices(self):
+        """The hub holds only the phone's older success; this device's own
+        newer one must still hide the PR. Taking the earlier answer (or the
+        hub's over local) would call it an orphan."""
+        self.record(timestamp=self.AFTER)
+        self.phone_tend(self.BEFORE)
+        self.assertEqual(self.orphan(), (None, ""))
+
+    def test_a_failed_run_on_another_device_is_not_a_hand_off(self):
+        self.record(timestamp=self.BEFORE)
+        self.phone_tend(self.AFTER, outcome="error")
+        self.assertEqual(self.orphan(), (151, ""))
+
+    def test_an_unreachable_hub_falls_back_to_local_with_one_note(self):
+        self.configure("http://127.0.0.1:9", DEVICE_TOKEN)
+        self.record(timestamp=self.AFTER)
+        number, err = self.orphan()
+        self.assertIsNone(number)
+        self.assertEqual(err.count("NOTE"), 1)
+        self.assertIn("this device's history only", err)
+
+    def test_a_hub_refusal_still_finds_the_orphan_from_local_history(self):
+        self.configure(self.hub.url, "not-a-device-token")
+        self.record(timestamp=self.BEFORE)
+        number, err = self.orphan()
+        self.assertEqual(number, 151)
+        self.assertIn("HTTP 401", err)
+
+    def test_no_hub_configured_asks_nothing(self):
+        (self.state_dir / hub.CONFIG_FILENAME).unlink()
+        self.record(timestamp=self.BEFORE)
+        self.phone_tend(self.AFTER)
+        with patch("gardener.hub.fetch_latest_success") as fetch:
+            self.assertEqual(self.orphan(), (151, ""))
+        fetch.assert_not_called()
+
+    def test_an_unreadable_hub_answer_is_an_error_not_a_hand_off(self):
+        config = hub.HubConfig(url=self.hub.url, token=DEVICE_TOKEN)
+        with patch("gardener.hub._request", return_value={"latest_success_at": "yesterday"}):
+            with self.assertRaises(hub.HubError):
+                hub.fetch_latest_success(config, "owner/a", "tend")
+        with patch("gardener.hub._request", return_value={"latest_success_at": None}):
+            self.assertIsNone(hub.fetch_latest_success(config, "owner/a", "tend"))
 
 
 class TestMintToken(unittest.TestCase):
