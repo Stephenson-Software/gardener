@@ -116,7 +116,10 @@ real tmp-dir sqlite3 db for the hand-off filter (a marked PR created before
 the repo's newest successful `tend` is not an orphan, an errored `tend` or
 another repo's run doesn't count as that, a newer interrupted PR is still
 found past an older handed-off one, and an unreadable db falls back to the
-marker alone), and `cmd_overnight` with
+marker alone; `test_hub.py`'s `TestOrphanCheckConsultsHub` covers the
+hub half against a loopback hub: another device's later hand-off hides the
+PR, the later of the local and hub answers wins either way round, and an
+unreachable or refusing hub falls back to local with one `NOTE`), and `cmd_overnight` with
 `_dispatch_tend` itself mocked — including its `--concurrency` batching
 (one test asserts every repo in a `ThreadPoolExecutor`-dispatched batch
 still gets attempted regardless of completion order, another asserts

@@ -26,6 +26,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -239,6 +240,32 @@ def current_branch(repo_dir: Path) -> str:
     return res.stdout.strip() or "main"
 
 
+def _latest_completed_tend(repo: str, db_path: Optional[Path]) -> Optional[datetime]:
+    """The newest successful `tend` of `repo` that `find_orphaned_pr` can
+    see: this device's run history and, with a hub configured, the hub's,
+    whichever is LATER. Only a later hand-off hides a PR, so taking the
+    earlier would let another device's hand-off through as an orphan.
+
+    Local comes first and is enough on its own. The hub is one request
+    bounded by `hub.REQUEST_TIMEOUT_SECONDS`; any failure there is one NOTE
+    and the local answer, never a failed tend."""
+    try:
+        local = state.latest_success_at(repo, Mode.TEND.value, db_path=db_path)
+    except (sqlite3.Error, OSError) as e:
+        print(f"gardener: NOTE — could not read run history for {repo} (non-fatal): {e}",
+              file=sys.stderr)
+        local = None
+    remote = None
+    try:
+        config = hub.load_config((db_path or state.default_db_path()).parent)
+        if config is not None:
+            remote = hub.fetch_latest_success(config, repo, Mode.TEND.value)
+    except Exception as e:  # noqa: BLE001 - the hub is an enhancement, never a precondition
+        print(f"gardener: NOTE — could not ask the hub about {repo}'s runs, using this "
+              f"device's history only (non-fatal): {e}", file=sys.stderr)
+    return max((when for when in (local, remote) if when is not None), default=None)
+
+
 def find_orphaned_pr(
     repo: str, timeout: int = 30, db_path: Optional[Path] = None
 ) -> Optional[dev_loop.OrphanedPR]:
@@ -256,9 +283,10 @@ def find_orphaned_pr(
     the hand-off was interrupted work and spent its whole run re-deriving
     the same decision (issue #164). A timed-out or errored `tend` doesn't
     count, since that is exactly the interruption this exists to recover
-    from. The history is this device's own, so a PR another device handed
-    off is still picked up once here; an unreadable db just disables the
-    filter rather than failing the check.
+    from. With a hub configured (RFC 0007) the history is every device's,
+    so a PR another device handed off isn't picked up here either; see
+    `_latest_completed_tend`. An unreadable db or hub just narrows or
+    disables the filter rather than failing the check.
 
     Best-effort: any `gh` failure
     (not authenticated, network hiccup, malformed JSON) is treated the same
@@ -293,12 +321,7 @@ def find_orphaned_pr(
         return None
     candidates = [pr for pr in prs if dev_loop.ORPHAN_MARKER in (pr.get("body") or "")]
     if candidates:
-        try:
-            completed_at = state.latest_success_at(repo, Mode.TEND.value, db_path=db_path)
-        except (sqlite3.Error, OSError) as e:
-            print(f"gardener: NOTE — could not read run history for {repo} (non-fatal): {e}",
-                  file=sys.stderr)
-            completed_at = None
+        completed_at = _latest_completed_tend(repo, db_path)
         if completed_at is not None:
             candidates = [
                 pr for pr in candidates

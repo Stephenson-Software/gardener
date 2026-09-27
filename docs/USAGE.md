@@ -159,10 +159,13 @@ orphaned if it was created after the repo's newest *successful* `tend` in
 this device's run history (`state.latest_success_at`): a `tend` that
 finished after the PR existed either opened it or was already handed it,
 and ended on purpose. An errored or timed-out `tend` doesn't count, since
-that is the interruption this exists to recover from. The history is
-per-device, so a PR another device handed off is picked up once here
-before it, too, reads as handed off; an unreadable state db disables this
-filter rather than the check.
+that is the interruption this exists to recover from. With a hub
+configured (`docs/HUB.md`), the history is every device's: the check takes
+the later of the local answer and the hub's, so a PR another device
+handed off isn't picked up here either. Without one, the history is
+per-device, and a PR another device handed off is picked up once here
+before it, too, reads as handed off. An unreadable state db or an
+unreachable hub narrows or disables this filter, never the check.
 
 ## Concurrent dispatch safety
 

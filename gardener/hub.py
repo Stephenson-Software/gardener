@@ -330,6 +330,22 @@ def fetch_runs(config: HubConfig, repo: Optional[str] = None, limit: int = 20) -
     ]
 
 
+def fetch_latest_success(config: HubConfig, repo: str, mode: str) -> Optional[datetime]:
+    """When `repo` last recorded a successful `mode` run on ANY device, per
+    the hub, or None if no device ever has. For `cli.find_orphaned_pr`, so a
+    PR one device handed off isn't taken for interrupted work on another.
+    Raises `HubError` on any failure, including an answer it can't read."""
+    query = urllib.parse.urlencode({"repo": repo, "mode": mode})
+    answer = _request(config, "GET", "/api/v1/latest-success?" + query)
+    value = answer.get("latest_success_at")
+    if value is None:
+        return None
+    when = state._parse_timestamp(value) if isinstance(value, str) else None
+    if when is None:
+        raise HubError(f"GET /api/v1/latest-success answered with an unreadable time: {value!r}")
+    return when
+
+
 # --------------------------------------------------------------------------
 # Hub side
 # --------------------------------------------------------------------------

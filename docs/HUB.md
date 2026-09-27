@@ -137,7 +137,7 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `GET /healthz` | anyone | `ok`, no data |
 | `POST /api/v1/runs` | device token | Body `{"runs": [...], "garden"?, "merge_allowlist"?}`, at most 500 runs. Answers `{"held": [uuid, ...]}`, listing every uuid from the batch the hub now holds. A row with an unknown `outcome` or a malformed uuid, repo, or timestamp refuses the whole batch with a 400 naming the field; the device keeps it queued. |
 | `GET /api/v1/runs?repo=&limit=` | device token or operator | Newest runs across devices (`gardener status --all-devices`) |
-| `GET /api/v1/latest-success?repo=&mode=` | device token or operator | When `repo` last recorded a successful `mode` run on any device. Nothing in gardener consults this yet (RFC 0007 phase 2). |
+| `GET /api/v1/latest-success?repo=&mode=` | device token or operator | When `repo` last recorded a successful `mode` run on any device. `tend`'s orphaned-PR check asks this before continuing a marked PR, so a PR one device handed off isn't taken for interrupted work on another (see [Orphaned-PR check](#orphaned-pr-check)). |
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
 
@@ -155,6 +155,19 @@ runs (for the container, `docker exec gardener-hub gardener hub ...`):
 
 Neither sends anything itself. Alerting and posting are the deployment's
 job; the reference deployment calls both from its box-side health monitor.
+
+## Orphaned-PR check
+
+Before a `tend`, gardener looks for an open PR that an earlier `tend` opened
+and never finished (see `docs/USAGE.md`). A marked PR created before the
+repo's newest successful `tend` was handed off on purpose, not interrupted.
+With a hub configured, "newest" means across every device: gardener reads
+its local history first, then asks `GET /api/v1/latest-success`, and uses
+the **later** of the two times.
+
+The hub can only make the check more careful, never break it. A hub
+error, a refusal, or a timeout (one request, 5 s) prints one `NOTE` and the
+check uses the local history alone, exactly as it would with no hub.
 
 ## Upgrading
 
