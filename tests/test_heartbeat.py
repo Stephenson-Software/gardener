@@ -260,3 +260,40 @@ class TestBuildSnapshot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHubStatusPayload(_HubTestCase):
+    """`/api/status` on a hub renders each device's heartbeat (RFC 0010 §5)."""
+
+    def put(self, device, age, in_progress, ending=False, interval=60):
+        body = _beat(interval=interval, ending=ending, in_progress=in_progress)
+        hub.store_heartbeat(self.hub.db_path, device, hub.heartbeat_from_wire(body),
+                            received_at=(datetime.now(timezone.utc) - timedelta(seconds=age))
+                            .isoformat(timespec="seconds"))
+
+    def status(self):
+        from test_hub import OPERATOR, _basic
+        code, _, body = self.hub.request("GET", "/api/status", _basic(OPERATOR))
+        self.assertEqual(code, 200)
+        return json.loads(body)
+
+    def test_in_flight_is_the_union_of_live_devices_only(self):
+        self.put("box", 30, ["owner/a", "owner/b"])
+        self.put("phone", 30, ["owner/b", "owner/c"])
+        self.put("tablet", 600, ["owner/stale"])            # stale: may have stopped
+        self.put("laptop", 30, ["owner/done"], ending=True)  # idle
+        payload = self.status()
+        self.assertEqual(payload["schema"], 4)
+        self.assertEqual(payload["in_progress"], ["owner/a", "owner/b", "owner/c"])
+        by = {d["device"]: d for d in payload["live_devices"]}
+        self.assertEqual({k: v["state"] for k, v in by.items()},
+                         {"box": "live", "phone": "live", "tablet": "stale", "laptop": "idle"})
+        self.assertEqual(by["box"]["batch_progress"], {"start": 1, "end": 2, "total": 10})
+        self.assertEqual(by["box"]["overnight_run"]["strategy"], "random")
+        self.assertEqual(by["tablet"]["in_progress"], ["owner/stale"])
+
+    def test_a_local_dashboard_is_unchanged(self):
+        from gardener import dashboard as dash
+        payload = dash.build_status(state_dir=self.state_dir)
+        self.assertEqual(payload["live_devices"], [])
+        self.assertEqual(payload["in_progress"], [])

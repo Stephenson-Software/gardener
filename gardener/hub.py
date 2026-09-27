@@ -1048,6 +1048,7 @@ class HubHandler(dashboard._DashboardHandler):
                     garden_repos=lists["garden"],
                     allowed_repos=lists["merge_allowlist"],
                     hub=True,
+                    live_devices=live_device_states(self.db_path),
                     **dashboard._status_query(parsed.query),
                 )
                 payload["hub_user"] = operator if self._cookie_token() else None

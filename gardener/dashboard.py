@@ -516,7 +516,10 @@ def build_garden_rows(
 #: the normal case, and #119's `recent_*` → `session_*` rename is exactly
 #: the shape of change that produced it. Bumped to 3 when
 #: `overnight_next_index` became `overnight_cycle`/`overnight_run` (issue
-#: #113) — the same shape of change again.
+#: #113) — the same shape of change again. Bumped to 4 when a hub's
+#: `in_progress` stopped being always empty and `live_devices` arrived
+#: (RFC 0010): a hub page from before that would render the union as its
+#: own device's.
 def progress_from_logs(
     active_logs: list[Path], lines_by_log: dict[Path, list[str]]
 ) -> tuple[list[str], Optional[tuple[int, int, int]], Optional[dict]]:
@@ -580,7 +583,7 @@ def progress_from_logs(
     return in_progress, batch, overnight_run
 
 
-PAYLOAD_SCHEMA = 3
+PAYLOAD_SCHEMA = 4
 
 
 def build_status(
@@ -592,6 +595,7 @@ def build_status(
     garden_repos: Optional[list[str]] = None,
     allowed_repos: Optional[list[str]] = None,
     hub: bool = False,
+    live_devices: Optional[list[dict]] = None,
 ) -> dict:
     """The `/api/status` payload.
 
@@ -600,7 +604,14 @@ def build_status(
     each device last pushed, since its own state dir holds no garden. `hub`
     marks the payload as coming from a store that combines devices, so the
     page can say that the log-backed panels are per-device instead of
-    rendering them empty, which would read as "nothing is running"."""
+    rendering them empty, which would read as "nothing is running".
+
+    `live_devices` is the hub's `hub.live_device_states` (RFC 0010): each
+    device's latest heartbeat and whether it is live, stale, or idle. On a
+    hub it replaces the log-backed in-flight data this state dir doesn't
+    have. `in_progress` becomes the union over *live* devices only, since a
+    stale one may have stopped, and each device's own batch and budget go
+    out under `live_devices`."""
     base = state_dir or state.default_state_dir()
     db_path = base / "gardener.sqlite3"
     logs_dir = default_logs_dir(base)
@@ -618,6 +629,26 @@ def build_status(
     log_lines = lines_by_log.get(active_log, [])
 
     in_progress, batch, overnight_run = progress_from_logs(active_logs, lines_by_log)
+    devices_payload = []
+    if live_devices is not None:
+        in_progress = []
+        for d in live_devices:
+            snap = d.get("snapshot") or {}
+            if d["state"] == "live":
+                in_progress += [r for r in snap.get("in_progress") or [] if r not in in_progress]
+            session = snap.get("session") or {}
+            devices_payload.append({
+                "device": d["device"],
+                "state": d["state"],
+                "age_seconds": d["age_seconds"],
+                "received_at": d["received_at"],
+                "command": session.get("command"),
+                "target": session.get("target"),
+                "in_progress": snap.get("in_progress") or [],
+                "batch_progress": snap.get("batch_progress"),
+                "overnight_run": snap.get("overnight_run"),
+                "slots": snap.get("slots") or [],
+            })
 
     # Scoped to the newest contiguous burst of runs, not to the `run_limit`
     # slice above: the panel these feed is the one read to answer "how did
@@ -680,6 +711,7 @@ def build_status(
         "log_tail": log_lines[-200:],
         "log_tails": {str(p): lines[-200:] for p, lines in lines_by_log.items()},
         "in_progress": in_progress,
+        "live_devices": devices_payload,
         "batch_progress": (
             {"start": batch[0], "end": batch[1], "total": batch[2]} if batch else None
         ),
@@ -903,6 +935,12 @@ PAGE_HTML = """<!doctype html>
   td.device { white-space: nowrap; color: var(--muted); }
   /* Log-backed panels a hub has no data for; see renderHubChrome. */
   .is-hub .log-panel, .is-hub #live-link, .is-hub #cycle, .is-hub #budget, .is-hub #batch { display: none; }
+  body:not(.is-hub) #hub-live { display: none; }
+  .hub-device { margin-top: 0.75rem; }
+  .hub-device h3 { font-size: 0.9rem; margin: 0 0 0.25rem; font-weight: 600; }
+  .hub-device h3 .sub { font-weight: 400; color: var(--muted); }
+  .hub-device.is-stale { opacity: 0.6; }
+  .pill.is-stale { opacity: 0.6; border-style: dashed; }
   #hub-user { margin-left: auto; }
   .is-hub #hub-user + #live-link { margin-left: 0; }
   .outcome-error { color: var(--err); }
@@ -1298,6 +1336,10 @@ PAGE_HTML = """<!doctype html>
       <div id="cycle"></div>
       <div id="budget"></div>
       <div id="batch"></div>
+      <!-- A hub's per-device live state, from each device's heartbeat
+           (RFC 0010); stands in for the three bars above, which read this
+           machine's own logs. -->
+      <div id="hub-live"></div>
     </div>
     <div class="panel">
       <h2>Currently tending</h2>
@@ -2309,7 +2351,7 @@ function sessionWindow(stats) {
 // then calling markFresh over the top of it (issue #123). Missing keys
 // stringify rather than throw, which is exactly why this has to be an
 // explicit check rather than something render code discovers naturally.
-const PAGE_SCHEMA = 3;
+const PAGE_SCHEMA = 4;
 const REQUIRED_KEYS = ["stats", "runs", "garden_rows", "log_tail", "in_progress"];
 const REQUIRED_STAT_KEYS = ["session_run_count", "session_cost_usd", "session_error_count"];
 function assertPayload(data) {
@@ -2423,8 +2465,11 @@ function renderCycle(oc) {
 // cycle can plausibly land tonight — and it was on no panel at all, even
 // though the run states it on its first line (issue #113).
 function renderBudget(run) {
-  const el = document.getElementById("budget");
-  if (!run) { el.innerHTML = ""; return; }
+  document.getElementById("budget").innerHTML = budgetHtml(run);
+}
+
+function budgetHtml(run) {
+  if (!run) return "";
   const budgetMs = run.budget_hours * 3600 * 1000;
   const parts = [`budget ${fmtDur(budgetMs)}`];
   if (run.elapsed_seconds != null) {
@@ -2435,8 +2480,48 @@ function renderBudget(run) {
   const pct = run.elapsed_seconds != null && budgetMs > 0
     ? Math.min(100, 100 * run.elapsed_seconds * 1000 / budgetMs)
     : null;
-  el.innerHTML = `<div class="sub">${esc(parts.join(" · "))}</div>`
+  return `<div class="sub">${esc(parts.join(" · "))}</div>`
     + (pct == null ? "" : `<div class="progress-bar"><div style="width:${pct}%"></div></div>`);
+}
+
+function batchHtml(bp, empty) {
+  if (!bp) return empty;
+  // A default (--concurrency 1) run reports a batch of one, where start
+  // and end are the same candidate — read as a range it says "3–3".
+  const label = bp.start === bp.end ? `candidate ${bp.start}` : `candidates ${bp.start}–${bp.end}`;
+  return `<div class="sub">${label} of ${bp.total} this run</div>
+       <div class="progress-bar"><div style="width:${Math.min(100, 100 * bp.end / bp.total)}%"></div></div>`;
+}
+
+function ageText(seconds) {
+  if (seconds == null) return "never";
+  return seconds < 90 ? `${seconds}s ago` : `${fmtDur(seconds * 1000)} ago`;
+}
+
+// One block per device from its latest heartbeat (RFC 0010 §4): live
+// devices show their budget and batch, stale ones the same greyed with how
+// long since they were heard, idle ones a single line. The age is measured
+// on the hub's clock, never the device's.
+function renderHubLive(devices) {
+  const el = document.getElementById("hub-live");
+  if (!devices || !devices.length) {
+    el.innerHTML = `<div class="empty">no device has sent a heartbeat yet</div>`;
+    return;
+  }
+  el.innerHTML = devices.map(d => {
+    const what = d.command ? ` · ${esc(d.command)}${d.target ? " " + esc(d.target) : ""}` : "";
+    if (d.state === "idle") {
+      return `<div class="hub-device"><h3>${esc(d.device)} <span class="sub">not dispatching · last heard ${esc(ageText(d.age_seconds))}</span></h3></div>`;
+    }
+    const label = d.state === "live"
+      ? `live${what} · updated ${esc(ageText(d.age_seconds))}`
+      : `last heard ${esc(ageText(d.age_seconds))} — may have stopped${what}`;
+    return `<div class="hub-device${d.state === "stale" ? " is-stale" : ""}">
+      <h3>${esc(d.device)} <span class="sub">${label}</span></h3>
+      ${budgetHtml(d.overnight_run)}
+      ${batchHtml(d.batch_progress, "")}
+    </div>`;
+  }).join("");
 }
 
 // A hub (RFC 0007) serves this page over the run history of every device,
@@ -2452,6 +2537,20 @@ function renderHubChrome(data) {
   } else {
     who.hidden = true;
   }
+}
+
+// On a hub, each in-flight repo is tagged with the device tending it; a
+// stale device's repos are shown greyed rather than dropped, because it
+// may still be running and only its heartbeats stopped.
+function hubInFlightHtml(devices) {
+  const pills = [];
+  for (const d of devices) {
+    if (d.state === "idle") continue;
+    for (const r of d.in_progress) {
+      pills.push(`<span class="pill live${d.state === "stale" ? " is-stale" : ""}" title="${esc(r)} on ${esc(d.device)}">${esc(r)} · ${esc(d.device)}</span>`);
+    }
+  }
+  return pills.length ? pills.join("") : `<span class="empty">nothing in flight on any device</span>`;
 }
 
 function renderStatus(data) {
@@ -2473,26 +2572,19 @@ function renderStatus(data) {
     <div class="stat"><div class="n">${st.session_run_count}</div><div class="l">runs</div></div>
     <div class="stat"><div class="n">${fmtCost(st.session_cost_usd)}</div><div class="l">cost</div></div>
     <div class="stat${st.session_error_count ? " is-err" : ""}"><div class="n">${st.session_error_count}</div><div class="l">errors</div></div>
-    <div class="stat${liveCount ? " is-live" : ""}"><div class="n">${data.hub ? "—" : liveCount}</div><div class="l">in flight</div></div>
+    <div class="stat${liveCount ? " is-live" : ""}"><div class="n">${liveCount}</div><div class="l">in flight</div></div>
   `;
 
   renderCycle(data.overnight_cycle);
   renderBudget(data.overnight_run);
 
-  const bp = data.batch_progress;
-  // A default (--concurrency 1) run reports a batch of one, where start
-  // and end are the same candidate — read as a range it says "3–3".
-  const bpLabel = !bp ? "" : bp.start === bp.end
-    ? `candidate ${bp.start}`
-    : `candidates ${bp.start}–${bp.end}`;
-  document.getElementById("batch").innerHTML = bp
-    ? `<div class="sub">${bpLabel} of ${bp.total} this run</div>
-       <div class="progress-bar"><div style="width:${Math.min(100, 100 * bp.end / bp.total)}%"></div></div>`
-    : `<div class="empty">no overnight batch in this log</div>`;
+  document.getElementById("batch").innerHTML =
+    batchHtml(data.batch_progress, `<div class="empty">no overnight batch in this log</div>`);
+  if (data.hub) renderHubLive(data.live_devices);
 
   const ip = document.getElementById("in-progress");
   ip.innerHTML = data.hub
-    ? `<span class="empty">per-device: open the dashboard on the device that is dispatching</span>`
+    ? hubInFlightHtml(data.live_devices || [])
     : liveCount
     ? data.in_progress.map(r =>
         `<span class="pill live" title="${esc(r)}">${esc(r)}</span>`).join("")
