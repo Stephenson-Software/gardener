@@ -243,7 +243,14 @@ it covers idempotency (a re-sent batch stores nothing twice), a token
 storing every row under its own device name whatever the row claims, an unknown outcome refused and left
 queued, every non-`/healthz` route refusing anonymous requests, a device
 token reading `/api/v1/` but not the dashboard, the garden as the union of
-pushed lists, and `/live` named per-device. For UserAuth sign-in:
+pushed lists, and `/live` named per-device. `TestDeviceHealth` covers
+what only the hub can see, with `now` injected: the 36 h quiet flag and its
+boundary, sessions walked per device so two devices' nights don't
+interleave, `all_errors` cleared by one success, `/api/v1/devices` naming
+the caller's device, `hub devices --json`, and the digest's window, per-device
+lines, errored repos, and quiet list; `TestHubStatusCommand` covers `hub
+status` matching the hub's count under the token's name and exiting 1 on a
+mismatch. For UserAuth sign-in:
 redirect to `/login`, cookie attributes, the operator allowlist enforced
 both at sign-in *and* on every cookie (a token minted at UserAuth directly
 is refused), identical failure pages for a wrong password and an unknown

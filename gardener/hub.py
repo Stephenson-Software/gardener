@@ -73,6 +73,7 @@ import urllib.request
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -310,6 +311,12 @@ def push_after_record(db_path: Optional[Path] = None) -> None:
         print(f"gardener: NOTE — hub push failed (non-fatal): {e}", file=sys.stderr)
 
 
+def fetch_devices(config: HubConfig) -> dict:
+    """The hub's per-device summary (`device_summaries`), plus `you`: the
+    device the hub files this token's runs under. For `hub status`."""
+    return _request(config, "GET", "/api/v1/devices")
+
+
 def fetch_runs(config: HubConfig, repo: Optional[str] = None, limit: int = 20) -> list[state.Run]:
     """The hub's newest runs across every device, for `status --all-devices`."""
     query = {"limit": str(limit)}
@@ -499,6 +506,112 @@ def union_device_lists(db_path: Path) -> dict[str, list[str]]:
                 except json.JSONDecodeError:
                     continue
     return {name: sorted(repos) for name, repos in out.items()}
+
+
+#: How long a device can go without a run reaching the hub before
+#: `device_summaries` calls it quiet: one missed night, with room for a late
+#: one, so a single slow night doesn't page (owner decision, 2026-09-27).
+QUIET_AFTER_SECONDS = 36 * 3600
+
+
+def device_summaries(db_path: Path, now: Optional[datetime] = None) -> list[dict]:
+    """One entry per device the hub holds runs for: how many, the newest,
+    how long ago that was, and its latest session (`state.session_stats`
+    for that device alone).
+
+    This is what only a hub can say. A device whose nightly job silently
+    stopped (2026-09-18: exit 0, no alert) can't report its own absence,
+    but the hub sees that nothing new arrived. `quiet` and
+    `last_session.all_errors` are the two signals the gateway's watchdog
+    alerts on. A device that has never pushed is simply absent: there is
+    nothing to compare against until its first sync."""
+    now = now or datetime.now(timezone.utc)
+    if not db_path.exists():
+        return []
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        counts = conn.execute(
+            "SELECT device, COUNT(*) FROM runs WHERE device IS NOT NULL GROUP BY device ORDER BY device"
+        ).fetchall()
+    out = []
+    for device, runs in counts:
+        session = state.session_stats(db_path=db_path, device=device)
+        last = state._parse_timestamp(session.ended_at)
+        quiet_seconds = int((now - last).total_seconds()) if last else None
+        out.append({
+            "device": device,
+            "runs": runs,
+            "last_run_at": session.ended_at,
+            "quiet_seconds": quiet_seconds,
+            "quiet": quiet_seconds is None or quiet_seconds > QUIET_AFTER_SECONDS,
+            "last_session": {
+                "runs": session.runs,
+                "errors": session.errors,
+                "started_at": session.started_at,
+                "ended_at": session.ended_at,
+                "all_errors": session.runs > 0 and session.errors == session.runs,
+            },
+        })
+    return out
+
+
+def digest(db_path: Path, hours: float = 24, now: Optional[datetime] = None) -> str:
+    """A short plain-text summary of the last `hours` across every device,
+    for a once-a-day post: runs, successes, errors, and spend per device,
+    the repos that errored, and any device that has gone quiet. Built from
+    the store alone, so it reads the same wherever it is run."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+    per_device: dict[str, dict] = {}
+    if db_path.exists():
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            # A day of slack on the string compare, then the exact cut on
+            # parsed times: a hand-edited row may not be fixed-width UTC.
+            rows = conn.execute(
+                "SELECT device, repo, outcome, timestamp, cost_usd FROM runs "
+                "WHERE device IS NOT NULL AND timestamp >= ?",
+                ((cutoff - timedelta(days=1)).date().isoformat(),),
+            ).fetchall()
+        for device, repo, outcome, timestamp, cost in rows:
+            when = state._parse_timestamp(timestamp)
+            if when is None or when < cutoff or when > now:
+                continue
+            d = per_device.setdefault(
+                device, {"runs": 0, "ok": 0, "errors": 0, "cost": 0.0, "failed": []}
+            )
+            d["runs"] += 1
+            d["cost"] += cost or 0.0
+            if outcome in state.SUCCESS_OUTCOMES:
+                d["ok"] += 1
+            elif outcome == state.ERROR_OUTCOME:
+                d["errors"] += 1
+                if repo not in d["failed"]:
+                    d["failed"].append(repo)
+    summaries = {s["device"]: s for s in device_summaries(db_path, now=now)}
+    window = f"{hours:g} h"
+    lines = []
+    for device in sorted(set(per_device) | set(summaries)):
+        d = per_device.get(device)
+        if d is None:
+            last = summaries[device]["last_run_at"] or "never"
+            lines.append(f"**{device}**: no runs in the last {window} (last run {last})")
+            continue
+        line = (f"**{device}**: {d['runs']} run(s), {d['ok']} ok, {d['errors']} error(s), "
+                f"${d['cost']:.2f}")
+        lines.append(line)
+        if d["failed"]:
+            shown = ", ".join(d["failed"][:5])
+            more = f" (+{len(d['failed']) - 5} more)" if len(d["failed"]) > 5 else ""
+            lines.append(f"  errored: {shown}{more}")
+    if not lines:
+        return f"No runs have reached the hub in the last {window}."
+    total = sum(d["runs"] for d in per_device.values())
+    cost = sum(d["cost"] for d in per_device.values())
+    lines.append(f"Total: {total} run(s), ${cost:.2f} over the last {window}.")
+    quiet = [name for name, s in summaries.items() if s["quiet"]]
+    if quiet:
+        lines.append("Quiet for over "
+                     f"{QUIET_AFTER_SECONDS // 3600} h: {', '.join(sorted(quiet))}")
+    return "\n".join(lines)
 
 
 class InvalidRun(ValueError):
@@ -701,7 +814,7 @@ class HubHandler(dashboard._DashboardHandler):
             if operator is None and device is None:
                 self._deny(browser=False)
                 return
-            self._api_get(path, parsed.query)
+            self._api_get(path, parsed.query, device)
             return
         if operator is None:
             self._deny(browser=path in ("/", "/index.html"))
@@ -732,7 +845,7 @@ class HubHandler(dashboard._DashboardHandler):
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
 
-    def _api_get(self, path: str, query: str) -> None:
+    def _api_get(self, path: str, query: str, device: Optional[str] = None) -> None:
         params = urllib.parse.parse_qs(query)
         if path == "/api/v1/runs":
             try:
@@ -750,6 +863,8 @@ class HubHandler(dashboard._DashboardHandler):
                 return
             when = state.latest_success_at(repo, mode, db_path=self.db_path)
             self._json(200, {"latest_success_at": when.isoformat() if when else None})
+        elif path == "/api/v1/devices":
+            self._json(200, {"devices": device_summaries(self.db_path), "you": device})
         else:
             self._json(404, {"error": "not found"})
 

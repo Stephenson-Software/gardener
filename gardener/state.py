@@ -515,6 +515,7 @@ def session_stats(
     db_path: Optional[Path] = None,
     gap_seconds: float = SESSION_GAP_SECONDS,
     max_span_seconds: float = MAX_SESSION_SPAN_SECONDS,
+    device: Optional[str] = None,
 ) -> SessionStats:
     """Aggregate of the newest run and every run contiguous with it.
 
@@ -527,7 +528,10 @@ def session_stats(
     dispatch is a few thousand rows.
 
     An empty or missing db is a zeroed `SessionStats`, not an error: the
-    dashboard renders before anything has ever been dispatched."""
+    dashboard renders before anything has ever been dispatched.
+
+    `device` limits the walk to one device's runs, for a hub's store, where
+    two devices' nights would otherwise interleave into one session."""
     db_path = db_path or default_db_path()
     stats = SessionStats()
     if not db_path.exists():
@@ -536,9 +540,11 @@ def session_stats(
     previous: Optional[datetime] = None
     with closing(_connect(db_path, ensure_schema=False)) as conn:
         conn.row_factory = sqlite3.Row
+        where, params = ("WHERE device = ? ", (device,)) if device is not None else ("", ())
         for row in conn.execute(
             "SELECT id, repo, mode, timestamp, outcome, gap_summary, cost_usd, duration_ms "
-            f"FROM runs {NEWEST_FIRST}"
+            f"FROM runs {where}{NEWEST_FIRST}",
+            params,
         ):
             current = _parse_timestamp(row["timestamp"])
             # Measured from the newest run rather than from the previous
@@ -726,6 +732,15 @@ def pending_push(db_path: Optional[Path] = None, limit: int = 100) -> list[Run]:
             (limit,),
         ).fetchall()
     return [_row_to_run(r) for r in rows]
+
+
+def count_runs(db_path: Optional[Path] = None) -> int:
+    """Every run in the store, pushed or not. 0 for a missing db."""
+    db_path = db_path or default_db_path()
+    if not db_path.exists():
+        return 0
+    with closing(_connect(db_path, ensure_schema=False)) as conn:
+        return conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
 
 
 def pending_push_summary(db_path: Optional[Path] = None) -> tuple[int, Optional[str]]:
