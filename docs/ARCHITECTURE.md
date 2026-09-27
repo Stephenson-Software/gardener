@@ -59,7 +59,12 @@ gardener/
                        (hub.env config, outbox push after every record,
                        `hub sync`) and the hub itself (`hub serve`: the
                        dashboard handler behind basic/UserAuth auth over a
-                       combined store, plus the /api/v1 push/read endpoints)
+                       combined store, plus the /api/v1 push/read endpoints,
+                       and the heartbeat route/`device_live` table of RFC 0010)
+    heartbeat.py     — live-state heartbeats while a dispatch runs (RFC 0010):
+                       a daemon thread sending the hub a structured snapshot
+                       (no log or transcript text) every N s, plus a final
+                       `ending` beat; never affects the dispatch
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     usage.py         — one `startup` usage event per CLI invocation, tagged
                        version + service=true, sent to trace; settings via

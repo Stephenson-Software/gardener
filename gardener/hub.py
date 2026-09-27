@@ -82,6 +82,10 @@ from gardener import __version__, dashboard, garden, merge_allowlist, notify, st
 
 URL_ENV = "GARDENER_HUB_URL"
 TOKEN_ENV = "GARDENER_HUB_TOKEN"
+HEARTBEAT_ENV = "GARDENER_HUB_HEARTBEAT_SECONDS"
+#: RFC 0010, owner decision 2026-09-27: on by default at 60 s once a hub is
+#: configured; a phone sets 300 to save battery and data.
+DEFAULT_HEARTBEAT_SECONDS = 60
 CONFIG_FILENAME = "hub.env"
 
 DEVICE_TOKENS_ENV = "GARDENER_HUB_DEVICE_TOKENS"
@@ -109,7 +113,12 @@ MAX_SUMMARY_CHARS = 64 * 1024
 
 
 class HubError(Exception):
-    """A hub request failed: unreachable, refused, or answered badly."""
+    """A hub request failed: unreachable, refused, or answered badly.
+    `status` is the HTTP status when the hub answered with one."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 # --------------------------------------------------------------------------
@@ -121,6 +130,9 @@ class HubError(Exception):
 class HubConfig:
     url: str
     token: Optional[str]
+    #: Seconds between live-state heartbeats while dispatching (RFC 0010);
+    #: 0 turns them off.
+    heartbeat_seconds: int = 60
 
 
 def config_path(state_dir: Optional[Path] = None) -> Path:
@@ -154,7 +166,16 @@ def load_config(state_dir: Optional[Path] = None) -> Optional[HubConfig]:
     url = pick(URL_ENV)
     if not url:
         return None
-    return HubConfig(url=url.rstrip("/"), token=pick(TOKEN_ENV))
+    heartbeat_seconds = DEFAULT_HEARTBEAT_SECONDS
+    raw = pick(HEARTBEAT_ENV)
+    if raw is not None:
+        try:
+            heartbeat_seconds = max(0, int(raw))
+        except ValueError:
+            print(f"gardener: NOTE — {HEARTBEAT_ENV}={raw!r} is not a whole number of seconds; "
+                  f"using {DEFAULT_HEARTBEAT_SECONDS}", file=sys.stderr)
+    return HubConfig(url=url.rstrip("/"), token=pick(TOKEN_ENV),
+                     heartbeat_seconds=heartbeat_seconds)
 
 
 #: The `Run` fields a push carries, and the only ones `fetch_runs` reads
@@ -207,7 +228,7 @@ def _request(
             raw = resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read(500).decode("utf-8", "replace").strip()
-        raise HubError(f"{method} {path} → HTTP {e.code}: {detail}") from e
+        raise HubError(f"{method} {path} → HTTP {e.code}: {detail}", status=e.code) from e
     except (urllib.error.URLError, OSError) as e:
         raise HubError(f"{method} {path} failed: {e}") from e
     try:
@@ -630,6 +651,188 @@ def digest(db_path: Path, hours: float = 24, now: Optional[datetime] = None) -> 
     return "\n".join(lines)
 
 
+DEVICE_LIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS device_live (
+    device TEXT PRIMARY KEY,
+    received_at TEXT NOT NULL,
+    sent_at TEXT,
+    seq INTEGER,
+    session_id TEXT,
+    ending INTEGER NOT NULL DEFAULT 0,
+    snapshot TEXT NOT NULL
+);
+"""
+
+#: A heartbeat is a few hundred bytes plus the slot list; anything near
+#: this is not one (RFC 0010 §1).
+HEARTBEAT_MAX_BYTES = 16 * 1024
+#: Every `phase` `live.build_slots` can give a slot.
+SLOT_PHASES = frozenset({"cloning", "preparing", "running", "finished", "stopped"})
+
+
+class InvalidHeartbeat(ValueError):
+    pass
+
+
+def heartbeat_from_wire(body: object) -> dict:
+    """A pushed heartbeat reduced to exactly the fields RFC 0010 §1 lists,
+    or `InvalidHeartbeat` naming the bad one.
+
+    Only named fields are copied, so a device that sends more than this hub
+    knows about (a newer gardener, or a bug) can't get log or transcript
+    text stored here: the owner decided none leaves a device (RFC 0010,
+    Resolved Question 2)."""
+    from gardener.cli import REPO_RE
+
+    if not isinstance(body, dict):
+        raise InvalidHeartbeat("the body must be an object")
+
+    def text(obj: dict, name: str, limit: int, required: bool = False) -> Optional[str]:
+        value = obj.get(name)
+        if value is None and not required:
+            return None
+        if not isinstance(value, str) or not value or len(value) > limit:
+            raise InvalidHeartbeat(f"{name} must be a string of 1-{limit} characters")
+        return value
+
+    def integer(obj: dict, name: str, low: int, high: int, required: bool = False) -> Optional[int]:
+        value = obj.get(name)
+        if value is None and not required:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise InvalidHeartbeat(f"{name} must be a whole number from {low} to {high}")
+        return value
+
+    def repo(value: object, name: str) -> str:
+        if not isinstance(value, str) or not REPO_RE.match(value):
+            raise InvalidHeartbeat(f"{name} {value!r} is not owner/name")
+        return value
+
+    session = body.get("session")
+    if not isinstance(session, dict):
+        raise InvalidHeartbeat("session must be an object")
+    in_progress = body.get("in_progress") or []
+    slots = body.get("slots") or []
+    if not isinstance(in_progress, list) or len(in_progress) > 100:
+        raise InvalidHeartbeat("in_progress must be a list of at most 100 repos")
+    if not isinstance(slots, list) or len(slots) > 100:
+        raise InvalidHeartbeat("slots must be a list of at most 100 slots")
+    batch = body.get("batch_progress")
+    if batch is not None:
+        if not isinstance(batch, dict):
+            raise InvalidHeartbeat("batch_progress must be an object or null")
+        batch = {k: integer(batch, k, 0, 1_000_000, required=True) for k in ("start", "end", "total")}
+    run = body.get("overnight_run")
+    if run is not None:
+        if not isinstance(run, dict):
+            raise InvalidHeartbeat("overnight_run must be an object or null")
+        budget = run.get("budget_hours")
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 <= budget <= 1000:
+            raise InvalidHeartbeat("overnight_run.budget_hours must be a number of hours")
+        run = {
+            "strategy": text(run, "strategy", 32),
+            "budget_hours": budget,
+            "garden_size_at_start": integer(run, "garden_size_at_start", 0, 1_000_000),
+            "started_at": text(run, "started_at", 64),
+            "elapsed_seconds": integer(run, "elapsed_seconds", 0, 10**9),
+            "remaining_seconds": integer(run, "remaining_seconds", 0, 10**9),
+        }
+    cleaned_slots = []
+    for slot in slots:
+        if not isinstance(slot, dict):
+            raise InvalidHeartbeat("each slot must be an object")
+        phase = slot.get("phase")
+        if phase not in SLOT_PHASES:
+            raise InvalidHeartbeat(f"slot phase {phase!r} is unknown to this hub; upgrade the hub")
+        cleaned_slots.append({
+            "repo": repo(slot.get("repo"), "slot repo"),
+            "phase": phase,
+            "started_at": text(slot, "started_at", 64),
+            "idle_seconds": integer(slot, "idle_seconds", 0, 10**9),
+            "stalled": slot.get("stalled") is True,
+            "rate_limit_seen": slot.get("rate_limit_seen") is True,
+        })
+    ending = body.get("ending", False)
+    if not isinstance(ending, bool):
+        raise InvalidHeartbeat("ending must be true or false")
+    return {
+        "seq": integer(body, "seq", 0, 2**62, required=True),
+        "sent_at": text(body, "sent_at", 64),
+        "interval_seconds": integer(body, "interval_seconds", 1, 86_400, required=True),
+        "ending": ending,
+        "gardener_version": text(body, "gardener_version", 64),
+        "session": {
+            "id": text(session, "id", 64, required=True),
+            "command": text(session, "command", 64),
+            "target": text(session, "target", 200),
+            "started_at": text(session, "started_at", 64),
+        },
+        "in_progress": [repo(r, "in_progress entry") for r in in_progress],
+        "batch_progress": batch,
+        "overnight_run": run,
+        "slots": cleaned_slots,
+    }
+
+
+def store_heartbeat(db_path: Path, device: str, beat: dict, received_at: Optional[str] = None) -> bool:
+    """Replace `device`'s live row with `beat` (latest wins), unless it is
+    older than the stored one for the same session: beats can arrive out of
+    order after a retry. Returns whether it was stored."""
+    received_at = received_at or state.now_iso()
+    session_id = beat["session"]["id"]
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute(DEVICE_LIVE_SCHEMA)
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO device_live (device, received_at, sent_at, seq, session_id, ending, snapshot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(device) DO UPDATE SET received_at = excluded.received_at, "
+                "sent_at = excluded.sent_at, seq = excluded.seq, session_id = excluded.session_id, "
+                "ending = excluded.ending, snapshot = excluded.snapshot "
+                "WHERE NOT (device_live.session_id = excluded.session_id AND device_live.seq > excluded.seq)",
+                (device, received_at, beat.get("sent_at"), beat["seq"], session_id,
+                 1 if beat["ending"] else 0, json.dumps(beat)),
+            )
+            return cur.rowcount > 0
+
+
+def live_device_states(db_path: Path, now: Optional[datetime] = None) -> list[dict]:
+    """Each device's latest heartbeat with its state: `live`, `stale`, or
+    `idle` (RFC 0010 §4). Age is measured on the hub's clock only
+    (`received_at`), never against the device's `sent_at`: the two clocks
+    differ, which is what gardener #171 fixed for the page.
+
+    live: at most 3 of the device's own intervals old and not ending.
+    stale: older than that but within the active-log window.
+    idle: ending, or older than the active-log window."""
+    now = now or datetime.now(timezone.utc)
+    if not db_path.exists():
+        return []
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute(DEVICE_LIVE_SCHEMA)
+        rows = conn.execute(
+            "SELECT device, received_at, ending, snapshot FROM device_live ORDER BY device"
+        ).fetchall()
+    out = []
+    for device, received_at, ending, snapshot in rows:
+        try:
+            beat = json.loads(snapshot)
+        except json.JSONDecodeError:
+            continue
+        received = state._parse_timestamp(received_at)
+        age = max(0, int((now - received).total_seconds())) if received else None
+        interval = beat.get("interval_seconds") or DEFAULT_HEARTBEAT_SECONDS
+        if ending or age is None or age > dashboard.ACTIVE_LOG_WINDOW_SECONDS:
+            status = "idle"
+        elif age <= 3 * interval:
+            status = "live"
+        else:
+            status = "stale"
+        out.append({"device": device, "state": status, "age_seconds": age,
+                    "received_at": received_at, "snapshot": beat})
+    return out
+
+
 class InvalidRun(ValueError):
     pass
 
@@ -890,6 +1093,8 @@ class HubHandler(dashboard._DashboardHandler):
             self._login()
         elif path == "/api/v1/runs":
             self._push()
+        elif path == "/api/v1/heartbeat":
+            self._heartbeat()
         else:
             self._json(404, {"error": "not found"})
 
@@ -912,6 +1117,36 @@ class HubHandler(dashboard._DashboardHandler):
         self._redirect(
             "/", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict",
         )
+
+    def _heartbeat(self) -> None:
+        header = self.headers.get("Authorization") or ""
+        scheme, _, credential = header.partition(" ")
+        device = self.auth.device_for_token(credential.strip()) if scheme.lower() == "bearer" else None
+        if device is None:
+            self._json(401, {"error": "a device token is required to send a heartbeat"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length < 0 or length > HEARTBEAT_MAX_BYTES:
+            self._json(413, {"error": f"a heartbeat must be at most {HEARTBEAT_MAX_BYTES} bytes"})
+            return
+        try:
+            beat = heartbeat_from_wire(json.loads(self.rfile.read(length) or b"null"))
+        except json.JSONDecodeError:
+            self._json(400, {"error": "body is not JSON"})
+            return
+        except InvalidHeartbeat as e:
+            self._json(400, {"error": str(e)})
+            return
+        try:
+            stored = store_heartbeat(self.db_path, device, beat)
+        except sqlite3.Error as e:
+            print(f"gardener hub: heartbeat from {device} failed: {e!r}", file=sys.stderr)
+            self._json(503, {"error": "store unavailable"})
+            return
+        self._json(200, {"stored": stored})
 
     def _push(self) -> None:
         header = self.headers.get("Authorization") or ""
@@ -965,6 +1200,7 @@ def prepare_store(data_dir: Path) -> Path:
     with closing(state._connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(DEVICE_LISTS_SCHEMA)
+        conn.execute(DEVICE_LIVE_SCHEMA)
         conn.commit()
     return db_path
 

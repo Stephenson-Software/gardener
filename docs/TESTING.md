@@ -233,6 +233,16 @@ opt-out, which `test_usage.py` checks wins over gardener's own setting.
 `main()` directly, and unsets `GARDENER_HUB_URL`, so a hub-configured
 device's suite never pushes fixture runs to its real hub (`hub.env` is
 covered by the same temp state dir).
+`tests/test_heartbeat.py` covers RFC 0010's heartbeats against the same
+loopback hub: a beat stored under the token's device; fields the hub does
+not name (log tails, transcript text, paths) never stored; invalid beats
+refused naming the field; the 16 KiB cap; an out-of-order beat ignored;
+live/stale/idle measured in the sender's own interval at each boundary;
+the sender's final `ending` beat, the 404 switch-off, one `NOTE` per
+session, backoff doubling to its cap, and a snapshot error never raising;
+`heartbeat.running` end to end (off with no hub or `0`, an idle row left
+after a dispatch, its thread stopped); and `build_snapshot` over a real
+log carrying structure but no log text or local path.
 `tests/test_hub.py` runs a real hub (`hub.HubHandler` on a loopback port
 over a temp store) and a real device store, so every push is the actual
 HTTP round trip and the actual inserts. UserAuth is a loopback stub

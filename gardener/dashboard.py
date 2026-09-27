@@ -517,43 +517,17 @@ def build_garden_rows(
 #: the shape of change that produced it. Bumped to 3 when
 #: `overnight_next_index` became `overnight_cycle`/`overnight_run` (issue
 #: #113) — the same shape of change again.
-PAYLOAD_SCHEMA = 3
+def progress_from_logs(
+    active_logs: list[Path], lines_by_log: dict[Path, list[str]]
+) -> tuple[list[str], Optional[tuple[int, int, int]], Optional[dict]]:
+    """What the live logs say is happening now: the repos in flight, the
+    current batch's `(start, end, total)`, and the running `overnight`'s
+    own budget and strategy. `build_status` renders these, and a device's
+    hub heartbeat (`heartbeat.py`, RFC 0010) sends the same values, so the
+    two views can't disagree about what a device is doing.
 
-
-def build_status(
-    state_dir: Optional[Path] = None,
-    run_limit: int = 40,
-    log_tail_lines: int = 400,
-    repo: Optional[str] = None,
-    history_days: int = 14,
-    garden_repos: Optional[list[str]] = None,
-    allowed_repos: Optional[list[str]] = None,
-    hub: bool = False,
-) -> dict:
-    """The `/api/status` payload.
-
-    `garden_repos`/`allowed_repos` replace the two opt-in list files when
-    given. The hub (`gardener/hub.py`, RFC 0007) passes the union of what
-    each device last pushed, since its own state dir holds no garden. `hub`
-    marks the payload as coming from a store that combines devices, so the
-    page can say that the log-backed panels are per-device instead of
-    rendering them empty, which would read as "nothing is running"."""
-    base = state_dir or state.default_state_dir()
-    db_path = base / "gardener.sqlite3"
-    logs_dir = default_logs_dir(base)
-
-    # `repo` narrows the Recent runs table to one repo's history. Both it
-    # and `run_limit` were already `list_runs` parameters that nothing ever
-    # passed, so the plant detail card could report "17 errors" with no way
-    # to reach any of them (issue #138).
-    runs = state.list_runs(db_path=db_path, limit=run_limit, repo=repo)
-    # Every live log, not just the newest — a manual `tend` started
-    # alongside the overnight run used to hide it completely (issue #50).
-    active_logs = find_active_logs(logs_dir)
-    lines_by_log = {path: tail_lines(path, log_tail_lines) for path in active_logs}
-    active_log = active_logs[0] if active_logs else None
-    log_lines = lines_by_log.get(active_log, [])
-
+    `active_logs` is newest first (`find_active_logs`); `lines_by_log`
+    holds each one's tail."""
     in_progress: list[str] = []
     for path in active_logs:
         for repo in parse_in_progress(lines_by_log[path]):
@@ -603,6 +577,47 @@ def build_status(
                 else None
             )
             break
+    return in_progress, batch, overnight_run
+
+
+PAYLOAD_SCHEMA = 3
+
+
+def build_status(
+    state_dir: Optional[Path] = None,
+    run_limit: int = 40,
+    log_tail_lines: int = 400,
+    repo: Optional[str] = None,
+    history_days: int = 14,
+    garden_repos: Optional[list[str]] = None,
+    allowed_repos: Optional[list[str]] = None,
+    hub: bool = False,
+) -> dict:
+    """The `/api/status` payload.
+
+    `garden_repos`/`allowed_repos` replace the two opt-in list files when
+    given. The hub (`gardener/hub.py`, RFC 0007) passes the union of what
+    each device last pushed, since its own state dir holds no garden. `hub`
+    marks the payload as coming from a store that combines devices, so the
+    page can say that the log-backed panels are per-device instead of
+    rendering them empty, which would read as "nothing is running"."""
+    base = state_dir or state.default_state_dir()
+    db_path = base / "gardener.sqlite3"
+    logs_dir = default_logs_dir(base)
+
+    # `repo` narrows the Recent runs table to one repo's history. Both it
+    # and `run_limit` were already `list_runs` parameters that nothing ever
+    # passed, so the plant detail card could report "17 errors" with no way
+    # to reach any of them (issue #138).
+    runs = state.list_runs(db_path=db_path, limit=run_limit, repo=repo)
+    # Every live log, not just the newest — a manual `tend` started
+    # alongside the overnight run used to hide it completely (issue #50).
+    active_logs = find_active_logs(logs_dir)
+    lines_by_log = {path: tail_lines(path, log_tail_lines) for path in active_logs}
+    active_log = active_logs[0] if active_logs else None
+    log_lines = lines_by_log.get(active_log, [])
+
+    in_progress, batch, overnight_run = progress_from_logs(active_logs, lines_by_log)
 
     # Scoped to the newest contiguous burst of runs, not to the `run_limit`
     # slice above: the panel these feed is the one read to answer "how did
