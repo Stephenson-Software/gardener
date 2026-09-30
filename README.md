@@ -226,7 +226,7 @@ echo 'GARDENER_USAGE_REPORTING_ENABLED=false' >> ~/.local/state/gardener/notify.
 ```
 
 The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python)
-0.2.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
+0.3.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
 gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
 
 Details: https://github.com/Stephenson-Software/trace#usage-reporting

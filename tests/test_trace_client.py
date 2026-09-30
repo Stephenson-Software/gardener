@@ -10,7 +10,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from gardener.trace_client import TraceClient, environment_opts_out
+from gardener.trace_client import MAX_TAG_LENGTH, TraceClient, environment_opts_out
 
 _ENV_VARS = ("TRACE_USAGE_REPORTING", "DO_NOT_TRACK")
 
@@ -73,28 +73,29 @@ class TraceClientTest(unittest.TestCase):
         logging.getLogger("trace").removeHandler(self.handler)
 
     def test_report_posts_the_event_to_the_metrics_endpoint_with_the_key(self):
-        client = TraceClient(self.base_url + "/", "MyGame", key="k-123")
+        client = TraceClient(self.base_url + "/", "MyGame", "1.2.3", key="k-123")
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5), "the report should reach the server")
         request = self.capture.requests[0]
         self.assertEqual("/api/metrics", request["path"], "a trailing slash on the base URL must not double up")
         self.assertEqual("Bearer k-123", request["authorization"])
         self.assertTrue(request["content_type"].startswith("application/json"))
-        self.assertEqual({"application": "MyGame", "name": "startup"}, json.loads(request["body"]))
+        self.assertEqual({"application": "MyGame", "name": "startup", "tags": {"version": "1.2.3"}},
+                         json.loads(request["body"]))
         client.close()
 
     def test_report_carries_value_and_tags_when_given(self):
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("world-load", 2.5, {"seed": "42", "size": 'the "big" one'})
         self.assertTrue(self.capture.arrived.wait(5))
         self.assertEqual({"application": "MyGame", "name": "world-load", "value": 2.5,
-                          "tags": {"seed": "42", "size": 'the "big" one'}},
+                          "tags": {"seed": "42", "size": 'the "big" one', "version": "1.2.3"}},
                          json.loads(self.capture.requests[0]["body"]))
         client.close()
 
     def test_report_returns_before_the_server_answers(self):
         self.capture.release.clear()  # a server that never replies
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         before = time.monotonic()
         client.report("startup")
         elapsed = time.monotonic() - before
@@ -107,7 +108,7 @@ class TraceClientTest(unittest.TestCase):
         dead_port = probe.server_address[1]
         probe.shutdown()
         probe.server_close()
-        client = TraceClient("http://127.0.0.1:%d" % dead_port, "MyGame", key="k")
+        client = TraceClient("http://127.0.0.1:%d" % dead_port, "MyGame", "1.2.3", key="k")
         client.report("startup")  # must not raise
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not any("could not deliver" in r.getMessage() for r in self.log):
@@ -118,16 +119,16 @@ class TraceClientTest(unittest.TestCase):
 
     def test_report_does_not_raise_when_the_server_rejects_the_key(self):
         self.capture.reply_status = 401
-        client = TraceClient(self.base_url, "MyGame", key="revoked")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="revoked")
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5))
         client.close()
         self.assertTrue(any("answered 401" in r.getMessage() for r in self.log), [r.getMessage() for r in self.log])
 
     def test_disabled_client_sends_nothing(self):
-        for client in (TraceClient(self.base_url, "MyGame", key="k", enabled=False),
-                       TraceClient(self.base_url, "MyGame"),
-                       TraceClient(self.base_url, "MyGame", key="  "),
+        for client in (TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=False),
+                       TraceClient(self.base_url, "MyGame", "1.2.3"),
+                       TraceClient(self.base_url, "MyGame", "1.2.3", key="  "),
                        TraceClient.disabled()):
             self.assertFalse(client.enabled)
             client.report("startup")
@@ -136,7 +137,7 @@ class TraceClientTest(unittest.TestCase):
         self.assertEqual([], self.capture.requests)
 
     def test_disabled_reason_is_none_when_the_client_reports(self):
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         self.assertTrue(client.enabled)
         self.assertIsNone(client.disabled_reason)
         client.close()
@@ -144,17 +145,17 @@ class TraceClientTest(unittest.TestCase):
         self.assertIsNone(client.disabled_reason, "but the reason describes how it was built")
 
     def test_disabled_reason_names_the_config_flag_or_the_missing_key(self):
-        self.assertEqual("config", TraceClient(self.base_url, "MyGame", key="k", enabled=False).disabled_reason)
+        self.assertEqual("config", TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=False).disabled_reason)
         self.assertEqual("config", TraceClient.disabled().disabled_reason)
-        self.assertEqual("no key", TraceClient(self.base_url, "MyGame").disabled_reason)
-        self.assertEqual("no key", TraceClient(self.base_url, "MyGame", key="  ").disabled_reason)
-        self.assertEqual("config", TraceClient(self.base_url, "MyGame", enabled=False).disabled_reason,
+        self.assertEqual("no key", TraceClient(self.base_url, "MyGame", "1.2.3").disabled_reason)
+        self.assertEqual("no key", TraceClient(self.base_url, "MyGame", "1.2.3", key="  ").disabled_reason)
+        self.assertEqual("config", TraceClient(self.base_url, "MyGame", "1.2.3", enabled=False).disabled_reason,
                          "the config flag is checked before the key")
 
     def _assert_environment_disables(self, variable, value):
         with mock.patch.dict(os.environ, {variable: value}):
             self.assertTrue(environment_opts_out(), "%s=%r should opt out" % (variable, value))
-            client = TraceClient(self.base_url, "MyGame", key="k")
+            client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
             self.assertFalse(client.enabled, "%s=%r should disable the client" % (variable, value))
             self.assertEqual("environment", client.disabled_reason)
             client.report("startup")
@@ -177,7 +178,7 @@ class TraceClientTest(unittest.TestCase):
                                 ("DO_NOT_TRACK", "off")):
             with mock.patch.dict(os.environ, {variable: value}):
                 self.assertFalse(environment_opts_out(), "%s=%r is not an opt-out" % (variable, value))
-                client = TraceClient(self.base_url, "MyGame", key="k")
+                client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
                 self.assertTrue(client.enabled, "%s=%r must not disable the client" % (variable, value))
                 self.assertIsNone(client.disabled_reason)
                 client.close()
@@ -186,17 +187,17 @@ class TraceClientTest(unittest.TestCase):
     def test_environment_wins_over_the_config_flag_and_over_the_key(self):
         # enabled=True with a key, and the environment still says no.
         with mock.patch.dict(os.environ, {"TRACE_USAGE_REPORTING": "off"}):
-            client = TraceClient(self.base_url, "MyGame", key="k", enabled=True)
+            client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=True)
             self.assertEqual("environment", client.disabled_reason)
             client.close()
         # enabled=False AND the environment: the environment is the reason.
         with mock.patch.dict(os.environ, {"DO_NOT_TRACK": "1"}):
             self.assertEqual("environment",
-                             TraceClient(self.base_url, "MyGame", key="k", enabled=False).disabled_reason)
-            self.assertEqual("environment", TraceClient(self.base_url, "MyGame").disabled_reason,
+                             TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=False).disabled_reason)
+            self.assertEqual("environment", TraceClient(self.base_url, "MyGame", "1.2.3").disabled_reason,
                              "the environment is checked before the key too")
         # Once the variable is gone, the program's own setting is back in charge.
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         self.assertTrue(client.enabled)
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5))
@@ -210,24 +211,93 @@ class TraceClientTest(unittest.TestCase):
 
     def test_user_agent_names_the_client_version(self):
         from gardener.trace_client import __version__
-        self.assertEqual("0.2.0", __version__)
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        self.assertEqual("0.3.0", __version__)
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5))
         client.close()
-        self.assertEqual("trace-client-python/0.2.0 (MyGame)", self.capture.requests[0]["user_agent"])
+        self.assertEqual("trace-client-python/0.3.0 (MyGame)", self.capture.requests[0]["user_agent"])
 
     def test_report_ignores_a_blank_name(self):
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("")
         client.report("   ")
         client.close()
         self.assertFalse(self.capture.arrived.wait(0.3))
 
+    def test_report_does_not_raise_for_a_name_that_is_not_a_string(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
+        client.report(123)  # must not raise
+        client.close()
+        self.assertFalse(self.capture.arrived.wait(0.3), "a report that could not be built is dropped")
+        self.assertTrue(any("could not queue 123" in r.getMessage() for r in self.log),
+                        [r.getMessage() for r in self.log])
+        self.assertTrue(all(r.levelno == logging.DEBUG for r in self.log))
+
+    def test_a_base_url_without_a_scheme_is_logged_not_a_dead_thread(self):
+        crashes = []
+        with mock.patch.object(threading, "excepthook", crashes.append):
+            client = TraceClient("trace.example.org", "MyGame", "1.2.3", key="k")
+            client.report("startup")
+            client.report("shutdown")
+            client.close()
+        self.assertEqual([], crashes, "the sender thread must not die with a traceback on stderr")
+        failures = [r for r in self.log if "could not deliver" in r.getMessage()]
+        self.assertEqual(2, len(failures), "each report is logged and the thread keeps going: %s"
+                         % [r.getMessage() for r in self.log])
+        self.assertTrue(all(r.levelno == logging.DEBUG for r in self.log))
+
     def test_constructor_rejects_a_missing_base_url_or_application(self):
         for base_url, application in ((None, "MyGame"), (" ", "MyGame"), ("http://x", None), ("http://x", "")):
             with self.assertRaises(ValueError):
-                TraceClient(base_url, application)
+                TraceClient(base_url, application, "1.2.3")
+
+    def test_constructor_rejects_a_missing_blank_or_overlong_version(self):
+        for version in (None, "", "   ", "9" * (MAX_TAG_LENGTH + 1)):
+            with self.assertRaises(ValueError, msg=repr(version)):
+                TraceClient(self.base_url, "MyGame", version, key="k")
+        with self.assertRaises(TypeError, msg="the version is required, not optional"):
+            TraceClient(self.base_url, "MyGame", key="k")
+        # Exactly the limit is fine, and so is an overlong-looking one that trims to it.
+        TraceClient(self.base_url, "MyGame", "9" * MAX_TAG_LENGTH, enabled=False)
+        TraceClient(self.base_url, "MyGame", "  " + "9" * MAX_TAG_LENGTH + "  ", enabled=False)
+
+    def test_report_tags_a_command_with_the_program_version_trimmed(self):
+        client = TraceClient(self.base_url, "MyGame", " 2.0.0-SNAPSHOT ", key="k")
+        client.report("command", tags={"name": "home"})
+        self.assertTrue(self.capture.arrived.wait(5))
+        client.close()
+        self.assertEqual('{"application":"MyGame","name":"command",'
+                         '"tags":{"name":"home","version":"2.0.0-SNAPSHOT"}}',
+                         self.capture.requests[0]["body"])
+
+    def test_report_an_events_own_version_tag_wins_over_the_program_version(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
+        tags = {"version": "9.9.9"}
+        client.report("startup", tags=tags)
+        self.assertTrue(self.capture.arrived.wait(5))
+        client.close()
+        self.assertEqual('{"application":"MyGame","name":"startup","tags":{"version":"9.9.9"}}',
+                         self.capture.requests[0]["body"])
+        self.assertEqual({"version": "9.9.9"}, tags, "the caller's dict is not modified")
+
+    def test_report_never_modifies_the_callers_tags(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
+        tags = {"name": "home"}
+        client.report("command", tags=tags)
+        self.assertTrue(self.capture.arrived.wait(5))
+        client.close()
+        self.assertEqual({"name": "home"}, tags)
+        self.assertEqual({"name": "home", "version": "1.2.3"},
+                         json.loads(self.capture.requests[0]["body"])["tags"])
+
+    def test_with_version_never_modifies_the_callers_mapping(self):
+        from gardener.trace_client import _with_version
+        tags = {"name": "home"}
+        merged = _with_version(tags, "1.2.3")
+        self.assertEqual({"name": "home"}, tags)
+        self.assertEqual({"name": "home", "version": "1.2.3"}, merged)
+        self.assertEqual({"version": "1.2.3"}, _with_version(None, "1.2.3"))
 
     def test_json_drops_nan_and_none_tags(self):
         from gardener.trace_client import _json
@@ -236,7 +306,7 @@ class TraceClientTest(unittest.TestCase):
 
     def test_queue_is_bounded_and_drops_rather_than_grows(self):
         self.capture.release.clear()  # hold the sender on the first report
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         flood = TraceClient.QUEUE_CAPACITY * 3
         for _ in range(flood):
             client.report("flood")
@@ -251,14 +321,14 @@ class TraceClientTest(unittest.TestCase):
         # races the sender thread and is lost a good fraction of the time;
         # 30 back-to-back report()+close() pairs make that fraction visible.
         for i in range(30):
-            client = TraceClient(self.base_url, "MyCli", key="k")
+            client = TraceClient(self.base_url, "MyCli", "1.2.3", key="k")
             client.report("startup", tags={"run": str(i)})
             client.close()
         self.assertEqual(30, len(self.capture.requests), "every report()+close() pair must deliver")
 
     def test_close_still_returns_within_the_timeout_when_the_server_hangs(self):
         self.capture.release.clear()  # never answers
-        client = TraceClient(self.base_url, "MyCli", key="k")
+        client = TraceClient(self.base_url, "MyCli", "1.2.3", key="k")
         client.report("startup")
         before = time.monotonic()
         client.close(timeout=1.0)
@@ -266,7 +336,7 @@ class TraceClientTest(unittest.TestCase):
         self.capture.release.set()
 
     def test_close_is_prompt_and_idempotent(self):
-        client = TraceClient(self.base_url, "MyGame", key="k")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("startup")
         before = time.monotonic()
         client.close()
