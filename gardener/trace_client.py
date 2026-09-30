@@ -1,4 +1,4 @@
-"""trace-client 0.2.0 -- https://github.com/Stephenson-Software/trace-client-python
+"""trace-client 0.3.0 -- https://github.com/Stephenson-Software/trace-client-python
 
 One call to report that a program was used. Copy this file into a project as
 is, or vendor the package; either way there is nothing else to add. Standard
@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from typing import Dict, Mapping, Optional
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _LOG = logging.getLogger("trace")
 
@@ -37,6 +37,10 @@ _DO_NOT_TRACK_VALUES = frozenset(("1", "true", "yes"))
 REASON_ENVIRONMENT = "environment"
 REASON_CONFIG = "config"
 REASON_NO_KEY = "no key"
+
+#: The longest a program version may be, after trimming: the trace server's
+#: limit on a tag value.
+MAX_TAG_LENGTH = 255
 
 
 def environment_opts_out(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -80,11 +84,16 @@ class TraceClient:
     so once, pointing at
     https://github.com/Stephenson-Software/trace#usage-reporting.
 
+    Every event carries the program's own version as the tag ``version`` --
+    the third argument, required, so a ``command`` event can be tied to a
+    release as well as a ``startup`` one. An event's own ``version`` tag wins
+    over it.
+
     ::
 
-        trace = TraceClient("https://trace.example.org", "roam",
+        trace = TraceClient("https://trace.example.org", "roam", __version__,
                             key=settings.usage_key, enabled=settings.usage_reporting)
-        trace.report("startup", tags={"version": __version__})
+        trace.report("startup")
         ...
         trace.close()  # on shutdown
     """
@@ -92,14 +101,23 @@ class TraceClient:
     QUEUE_CAPACITY = 256
     TIMEOUT_SECONDS = 5.0
 
-    def __init__(self, base_url: str, application: str, *, key: Optional[str] = None,
+    def __init__(self, base_url: str, application: str, version: str, *, key: Optional[str] = None,
                  enabled: bool = True) -> None:
+        """A client for the program named ``application``, at ``version``,
+        reporting to the trace server at ``base_url``. The version is sent as
+        the tag ``version`` on every event; a blank one, or one longer than
+        :data:`MAX_TAG_LENGTH` characters, is a :class:`ValueError`."""
         if not base_url or not base_url.strip():
             raise ValueError("base_url is required")
         if not application or not application.strip():
             raise ValueError("application is required")
+        if not version or not version.strip():
+            raise ValueError("version is required")
+        if len(version.strip()) > MAX_TAG_LENGTH:
+            raise ValueError("version is longer than %d characters" % MAX_TAG_LENGTH)
         self._endpoint = base_url.strip().rstrip("/") + "/api/metrics"
         self._application = application.strip()
+        self._version = version.strip()
         self._key = (key or "").strip()
         self._queue: Optional["queue.Queue[Optional[bytes]]"] = None
         self._thread: Optional[threading.Thread] = None
@@ -123,7 +141,7 @@ class TraceClient:
     @classmethod
     def disabled(cls) -> "TraceClient":
         """A client that reports nothing. Useful as a default before settings are read."""
-        return cls("http://disabled.invalid", "disabled", enabled=False)
+        return cls("http://disabled.invalid", "disabled", "disabled", enabled=False)
 
     @property
     def enabled(self) -> bool:
@@ -136,10 +154,12 @@ class TraceClient:
                tags: Optional[Mapping[str, str]] = None) -> None:
         """Report that ``name`` happened, with an optional numeric value and
         optional string tags. Returns immediately; see the class docstring."""
-        if self._queue is None or not name or not name.strip():
+        if self._queue is None:
             return
         try:
-            body = _json(self._application, name, value, tags)
+            if not name or not name.strip():
+                return
+            body = _json(self._application, name, value, _with_version(tags, self._version))
             self._queue.put_nowait(body)
         except queue.Full:
             _LOG.debug("[trace] queue full, dropped %s", name)
@@ -183,14 +203,16 @@ class TraceClient:
             self._send(body)
 
     def _send(self, body: bytes) -> None:
-        request = urllib.request.Request(
-            self._endpoint, data=body, method="POST",
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": "Bearer " + self._key,
-                "User-Agent": "trace-client-python/%s (%s)" % (__version__, self._application),
-            })
         try:
+            # Built inside the try: a base URL without a scheme fails here, and
+            # an uncaught error would kill the sender thread with a traceback.
+            request = urllib.request.Request(
+                self._endpoint, data=body, method="POST",
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": "Bearer " + self._key,
+                    "User-Agent": "trace-client-python/%s (%s)" % (__version__, self._application),
+                })
             with urllib.request.urlopen(request, timeout=self.TIMEOUT_SECONDS) as response:
                 status = response.status
                 response.read()
@@ -205,6 +227,19 @@ class TraceClient:
             return
         if status != 201:
             _LOG.debug("[trace] trace server answered %s for %s", status, body)
+
+
+def _with_version(tags: Optional[Mapping[str, str]], version: str) -> Dict[str, str]:
+    """The event's own tags plus ``version``, unless the event already carries
+    one. A copy; the caller's mapping is never modified."""
+    merged: Dict[str, str] = {}
+    if tags:
+        for k, v in dict(tags).items():
+            if k is not None and v is not None:
+                merged[str(k)] = str(v)
+    if "version" not in merged:
+        merged["version"] = version
+    return merged
 
 
 def _json(application: str, name: str, value: Optional[float], tags: Optional[Mapping[str, str]]) -> bytes:

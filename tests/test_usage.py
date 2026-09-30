@@ -170,8 +170,9 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
             client = usage.build_client({})
         self.assertFalse(client.enabled)
 
-    def test_startup_tags_are_version_and_service_only(self):
-        self.assertEqual({"version": gardener.__version__, "service": "true"}, usage.startup_tags())
+    def test_startup_tags_are_the_service_marker_only(self):
+        # version is added by the client itself, to every event.
+        self.assertEqual({"service": "true"}, usage.startup_tags())
 
 
 class TestStartAndStop(_NoConfigFile, unittest.TestCase):

@@ -5,8 +5,8 @@ own devices), so it reports the way the other hosted services in this
 ecosystem do: a single ``startup`` event tagged ``service=true`` and
 ``version``, once per invocation of the CLI, and nothing else. No repo
 name, no device name, no hostname, no path, nothing from a run — the body
-is the program name, the event name and those two tags, exactly what
-:func:`startup_tags` returns. The trace operator page hides
+is the program name, the event name and those two tags: ``service`` from
+:func:`startup_tags` and ``version``, which the client adds to every event. The trace operator page hides
 ``service=true`` events from its fleet view, which is the point of the tag.
 
 Configuration follows the two-source precedence `notify.py` already
@@ -104,8 +104,9 @@ def key(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = N
 
 
 def startup_tags() -> Dict[str, str]:
-    """Everything a startup event carries besides its name."""
-    return {"version": __version__, "service": "true"}
+    """The tags a startup event carries besides ``version``, which the client
+    adds to every event itself (see :func:`build_client`)."""
+    return {"service": "true"}
 
 
 def build_client(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = None) -> TraceClient:
@@ -117,7 +118,7 @@ def build_client(env: Optional[Mapping[str, str]] = None, config_path: Optional[
     fail: any surprise yields the no-op."""
     try:
         return TraceClient(
-            endpoint(env, config_path), APPLICATION,
+            endpoint(env, config_path), APPLICATION, __version__ or "unknown",
             key=key(env, config_path), enabled=enabled(env, config_path),
         )
     except Exception:  # noqa: BLE001 - reporting must never be why gardener fails
@@ -142,7 +143,7 @@ def stop(client: TraceClient, timeout: float = TraceClient.TIMEOUT_SECONDS) -> N
     Closing matters more here than in a long-running service: the sender
     is a daemon thread, so process exit would cut it off mid-request, and
     `gardener status`/`gardener ps` finish in milliseconds. The client's
-    ``close`` (0.1.1+; 0.2.0 is vendored) gives whatever is still queued up to ``timeout``
+    ``close`` (0.1.1+; 0.3.0 is vendored) gives whatever is still queued up to ``timeout``
     seconds in total to be sent, then stops the thread — so exit is delayed
     by at most the client's own timeout: an unreachable trace server is a
     request that times out, not a hang. Never raises, even on something
