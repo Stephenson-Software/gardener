@@ -411,7 +411,15 @@ unconditionally from `log_tail`, that a selection is held across polls but
 cleared once that log leaves `active_logs`, that the option list is
 rebuilt only when the set of live logs changes (an unconditional rebuild
 closes an open `<select>` within 4 s), and that the dead-end
-`· N other live log(s) not tailed` caption is gone. Anything about how the
+`· N other live log(s) not tailed` caption is gone. `TestThemePicker`
+covers [the theme picker](DASHBOARD.md#theme): that the one light-token
+string is substituted into both the OS-preference rule and the
+explicit-light rule with no placeholder left, that the explicit-light
+rule sits outside the media query (inside it, light could never win under
+a dark OS), that the stored choice is restored in `<head>` before the
+stylesheet so there's no flash, that "System" is a reachable third state
+that clears the stored value, and that the `<select>` has an accessible
+name. Anything about how the
 plot *looks* is still verified by rendering it and looking at it, per
 CLAUDE.md. `find_active_logs` additionally covers the prune race
 (a log deleted between the `glob` and the `stat` is skipped, not fatal) —

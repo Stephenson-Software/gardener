@@ -786,12 +786,44 @@ def build_status(
     }
 
 
+# The page's light palette, substituted into PAGE_HTML twice (see the
+# comment above its two uses in the stylesheet) so the OS-preference and
+# explicit-choice copies are one source of truth.
+_LIGHT_THEME_TOKENS = """\
+      --bg: #f5f6f4; --panel: #ffffff; --text: #1b1f1c; --muted: #5b645d;
+      /* --warn was #b3661a: 4.01:1 on --bg, and its only consumer is the
+         stale caption — the least readable text on the page in exactly
+         the situation it exists for (issue #128). #8f5010 is 5.6:1. */
+      --border: #dfe3de; --accent: #2f7a4f; --warn: #8f5010; --err: #b3261e;
+      --soil: #7a6450; --pot: #b56f47; --seed: #8b6a3c; --fallen: #8a6448;
+      --leaf-thriving: #1f7d45; --stem-thriving: #175c33;
+      --leaf-steady:   #4a7f2a; --stem-steady:   #3a621f;
+      --leaf-dry:      #8a7a12; --stem-dry:      #6b5f0e;
+      --leaf-wilting:  #a35a12; --stem-wilting:  #7d450d;
+      --leaf-struggling: #a8321f; --stem-struggling: #7d2417;
+      --leaf-unplanted: #6b746d; --stem-unplanted: #5c655e;
+      --bloom-1: #c2557e; --bloom-2: #c06442; --bloom-3: #9c5cae;
+      --bloom-4: #4d7ba8; --bloom-5: #a8842a; --bloom-faded: #8a6a3c;
+      --bloom-centre: #a87a1e;"""
+
 PAGE_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gardener dashboard</title>
+<!-- Runs before the stylesheet and before <body> exists, so a stored theme
+     choice is stamped on :root before first paint. Restoring it from the
+     bottom-of-page script, the way gardenView is, would flash the OS
+     palette on every load (issue #153). "system" is stored as nothing. -->
+<script>
+  try {
+    const storedTheme = localStorage.getItem("theme");
+    if (storedTheme === "light" || storedTheme === "dark") {
+      document.documentElement.dataset.theme = storedTheme;
+    }
+  } catch (e) {}
+</script>
 <style>
   :root {
     color-scheme: dark light;
@@ -820,25 +852,22 @@ PAGE_HTML = """<!doctype html>
     --bloom-4: #8fb8e0; --bloom-5: #eec55f; --bloom-faded: #c9a06a;
     --bloom-centre: #f0c356;
   }
+  /* The light tokens are applied two ways, so an explicit choice from the
+     header's theme picker wins in both directions (issue #153): under a
+     light OS unless the page was explicitly set to dark, and under any OS
+     once explicitly set to light. Both blocks are the one
+     _LIGHT_THEME_TOKENS string substituted in below, so the two copies
+     cannot drift apart. */
   @media (prefers-color-scheme: light) {
-    :root {
-      --bg: #f5f6f4; --panel: #ffffff; --text: #1b1f1c; --muted: #5b645d;
-      /* --warn was #b3661a: 4.01:1 on --bg, and its only consumer is the
-         stale caption — the least readable text on the page in exactly
-         the situation it exists for (issue #128). #8f5010 is 5.6:1. */
-      --border: #dfe3de; --accent: #2f7a4f; --warn: #8f5010; --err: #b3261e;
-      --soil: #7a6450; --pot: #b56f47; --seed: #8b6a3c; --fallen: #8a6448;
-      --leaf-thriving: #1f7d45; --stem-thriving: #175c33;
-      --leaf-steady:   #4a7f2a; --stem-steady:   #3a621f;
-      --leaf-dry:      #8a7a12; --stem-dry:      #6b5f0e;
-      --leaf-wilting:  #a35a12; --stem-wilting:  #7d450d;
-      --leaf-struggling: #a8321f; --stem-struggling: #7d2417;
-      --leaf-unplanted: #6b746d; --stem-unplanted: #5c655e;
-      --bloom-1: #c2557e; --bloom-2: #c06442; --bloom-3: #9c5cae;
-      --bloom-4: #4d7ba8; --bloom-5: #a8842a; --bloom-faded: #8a6a3c;
-      --bloom-centre: #a87a1e;
+    :root:not([data-theme="dark"]) {
+__LIGHT_THEME_TOKENS__
     }
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+__LIGHT_THEME_TOKENS__
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -968,13 +997,15 @@ PAGE_HTML = """<!doctype html>
      the UA `hidden` rule being overridden if .log-pick ever gains a
      display of its own. */
   .log-pick[hidden] { display: none; }
-  .log-pick select {
+  .log-pick select, .theme-pick select {
     font: inherit; font-size: 16px; font-family: var(--mono);
     background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 999px;
     padding: 0.15rem 0.5rem; max-width: 100%;
   }
-  .log-pick select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .log-pick select:focus-visible, .theme-pick select:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
   .empty { color: var(--muted); font-style: italic; }
   .progress-bar {
     height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 0.4rem;
@@ -1317,6 +1348,17 @@ PAGE_HTML = """<!doctype html>
   <span id="stale-badge">⚠ stale</span>
   <span class="sub" id="hub-user" hidden></span>
   <a class="sub" id="live-link" href="/live" style="margin-left:auto">live view →</a>
+  <!-- Three states, not a two-way toggle, so "follow the OS" stays
+       reachable once a choice has been made (issue #153). A native select
+       brings keyboard and screen-reader handling with it. -->
+  <label class="theme-pick">
+    <span class="sr-only">Colour theme</span>
+    <select id="theme-pick">
+      <option value="system">System theme</option>
+      <option value="light">Light theme</option>
+      <option value="dark">Dark theme</option>
+    </select>
+  </label>
 </header>
 <!-- The page rewrites every panel on a 4 s poll and had no live region at
      all, so a tend starting, the error count moving, or the page going
@@ -2163,6 +2205,22 @@ document.getElementById("garden-filter").addEventListener("input", ev => {
 renderGardenSortHeaders();
 try { showGardenView(localStorage.getItem("gardenView") || "plot"); } catch (e) { showGardenView("plot"); }
 
+// The <head> script already applied any stored theme before first paint;
+// this only syncs the picker to it and handles changes. "system" removes
+// the attribute rather than storing a value, so the stylesheet's own
+// prefers-color-scheme rule is what decides again (issue #153).
+const themePick = document.getElementById("theme-pick");
+themePick.value = document.documentElement.dataset.theme || "system";
+themePick.addEventListener("change", ev => {
+  const theme = ev.target.value;
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try {
+    if (theme === "system") localStorage.removeItem("theme");
+    else localStorage.setItem("theme", theme);
+  } catch (e) {}
+});
+
 // The header caption is the page's only claim about its own liveness, so
 // a failed poll has to change more than that one string: every panel goes
 // on rendering the last good snapshot, and a dashboard whose server died
@@ -2747,7 +2805,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 </script>
 </body>
 </html>
-"""
+""".replace("__LIGHT_THEME_TOKENS__", _LIGHT_THEME_TOKENS)
 
 
 #: Upper bound on `?limit=`. The Recent runs table is rendered wholesale
