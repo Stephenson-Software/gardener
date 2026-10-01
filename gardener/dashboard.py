@@ -972,6 +972,9 @@ __LIGHT_THEME_TOKENS__
   .pill.is-stale { opacity: 0.6; border-style: dashed; }
   #hub-user { margin-left: auto; }
   .is-hub #hub-user + #live-link { margin-left: 0; }
+  /* On a hub with no signed-in user both right-aligning elements before
+     the theme picker are hidden, so it would otherwise drift left. */
+  .is-hub #hub-user[hidden] ~ .theme-pick { margin-left: auto; }
   .outcome-error { color: var(--err); }
   .outcome-tend, .outcome-created { color: var(--accent); }
   pre#log {
