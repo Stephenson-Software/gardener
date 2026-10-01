@@ -1202,6 +1202,50 @@ class TestPageHtmlInvariants(unittest.TestCase):
         self.assertNotIn("Date.parse(lastGoodAt)", dashboard.PAGE_HTML)
 
 
+class TestThemePicker(unittest.TestCase):
+    """Issue #153: the theme followed the OS with no way to override it.
+    Same limitation as `TestPageHtmlInvariants` — no JS runner here — so
+    these check the mechanism is wired, at the level the emitted source
+    text can show."""
+
+    def test_the_light_tokens_are_substituted_into_both_rules(self):
+        """The OS-preference rule and the explicit-light rule share one
+        token string; a placeholder left behind would leave one of them
+        empty, so an explicit choice silently stops winning."""
+        self.assertNotIn("__LIGHT_THEME_TOKENS__", dashboard.PAGE_HTML)
+        self.assertEqual(dashboard.PAGE_HTML.count(dashboard._LIGHT_THEME_TOKENS), 2)
+        self.assertIn(':root:not([data-theme="dark"]) {\n' + dashboard._LIGHT_THEME_TOKENS,
+                      dashboard.PAGE_HTML)
+        self.assertIn(':root[data-theme="light"] {\n    color-scheme: light;\n'
+                      + dashboard._LIGHT_THEME_TOKENS, dashboard.PAGE_HTML)
+
+    def test_the_explicit_light_rule_is_outside_the_media_query(self):
+        """Inside `prefers-color-scheme: light` it could never apply under
+        a dark OS, which is half of what the picker is for."""
+        media = dashboard.PAGE_HTML.index("@media (prefers-color-scheme: light)")
+        explicit = dashboard.PAGE_HTML.index(':root[data-theme="light"]')
+        block_end = dashboard.PAGE_HTML.index("\n  }\n", media)
+        self.assertGreater(explicit, block_end)
+
+    def test_the_stored_choice_is_applied_before_first_paint(self):
+        """Restoring it from the bottom-of-page script would flash the OS
+        palette on every load."""
+        restore = dashboard.PAGE_HTML.index('localStorage.getItem("theme")')
+        self.assertLess(restore, dashboard.PAGE_HTML.index("<style>"))
+        self.assertLess(restore, dashboard.PAGE_HTML.index("</head>"))
+
+    def test_system_is_a_reachable_third_state(self):
+        """A two-way toggle cannot return to following the OS once used."""
+        for value in ("system", "light", "dark"):
+            self.assertIn(f'<option value="{value}">', dashboard.PAGE_HTML)
+        self.assertIn('localStorage.removeItem("theme")', dashboard.PAGE_HTML)
+        self.assertIn("delete document.documentElement.dataset.theme", dashboard.PAGE_HTML)
+
+    def test_the_picker_has_an_accessible_name(self):
+        self.assertIn('<label class="theme-pick">\n    <span class="sr-only">Colour theme</span>\n'
+                      '    <select id="theme-pick">', dashboard.PAGE_HTML)
+
+
 class TestLiveLogPicker(unittest.TestCase):
     """Issue #117: the panel used to name the other live logs and offer no
     way to read them. Same limitation as `TestPageHtmlInvariants` — no JS
@@ -1344,7 +1388,9 @@ class TestGardenSortOnNarrowViewports(unittest.TestCase):
                       "    const option = document.createElement(\"option\");",
                       dashboard.PAGE_HTML)
         self.assertIn("option.value = th.dataset.sort;", dashboard.PAGE_HTML)
-        self.assertNotIn("<option value=", dashboard.PAGE_HTML)
+        # Scoped to this select: the header's theme picker legitimately
+        # hand-writes its three fixed options.
+        self.assertIn('<select id="garden-sort"></select>', dashboard.PAGE_HTML)
         # The caret span sits inside the same button as the label, so
         # `textContent` on the button would put "▲" in every option.
         self.assertIn("(first && first.textContent) || th.dataset.sort", dashboard.PAGE_HTML)

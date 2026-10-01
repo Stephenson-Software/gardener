@@ -2,8 +2,9 @@
 
 Covers the headline session panel, the three progress bars an `overnight`
 run drives, the garden view — the panel the dashboard is mostly *for* —
-what the page does when it can no longer reach the server behind it, and
-the separate [live view](#the-live-view) at `/live`.
+what the page does when it can no longer reach the server behind it, its
+[theme picker](#theme), and the separate [live view](#the-live-view) at
+`/live`.
 
 ## The Latest session panel
 
@@ -382,6 +383,21 @@ Transitions — live↔stale, and the set of in-flight repos changing — are
 also written to a visually hidden `role="status"` live region, so a
 screen reader learns about them at all. Deliberately only on transitions:
 the heartbeat caption changes every four seconds and would babble.
+
+## Theme
+
+The page is dark by default and follows the OS's `prefers-color-scheme`.
+The header's theme picker overrides that per browser: **System theme**
+(the default — follow the OS), **Light theme**, or **Dark theme**. It
+picks between the same two palettes; it adds no colours of its own. An
+explicit choice wins in both directions: dark under a light OS, and light
+under a dark OS.
+
+The choice is stored in `localStorage` under `theme` (System stores
+nothing) and applied by a small script in `<head>` that runs before the
+stylesheet, so a reload doesn't flash the OS palette first. A browser that
+refuses storage still renders and simply follows the OS. The picker is on
+the main page only; `/live` still follows the OS.
 
 ## The live view
 
