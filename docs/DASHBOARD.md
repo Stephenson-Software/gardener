@@ -397,7 +397,9 @@ The choice is stored in `localStorage` under `theme` (System stores
 nothing) and applied by a small script in `<head>` that runs before the
 stylesheet, so a reload doesn't flash the OS palette first. A browser that
 refuses storage still renders and simply follows the OS. The picker is on
-the main page only; `/live` still follows the OS.
+the main page only, but `/live` runs the same `<head>` script against the
+same key, so a choice made on the main page carries over when following
+its header link.
 
 ## The live view
 

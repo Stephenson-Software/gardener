@@ -446,6 +446,41 @@ class TestLiveEndpoints(unittest.TestCase):
         self.assertEqual(json.loads(sent["body"]), {"schema": live.LIVE_SCHEMA})
 
 
+class TestLivePageTheme(unittest.TestCase):
+    """Issue #178: /live followed only the OS, so a theme picked on the
+    main page was undone by following its header link. No JS runner here,
+    so these check the wiring at the level the emitted source can show,
+    the same way test_dashboard.py's TestThemePicker does."""
+
+    def test_no_placeholder_is_left_behind(self):
+        self.assertNotIn("%%THEME_RESTORE%%", live.LIVE_PAGE_HTML)
+        self.assertNotIn("%%LIGHT_TOKENS%%", live.LIVE_PAGE_HTML)
+
+    def test_the_main_pages_restore_script_runs_before_first_paint(self):
+        """The same string as the main page's, so both read one key the
+        same way; before <style> so a reload doesn't flash the OS palette."""
+        self.assertEqual(live.LIVE_PAGE_HTML.count(dashboard.THEME_RESTORE_SCRIPT), 1)
+        self.assertIn(dashboard.THEME_RESTORE_SCRIPT, dashboard.PAGE_HTML)
+        restore = live.LIVE_PAGE_HTML.index(dashboard.THEME_RESTORE_SCRIPT)
+        self.assertLess(restore, live.LIVE_PAGE_HTML.index("<style>"))
+
+    def test_the_light_tokens_are_substituted_into_both_rules(self):
+        page = live.LIVE_PAGE_HTML
+        self.assertEqual(page.count(live._LIVE_LIGHT_THEME_TOKENS), 2)
+        self.assertIn(':root:not([data-theme="dark"]) {\n' + live._LIVE_LIGHT_THEME_TOKENS, page)
+        self.assertIn(':root[data-theme="light"] {\n    color-scheme: light;\n'
+                      + live._LIVE_LIGHT_THEME_TOKENS, page)
+        self.assertIn(':root[data-theme="dark"] { color-scheme: dark; }', page)
+
+    def test_the_explicit_light_rule_is_outside_the_media_query(self):
+        """Inside `prefers-color-scheme: light` it could never apply under
+        a dark OS."""
+        page = live.LIVE_PAGE_HTML
+        media = page.index("@media (prefers-color-scheme: light)")
+        block_end = page.index("\n  }\n", media)
+        self.assertGreater(page.index(':root[data-theme="light"]'), block_end)
+
+
 def redirect_stderr_quiet():
     from contextlib import redirect_stderr
 

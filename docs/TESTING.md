@@ -499,7 +499,10 @@ usage-limit hit clustering and trailing-spend band — including that a
 *successful* run whose summary discusses rate limits is never a hit —
 `state.runs_since`, and `build_live` end to end over a synthetic state dir
 (slot phases, the quiet-slot flag, a limit failure raising the hit, and a
-log with no live session reading as stopped); `tests/test_cli.py`'s
+log with no live session reading as stopped), and the page's theme wiring
+(`TestLivePageTheme`: the main page's `THEME_RESTORE_SCRIPT` emitted before
+`<style>`, and the light tokens substituted into both the OS-preference and
+explicit-light rules); `tests/test_cli.py`'s
 batch-line round trip also asserts `live.current_batch_lines` names every
 repo `cmd_overnight` actually batched. None of the automated
 tests hit the network (the usage-reporting and vendored-client suites talk

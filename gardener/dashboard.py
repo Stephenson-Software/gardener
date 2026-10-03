@@ -806,12 +806,9 @@ _LIGHT_THEME_TOKENS = """\
       --bloom-4: #4d7ba8; --bloom-5: #a8842a; --bloom-faded: #8a6a3c;
       --bloom-centre: #a87a1e;"""
 
-PAGE_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gardener dashboard</title>
+# Shared with live.LIVE_PAGE_HTML, so the theme picked on this page also
+# applies on /live (issue #178) and the two restore scripts cannot drift.
+THEME_RESTORE_SCRIPT = """\
 <!-- Runs before the stylesheet and before <body> exists, so a stored theme
      choice is stamped on :root before first paint. Restoring it from the
      bottom-of-page script, the way gardenView is, would flash the OS
@@ -823,7 +820,15 @@ PAGE_HTML = """<!doctype html>
       document.documentElement.dataset.theme = storedTheme;
     }
   } catch (e) {}
-</script>
+</script>"""
+
+PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gardener dashboard</title>
+__THEME_RESTORE_SCRIPT__
 <style>
   :root {
     color-scheme: dark light;
@@ -2808,7 +2813,8 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 </script>
 </body>
 </html>
-""".replace("__LIGHT_THEME_TOKENS__", _LIGHT_THEME_TOKENS)
+""".replace("__LIGHT_THEME_TOKENS__", _LIGHT_THEME_TOKENS).replace(
+    "__THEME_RESTORE_SCRIPT__", THEME_RESTORE_SCRIPT)
 
 
 #: Upper bound on `?limit=`. The Recent runs table is rendered wholesale
