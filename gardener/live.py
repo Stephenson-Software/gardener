@@ -782,12 +782,21 @@ def build_live(
 # The page
 # --------------------------------------------------------------------------
 
+# This page's light palette, substituted into LIVE_PAGE_HTML twice the
+# same way dashboard._LIGHT_THEME_TOKENS is, so the theme stored by the
+# main page's picker wins here in both directions too (issue #178).
+_LIVE_LIGHT_THEME_TOKENS = """\
+      --bg: #f5f6f4; --panel: #ffffff; --panel-2: #f3f5f2; --text: #1b1f1c; --muted: #5b645d;
+      --border: #dfe3de; --accent: #2f7a4f; --warn: #8f5010; --err: #b3261e; --info: #2d628c;
+      --track: #e6e9e5; --band: rgba(143,80,16,.16);"""
+
 LIVE_PAGE_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gardener · live</title>
+%%THEME_RESTORE%%
 <style>
   /* Same palette as the main dashboard page, so the two read as one tool. */
   :root {
@@ -797,13 +806,18 @@ LIVE_PAGE_HTML = r"""<!doctype html>
     --track: #2a3034; --band: rgba(227,163,90,.22);
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
+  /* No picker here: the choice is made on the main page and read from the
+     same localStorage key by the shared restore script in <head>. */
   @media (prefers-color-scheme: light) {
-    :root {
-      --bg: #f5f6f4; --panel: #ffffff; --panel-2: #f3f5f2; --text: #1b1f1c; --muted: #5b645d;
-      --border: #dfe3de; --accent: #2f7a4f; --warn: #8f5010; --err: #b3261e; --info: #2d628c;
-      --track: #e6e9e5; --band: rgba(143,80,16,.16);
+    :root:not([data-theme="dark"]) {
+%%LIGHT_TOKENS%%
     }
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+%%LIGHT_TOKENS%%
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -1202,4 +1216,6 @@ poll();
 </script>
 </body>
 </html>
-""".replace("%%SCHEMA%%", str(LIVE_SCHEMA)).replace("%%STALL%%", str(STALL_SECONDS))
+""".replace("%%SCHEMA%%", str(LIVE_SCHEMA)).replace("%%STALL%%", str(STALL_SECONDS)).replace(
+    "%%THEME_RESTORE%%", dashboard.THEME_RESTORE_SCRIPT).replace(
+    "%%LIGHT_TOKENS%%", _LIVE_LIGHT_THEME_TOKENS)
