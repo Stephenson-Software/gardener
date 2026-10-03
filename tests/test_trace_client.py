@@ -4,13 +4,16 @@ client does."""
 import json
 import logging
 import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from gardener.trace_client import MAX_TAG_LENGTH, TraceClient, environment_opts_out
+from gardener.trace_client import MAX_TAG_LENGTH, MAX_TAGS, TraceClient, environment_opts_out
 
 _ENV_VARS = ("TRACE_USAGE_REPORTING", "DO_NOT_TRACK")
 
@@ -211,12 +214,12 @@ class TraceClientTest(unittest.TestCase):
 
     def test_user_agent_names_the_client_version(self):
         from gardener.trace_client import __version__
-        self.assertEqual("0.3.0", __version__)
+        self.assertEqual("0.4.0", __version__)
         client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5))
         client.close()
-        self.assertEqual("trace-client-python/0.3.0 (MyGame)", self.capture.requests[0]["user_agent"])
+        self.assertEqual("trace-client-python/0.4.0 (MyGame)", self.capture.requests[0]["user_agent"])
 
     def test_report_ignores_a_blank_name(self):
         client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
@@ -245,6 +248,30 @@ class TraceClientTest(unittest.TestCase):
         failures = [r for r in self.log if "could not deliver" in r.getMessage()]
         self.assertEqual(2, len(failures), "each report is logged and the thread keeps going: %s"
                          % [r.getMessage() for r in self.log])
+        self.assertTrue(all(r.levelno == logging.DEBUG for r in self.log))
+
+    def test_the_sender_thread_survives_an_unexpected_error_from_send(self):
+        crashes = []
+        real_send = TraceClient._send
+        calls = []
+
+        def send_that_fails_once(client, body):
+            calls.append(body)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            real_send(client, body)
+
+        with mock.patch.object(threading, "excepthook", crashes.append), \
+                mock.patch.object(TraceClient, "_send", send_that_fails_once):
+            client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
+            client.report("first")
+            client.report("second")
+            self.assertTrue(self.capture.arrived.wait(5), "a later report is still delivered")
+            client.close()
+        self.assertEqual([], crashes, "the sender thread must not die with a traceback on stderr")
+        self.assertEqual(["second"], [json.loads(r["body"])["name"] for r in self.capture.requests])
+        self.assertTrue(any("sender failed" in r.getMessage() and "boom" in r.getMessage() for r in self.log),
+                        [r.getMessage() for r in self.log])
         self.assertTrue(all(r.levelno == logging.DEBUG for r in self.log))
 
     def test_constructor_rejects_a_missing_base_url_or_application(self):
@@ -343,6 +370,127 @@ class TraceClientTest(unittest.TestCase):
         client.close()
         self.assertLess(time.monotonic() - before, TraceClient.TIMEOUT_SECONDS + 1)
         self.assertFalse(client.enabled)
+
+    # -- the per-installation ID ------------------------------------------
+
+    def _tmpdir(self):
+        directory = tempfile.mkdtemp(prefix="trace-install-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        return directory
+
+    def _sent_tags(self, client, name="startup", tags=None):
+        client.report(name, tags=tags)
+        self.assertTrue(self.capture.arrived.wait(5), "the report should reach the server")
+        client.close()
+        return json.loads(self.capture.requests[-1]["body"])["tags"]
+
+    def test_no_install_id_and_no_file_sends_no_install_tag(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
+        self.assertIsNone(client.install_id)
+        self.assertEqual({"version": "1.2.3"}, self._sent_tags(client))
+
+    def test_install_id_file_is_created_once_and_reused(self):
+        path = os.path.join(self._tmpdir(), "nested", "deeper", "install-id")
+        first = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id_file=path)
+        self.assertEqual(str(uuid.UUID(first.install_id)), first.install_id, "a random UUID")
+        with open(path, encoding="utf-8") as stored:
+            self.assertEqual(first.install_id + "\n", stored.read(), "parent directories are created")
+        first.close()
+        second = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id_file=path)
+        self.assertEqual(first.install_id, second.install_id, "the next run reuses it")
+        self.assertEqual({"version": "1.2.3", "install": first.install_id}, self._sent_tags(second))
+
+    def test_install_id_from_file_reads_the_first_valid_line(self):
+        path = os.path.join(self._tmpdir(), "install-id")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n# not an id\n  my-own.id_1  \nsecond-id\n")
+        self.assertEqual("my-own.id_1", TraceClient.install_id_from_file(path))
+        with open(path, encoding="utf-8") as f:
+            self.assertIn("# not an id", f.read(), "a file with an ID is never rewritten")
+
+    def test_install_id_from_file_replaces_a_file_with_no_valid_line(self):
+        path = os.path.join(self._tmpdir(), "install-id")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("not an id\n" + "x" * (MAX_TAG_LENGTH + 1) + "\n")
+        made = TraceClient.install_id_from_file(path)
+        self.assertEqual(made, TraceClient.install_id_from_file(path))
+
+    def test_unwritable_install_id_file_yields_an_in_memory_id_and_never_raises(self):
+        # A path under a regular file cannot be created, even as root.
+        blocker = os.path.join(self._tmpdir(), "a-file")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("x")
+        path = os.path.join(blocker, "install-id")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id_file=path)
+        self.assertEqual(str(uuid.UUID(client.install_id)), client.install_id)
+        self.assertFalse(os.path.exists(path))
+        self.assertNotEqual(client.install_id, TraceClient.install_id_from_file(path),
+                            "in memory: a new one each process")
+        self.assertEqual({"version": "1.2.3", "install": client.install_id}, self._sent_tags(client))
+
+    def test_unreadable_install_id_file_is_left_alone(self):
+        directory = self._tmpdir()  # a directory cannot be read as a file
+        made = TraceClient.install_id_from_file(directory)
+        self.assertEqual(str(uuid.UUID(made)), made)
+        self.assertTrue(os.path.isdir(directory))
+        self.assertEqual([], os.listdir(directory))
+
+    def test_install_id_from_file_never_raises_for_a_bad_path(self):
+        for path in (None, "", "   ", 42):
+            made = TraceClient.install_id_from_file(path)
+            self.assertEqual(str(uuid.UUID(made)), made, repr(path))
+
+    def test_a_disabled_client_never_makes_up_or_writes_an_install_id(self):
+        directory = self._tmpdir()
+        path = os.path.join(directory, "install-id")
+        os.environ["DO_NOT_TRACK"] = "1"
+        by_environment = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id_file=path,
+                                     install_id="explicit")
+        del os.environ["DO_NOT_TRACK"]
+        by_config = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=False, install_id_file=path)
+        by_no_key = TraceClient(self.base_url, "MyGame", "1.2.3", install_id_file=path)
+        for client in (by_environment, by_config, by_no_key):
+            self.assertIsNone(client.install_id, client.disabled_reason)
+        self.assertEqual([], os.listdir(directory), "nothing is written")
+
+    def test_explicit_install_id_is_trimmed_sent_and_wins_over_the_file(self):
+        path = os.path.join(self._tmpdir(), "install-id")
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="  abc-123  ",
+                             install_id_file=path)
+        self.assertEqual("abc-123", client.install_id)
+        self.assertFalse(os.path.exists(path), "the file is not consulted when an ID is given")
+        self.assertEqual({"name": "home", "version": "1.2.3", "install": "abc-123"},
+                         self._sent_tags(client, "command", {"name": "home"}))
+
+    def test_blank_install_id_is_none_and_an_overlong_one_is_rejected(self):
+        for blank in (None, "", "   "):
+            self.assertIsNone(TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id=blank).install_id)
+        with self.assertRaises(ValueError):
+            TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="x" * (MAX_TAG_LENGTH + 1))
+        with self.assertRaises(ValueError, msg="rejected even on a disabled client, like the version"):
+            TraceClient(self.base_url, "MyGame", "1.2.3", enabled=False, install_id="x" * (MAX_TAG_LENGTH + 1))
+        exact = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="x" * MAX_TAG_LENGTH)
+        self.assertEqual("x" * MAX_TAG_LENGTH, exact.install_id)
+        exact.close()
+
+    def test_an_events_own_install_tag_wins(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="mine")
+        tags = {"install": "theirs"}
+        self.assertEqual({"install": "theirs", "version": "1.2.3"}, self._sent_tags(client, tags=tags))
+        self.assertEqual({"install": "theirs"}, tags, "the caller's tags are never modified")
+
+    def test_install_tag_never_pushes_an_event_past_the_tag_cap(self):
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="mine")
+        full = {"t%d" % i: "v" for i in range(MAX_TAGS - 1)}  # plus version = MAX_TAGS
+        sent = self._sent_tags(client, tags=full)
+        self.assertEqual(MAX_TAGS, len(sent))
+        self.assertNotIn("install", sent)
+        self.capture.arrived.clear()
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", install_id="mine")
+        room = {"t%d" % i: "v" for i in range(MAX_TAGS - 2)}
+        sent = self._sent_tags(client, tags=room)
+        self.assertEqual(MAX_TAGS, len(sent))
+        self.assertEqual("mine", sent["install"])
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ class _NoConfigFile:
         # The machine running the tests may itself have opted out through
         # the client-wide variables; every test starts from a clean slate.
         for name in (usage.ENV_ENABLED, usage.ENV_ENDPOINT, usage.ENV_KEY,
-                     "TRACE_USAGE_REPORTING", "DO_NOT_TRACK"):
+                     "TRACE_USAGE_REPORTING", "DO_NOT_TRACK", usage.ENV_INSTALL_ID):
             os.environ.pop(name, None)
 
 
@@ -155,6 +155,28 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
         self.assertEqual("config", client.disabled_reason)
         client = usage.build_client({usage.ENV_KEY: "   ", usage.ENV_ENABLED: "0"})
         self.assertFalse(client.enabled)
+        self.assertIsNone(client.install_id)
+        self.assertFalse(usage.install_id_file().exists())
+
+    def test_the_installation_id_lives_in_the_state_dir_and_is_reused(self):
+        self.assertEqual(self.state_dir / "trace-install-id", usage.install_id_file())
+        first = usage.build_client({usage.ENV_KEY: "k"})
+        second = usage.build_client({usage.ENV_KEY: "k"})
+        first.close()
+        second.close()
+        self.assertTrue(first.install_id)
+        self.assertEqual(first.install_id, (self.state_dir / "trace-install-id").read_text().strip())
+        self.assertEqual(first.install_id, second.install_id)
+
+    def test_trace_install_id_wins_over_the_file(self):
+        client = usage.build_client({usage.ENV_KEY: "k", usage.ENV_INSTALL_ID: "pinned-id"})
+        client.close()
+        self.assertEqual("pinned-id", client.install_id)
+        self.assertFalse(usage.install_id_file().exists())
+        with patch.dict(os.environ, {usage.ENV_INSTALL_ID: "from-the-environment"}):
+            client = usage.build_client()
+        client.close()
+        self.assertEqual("from-the-environment", client.install_id)
 
     def test_do_not_track_in_the_process_environment_wins_over_gardener_saying_on(self):
         # The client itself checks the process environment in its constructor,
@@ -164,6 +186,7 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
         self.assertFalse(client.enabled)
         self.assertEqual("environment", client.disabled_reason)
         client.close()
+        self.assertFalse(usage.install_id_file().exists())
 
     def test_a_broken_setting_yields_the_no_op_client_rather_than_raising(self):
         with patch("gardener.usage.endpoint", side_effect=RuntimeError("boom")):
@@ -196,7 +219,8 @@ class TestStartAndStop(_NoConfigFile, unittest.TestCase):
         self.assertEqual("Bearer test-key", request["authorization"])
         self.assertEqual(
             {"application": "gardener", "name": "startup",
-             "tags": {"version": gardener.__version__, "service": "true"}},
+             "tags": {"version": gardener.__version__, "service": "true",
+                      "install": (self.state_dir / "trace-install-id").read_text().strip()}},
             request["body"],
         )
 
@@ -297,6 +321,7 @@ class TestMainWiring(_NoConfigFile, unittest.TestCase):
         self.assertEqual(0, code)
         self.assertFalse(self.arrived.wait(0.5))
         self.assertEqual([], self.requests)
+        self.assertFalse(usage.install_id_file().exists())
 
     def test_opted_out_via_notify_env_sends_nothing(self):
         self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
@@ -311,6 +336,7 @@ class TestMainWiring(_NoConfigFile, unittest.TestCase):
         self.assertEqual(0, code)
         self.assertFalse(self.arrived.wait(0.5))
         self.assertEqual([], self.requests)
+        self.assertFalse(usage.install_id_file().exists())
 
     def test_trace_usage_reporting_off_sends_nothing(self):
         with patch.dict(os.environ, {"TRACE_USAGE_REPORTING": "off"}):
@@ -318,6 +344,7 @@ class TestMainWiring(_NoConfigFile, unittest.TestCase):
         self.assertEqual(0, code)
         self.assertFalse(self.arrived.wait(0.5))
         self.assertEqual([], self.requests)
+        self.assertFalse(usage.install_id_file().exists())
 
     def test_client_is_stopped_even_when_the_command_raises(self):
         with patch("gardener.cli.cmd_status", side_effect=RuntimeError("boom")), \
