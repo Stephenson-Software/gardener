@@ -3,11 +3,20 @@
 gardener is a service the operator hosts (a nightly job on the operator's
 own devices), so it reports the way the other hosted services in this
 ecosystem do: a single ``startup`` event tagged ``service=true`` and
-``version``, once per invocation of the CLI, and nothing else. No repo
-name, no device name, no hostname, no path, nothing from a run — the body
-is the program name, the event name and those two tags: ``service`` from
-:func:`startup_tags` and ``version``, which the client adds to every event. The trace operator page hides
-``service=true`` events from its fleet view, which is the point of the tag.
+``version``, once per invocation of the CLI, plus the random installation
+ID every event carries, and nothing else. No repo name, no device name, no
+hostname, no path, nothing from a run — the body is the program name, the
+event name and three tags: ``service`` from :func:`startup_tags`, and
+``version`` and ``install``, which the client adds to every event. The trace
+operator page hides ``service=true`` events from its fleet view, which is the
+point of the tag.
+
+The installation ID (tag ``install``) is a random UUID the client keeps in
+``$GARDENER_STATE_DIR/trace-install-id`` (:func:`install_id_file`, next to the
+run-history db), so trace can count installations — one per device —
+rather than invocations. ``TRACE_INSTALL_ID`` in the environment pins one
+instead. The client only reads or creates the file when reporting is on;
+deleting it resets the ID.
 
 Configuration follows the two-source precedence `notify.py` already
 established for `GARDENER_DISCORD_WEBHOOK_URL`/`GARDENER_DEVICE_NAME`: an
@@ -46,7 +55,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
-from gardener import __version__, notify
+from gardener import __version__, notify, state
 from gardener.trace_client import TraceClient, environment_opts_out
 
 APPLICATION = "gardener"
@@ -56,6 +65,10 @@ DEFAULT_KEY = "eZuzFawyY-fjMPzLSARa6cfxgX_wRl-MMPNBnJ_aVDc"
 ENV_ENABLED = "GARDENER_USAGE_REPORTING_ENABLED"
 ENV_ENDPOINT = "GARDENER_USAGE_REPORTING_ENDPOINT"
 ENV_KEY = "GARDENER_USAGE_REPORTING_KEY"
+#: Pins the installation ID instead of the file. Environment only, like the
+#: client-wide opt-outs, and only ever handed to the client as its explicit ID.
+ENV_INSTALL_ID = "TRACE_INSTALL_ID"
+INSTALL_ID_FILENAME = "trace-install-id"
 
 _FALSE = {"0", "false", "no", "off"}
 
@@ -103,6 +116,14 @@ def key(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = N
     return _setting(ENV_KEY, env, config_path) or DEFAULT_KEY
 
 
+def install_id_file() -> Path:
+    """Where the client keeps this installation's random ID: gardener's own
+    per-user state dir (``$GARDENER_STATE_DIR``, default
+    ``~/.local/state/gardener``), next to the run-history db and
+    ``notify.env``. Each device has its own, as it has its own db."""
+    return state.default_state_dir() / INSTALL_ID_FILENAME
+
+
 def startup_tags() -> Dict[str, str]:
     """The tags a startup event carries besides ``version``, which the client
     adds to every event itself (see :func:`build_client`)."""
@@ -115,11 +136,17 @@ def build_client(env: Optional[Mapping[str, str]] = None, config_path: Optional[
     constructor, which puts the process environment's
     ``TRACE_USAGE_REPORTING`` / ``DO_NOT_TRACK`` ahead of everything else
     and records why it is off in ``disabled_reason``. Building it cannot
-    fail: any surprise yields the no-op."""
+    fail: any surprise yields the no-op.
+
+    The installation ID (``TRACE_INSTALL_ID`` from ``env``/the environment,
+    else :func:`install_id_file`) is resolved by the client only after those
+    checks, so a disabled client never creates the file."""
+    source = os.environ if env is None else env
     try:
         return TraceClient(
             endpoint(env, config_path), APPLICATION, __version__ or "unknown",
             key=key(env, config_path), enabled=enabled(env, config_path),
+            install_id=source.get(ENV_INSTALL_ID), install_id_file=install_id_file(),
         )
     except Exception:  # noqa: BLE001 - reporting must never be why gardener fails
         return TraceClient.disabled()
@@ -143,7 +170,7 @@ def stop(client: TraceClient, timeout: float = TraceClient.TIMEOUT_SECONDS) -> N
     Closing matters more here than in a long-running service: the sender
     is a daemon thread, so process exit would cut it off mid-request, and
     `gardener status`/`gardener ps` finish in milliseconds. The client's
-    ``close`` (0.1.1+; 0.3.0 is vendored) gives whatever is still queued up to ``timeout``
+    ``close`` (0.1.1+; 0.4.0 is vendored) gives whatever is still queued up to ``timeout``
     seconds in total to be sent, then stops the thread — so exit is delayed
     by at most the client's own timeout: an unreachable trace server is a
     request that times out, not a hang. Never raises, even on something

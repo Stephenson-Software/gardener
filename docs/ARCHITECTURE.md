@@ -67,7 +67,8 @@ gardener/
                        `ending` beat; never affects the dispatch
     notify.py        — pluggable outcome notifications (Notifier/DiscordNotifier/NullNotifier)
     usage.py         — one `startup` usage event per CLI invocation, tagged
-                       version + service=true, sent to trace; settings via
+                       version + service=true + install (random ID kept in
+                       $GARDENER_STATE_DIR/trace-install-id), sent to trace; settings via
                        GARDENER_USAGE_REPORTING_{ENABLED,ENDPOINT,KEY} (env
                        var, then notify.env — the same precedence notify.py
                        uses); never raises, never blocks, never prints

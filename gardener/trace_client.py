@@ -1,4 +1,4 @@
-"""trace-client 0.3.0 -- https://github.com/Stephenson-Software/trace-client-python
+"""trace-client 0.4.0 -- https://github.com/Stephenson-Software/trace-client-python
 
 One call to report that a program was used. Copy this file into a project as
 is, or vendor the package; either way there is nothing else to add. Standard
@@ -14,12 +14,14 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import urllib.error
 import urllib.request
-from typing import Dict, Mapping, Optional
+import uuid
+from typing import Dict, Mapping, Optional, Union
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 _LOG = logging.getLogger("trace")
 
@@ -41,6 +43,16 @@ REASON_NO_KEY = "no key"
 #: The longest a program version may be, after trimming: the trace server's
 #: limit on a tag value.
 MAX_TAG_LENGTH = 255
+
+#: The most tags one event carries: the trace server's limit. The ``install``
+#: tag is only added while an event has fewer than this.
+MAX_TAGS = 32
+
+#: The tag every event carries the installation's ID as.
+INSTALL_TAG = "install"
+
+# What install_id_from_file accepts as an ID on a line of its file.
+_INSTALL_ID_LINE = re.compile(r"^[A-Za-z0-9_.-]{1,%d}$" % MAX_TAG_LENGTH)
 
 
 def environment_opts_out(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -89,6 +101,16 @@ class TraceClient:
     release as well as a ``startup`` one. An event's own ``version`` tag wins
     over it.
 
+    Every event also carries a random per-installation ID as the tag
+    ``install``, so the trace server can count distinct installations rather
+    than raw events -- when the program supplies one: ``install_id=`` (an ID
+    it stores itself) or ``install_id_file=`` (a path the client loads the ID
+    from, or writes a new random one to; see :meth:`install_id_from_file`).
+    Without either, no ``install`` tag is sent and nothing is written
+    anywhere. Both are resolved only after the opt-outs, so a disabled client
+    never makes up an ID and never writes one. An event's own ``install`` tag
+    wins over it.
+
     ::
 
         trace = TraceClient("https://trace.example.org", "roam", __version__,
@@ -102,11 +124,21 @@ class TraceClient:
     TIMEOUT_SECONDS = 5.0
 
     def __init__(self, base_url: str, application: str, version: str, *, key: Optional[str] = None,
-                 enabled: bool = True) -> None:
+                 enabled: bool = True, install_id: Optional[str] = None,
+                 install_id_file: Optional[Union[str, "os.PathLike[str]"]] = None) -> None:
         """A client for the program named ``application``, at ``version``,
         reporting to the trace server at ``base_url``. The version is sent as
         the tag ``version`` on every event; a blank one, or one longer than
-        :data:`MAX_TAG_LENGTH` characters, is a :class:`ValueError`."""
+        :data:`MAX_TAG_LENGTH` characters, is a :class:`ValueError`.
+
+        ``install_id`` is the installation's ID, sent as the tag ``install``
+        on every event. It should be random -- e.g. a :func:`uuid.uuid4` the
+        program stores in its own settings -- and never derived from a
+        person, account or address. Trimmed; ``None`` or blank means none;
+        longer than :data:`MAX_TAG_LENGTH` characters is a
+        :class:`ValueError`. ``install_id_file`` is a path to load it from
+        (or create it in) with :meth:`install_id_from_file`, only when the
+        client is enabled; an explicit ``install_id`` wins over it."""
         if not base_url or not base_url.strip():
             raise ValueError("base_url is required")
         if not application or not application.strip():
@@ -115,6 +147,9 @@ class TraceClient:
             raise ValueError("version is required")
         if len(version.strip()) > MAX_TAG_LENGTH:
             raise ValueError("version is longer than %d characters" % MAX_TAG_LENGTH)
+        explicit_install_id = (install_id or "").strip() or None
+        if explicit_install_id is not None and len(explicit_install_id) > MAX_TAG_LENGTH:
+            raise ValueError("install_id is longer than %d characters" % MAX_TAG_LENGTH)
         self._endpoint = base_url.strip().rstrip("/") + "/api/metrics"
         self._application = application.strip()
         self._version = version.strip()
@@ -132,7 +167,14 @@ class TraceClient:
             self.disabled_reason = REASON_CONFIG
         elif not self._key:
             self.disabled_reason = REASON_NO_KEY
+        self._install_id: Optional[str] = None
         if self.disabled_reason is None:
+            # After the opt-outs, never before: a disabled client neither
+            # makes up an ID nor writes one to disk.
+            if explicit_install_id is not None:
+                self._install_id = explicit_install_id
+            elif install_id_file is not None:
+                self._install_id = TraceClient.install_id_from_file(install_id_file)
             self._queue = queue.Queue(maxsize=self.QUEUE_CAPACITY)
             self._thread = threading.Thread(target=self._drain, name="trace-client/" + self._application,
                                             daemon=True)
@@ -142,6 +184,57 @@ class TraceClient:
     def disabled(cls) -> "TraceClient":
         """A client that reports nothing. Useful as a default before settings are read."""
         return cls("http://disabled.invalid", "disabled", "disabled", enabled=False)
+
+    @property
+    def install_id(self) -> Optional[str]:
+        """The per-installation ID every event carries as the tag ``install``,
+        or ``None`` when the client is disabled or was given none (no
+        ``install_id`` and no ``install_id_file``)."""
+        return self._install_id
+
+    @staticmethod
+    def install_id_from_file(path: Union[str, "os.PathLike[str]"]) -> str:
+        """The installation's ID kept in the file at ``path``, which the
+        program chooses -- there is no default location. The first line that
+        is an ID (``[A-Za-z0-9_.-]``, at most :data:`MAX_TAG_LENGTH`
+        characters, surrounding whitespace ignored) is returned. If the file
+        does not exist or holds no such line, a new random :func:`uuid.uuid4`
+        is written to it (parent directories created) and returned. Delete
+        the file to get a new one.
+
+        Never raises: if the file exists but cannot be read, or cannot be
+        written, a fresh random ID is returned for this process only, and an
+        unreadable file is left as it is.
+
+        Called directly, this writes whatever the opt-outs say. Pass the path
+        as ``install_id_file=`` instead to keep the guarantee that a disabled
+        client writes nothing."""
+        fresh = str(uuid.uuid4())
+        try:
+            target = os.fspath(path)
+            if not target or not str(target).strip():
+                return fresh
+            try:
+                with open(target, "r", encoding="utf-8") as existing:
+                    for line in existing:
+                        candidate = line.strip()
+                        if _INSTALL_ID_LINE.match(candidate):
+                            return candidate
+            except FileNotFoundError:
+                pass
+            except Exception as failure:  # noqa: BLE001 - unreadable: never overwrite it
+                _LOG.debug("[trace] could not read install ID file %s, using an in-memory one: %s",
+                           target, failure)
+                return fresh
+            parent = os.path.dirname(os.path.abspath(target))
+            os.makedirs(parent, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as written:
+                written.write(fresh + "\n")
+            return fresh
+        except Exception as failure:  # noqa: BLE001 - an ID must never be the reason a program stops
+            _LOG.debug("[trace] could not write install ID file %s, using an in-memory one: %s",
+                       path, failure)
+            return fresh
 
     @property
     def enabled(self) -> bool:
@@ -159,7 +252,8 @@ class TraceClient:
         try:
             if not name or not name.strip():
                 return
-            body = _json(self._application, name, value, _with_version(tags, self._version))
+            tags = _with_install(_with_version(tags, self._version), self._install_id)
+            body = _json(self._application, name, value, tags)
             self._queue.put_nowait(body)
         except queue.Full:
             _LOG.debug("[trace] queue full, dropped %s", name)
@@ -200,7 +294,10 @@ class TraceClient:
             body = q.get()
             if body is None:
                 return
-            self._send(body)
+            try:
+                self._send(body)
+            except Exception as failure:  # noqa: BLE001 - a dead sender would leave the queue filling forever
+                _LOG.debug("[trace] sender failed on %s: %s", body, failure)
 
     def _send(self, body: bytes) -> None:
         try:
@@ -239,6 +336,16 @@ def _with_version(tags: Optional[Mapping[str, str]], version: str) -> Dict[str, 
                 merged[str(k)] = str(v)
     if "version" not in merged:
         merged["version"] = version
+    return merged
+
+
+def _with_install(tags: Dict[str, str], install_id: Optional[str]) -> Dict[str, str]:
+    """The tags plus ``install``, unless they already carry one, there is no
+    ID, or adding it would pass :data:`MAX_TAGS`. A copy when it adds."""
+    if install_id is None or INSTALL_TAG in tags or len(tags) >= MAX_TAGS:
+        return tags
+    merged = dict(tags)
+    merged[INSTALL_TAG] = install_id
     return merged
 
 

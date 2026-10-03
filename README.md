@@ -195,15 +195,26 @@ Usage reporting is on by default: every invocation of the `gardener` CLI
 sends **one `startup` event** to
 [trace](https://github.com/Stephenson-Software/trace) at
 `https://trace.danielstephenson.dev`, carrying the program name
-(`gardener`), the event name (`startup`), and two tags — gardener's
-version and `service=true` (which the trace operator page uses to hide
-hosted services from its fleet view). **Nothing else is sent**: no repo
+(`gardener`), the event name (`startup`), and three tags — gardener's
+version, `service=true` (which the trace operator page uses to hide
+hosted services from its fleet view) and `install`, a random installation
+ID so installations (devices) can be counted rather than invocations.
+**Nothing else is sent**: no repo
 name, no device name, no hostname, no IP address, no path, no run outcome,
 nothing from the target repos, nothing typed on the command line. `--help`
 and argument errors don't report. It is sent off the main thread, never
 raises, never writes to stdout, and an unreachable trace server costs a
 dropped event and at most a 5-second delay at exit — never a failed run.
 Being a hosted service, gardener prints no notice of its own.
+
+The installation ID is a random UUID kept in `trace-install-id` in
+gardener's state dir (`$GARDENER_STATE_DIR`, default
+`~/.local/state/gardener/`, next to the run-history db), so each device has
+its own. It is not derived from the device and identifies no person,
+account or address; delete the file to get a new one. Setting
+`TRACE_INSTALL_ID` in the environment sends that value instead and leaves
+the file alone. The file is only created while reporting is on, so every
+opt-out below also stops it.
 
 Turn it off any of these ways:
 
@@ -226,7 +237,7 @@ echo 'GARDENER_USAGE_REPORTING_ENABLED=false' >> ~/.local/state/gardener/notify.
 ```
 
 The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python)
-0.3.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
+0.4.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
 gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
 
 Details: https://github.com/Stephenson-Software/trace#usage-reporting
