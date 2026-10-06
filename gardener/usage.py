@@ -170,7 +170,7 @@ def stop(client: TraceClient, timeout: float = TraceClient.TIMEOUT_SECONDS) -> N
     Closing matters more here than in a long-running service: the sender
     is a daemon thread, so process exit would cut it off mid-request, and
     `gardener status`/`gardener ps` finish in milliseconds. The client's
-    ``close`` (0.1.1+; 0.4.0 is vendored) gives whatever is still queued up to ``timeout``
+    ``close`` (0.1.1+; 0.4.1 is vendored) gives whatever is still queued up to ``timeout``
     seconds in total to be sent, then stops the thread — so exit is delayed
     by at most the client's own timeout: an unreachable trace server is a
     request that times out, not a hang. Never raises, even on something

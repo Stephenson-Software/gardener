@@ -226,7 +226,7 @@ or unreachable server delays `stop` by at most its timeout, and
 `cli.main`'s wiring — `status` and `ps -q` each report exactly once with
 stdout untouched, `--help` reports nothing, either opt-out sends
 nothing, and the client is stopped even when the command raises.
-`tests/test_trace_client.py` is the vendored client's own suite (0.4.0),
+`tests/test_trace_client.py` is the vendored client's own suite (0.4.1),
 unchanged apart from its import lines, against the same loopback pattern;
 it also covers the client-wide `TRACE_USAGE_REPORTING` / `DO_NOT_TRACK`
 opt-out, which `test_usage.py` checks wins over gardener's own setting.

@@ -1,4 +1,4 @@
-"""trace-client 0.4.0 -- https://github.com/Stephenson-Software/trace-client-python
+"""trace-client 0.4.1 -- https://github.com/Stephenson-Software/trace-client-python
 
 One call to report that a program was used. Copy this file into a project as
 is, or vendor the package; either way there is nothing else to add. Standard
@@ -21,7 +21,7 @@ import urllib.request
 import uuid
 from typing import Dict, Mapping, Optional, Union
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 _LOG = logging.getLogger("trace")
 
@@ -93,8 +93,7 @@ class TraceClient:
     (``"environment"``, ``"config"`` or ``"no key"``; ``None`` when on) so
     the program can say so in its notice. Programs that run on other
     people's machines should expose that switch in their settings and say
-    so once, pointing at
-    https://github.com/Stephenson-Software/trace#usage-reporting.
+    so once, pointing at https://danielstephenson.dev/usage-reporting.
 
     Every event carries the program's own version as the tag ``version`` --
     the third argument, required, so a ``command`` event can be tied to a
