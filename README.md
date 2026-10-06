@@ -193,7 +193,7 @@ echo 'GARDENER_DEVICE_NAME=pixel-userland' >> ~/.local/state/gardener/notify.env
 
 Usage reporting is on by default: every invocation of the `gardener` CLI
 sends **one `startup` event** to
-[trace](https://github.com/Stephenson-Software/trace) at
+[trace](https://danielstephenson.dev/usage-reporting) at
 `https://trace.danielstephenson.dev`, carrying the program name
 (`gardener`), the event name (`startup`), and three tags — gardener's
 version, `service=true` (which the trace operator page uses to hide
@@ -240,7 +240,7 @@ The client is [trace-client-python](https://github.com/Stephenson-Software/trace
 0.4.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
 gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
 
-Details: https://github.com/Stephenson-Software/trace#usage-reporting
+Details: https://danielstephenson.dev/usage-reporting
 
 ## Usage
 

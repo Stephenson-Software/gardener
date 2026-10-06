@@ -35,7 +35,7 @@ variables only (not ``notify.env`` keys) and are checked ahead of gardener's
 own setting -- here in :func:`enabled` for whichever mapping is passed, and
 again by the client's constructor against the process environment -- so
 they win even when the setting says on. Details:
-https://github.com/Stephenson-Software/trace#usage-reporting
+https://danielstephenson.dev/usage-reporting
 
 The key is a program identifier, not a secret that grants anything, which
 is why it ships as a default in code rather than in the state directory —
