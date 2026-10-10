@@ -162,21 +162,66 @@ to, runs it, and records it in a hash-chained ledger. That makes it the
 natural place to enforce `GARDENER_HARNESS_SPEC` for the write modes, which
 is what `GARDENER_HARNESS_ALLOW_UNSCOPED` asks for.
 
-As of Orket 0.8.0 there is no ready-made "run this prompt in this
-directory" workload. `orket agent submit` needs an extension catalog, a
-registered workload and an `agent_iteration_request.v1` JSON request. So
-the Orket recipe is a small wrapper, owned on the Orket side, that:
+Two Orket recipes exist. Both serve report mode only and refuse every other
+mode.
 
-1. reads the prompt from stdin and `GARDENER_HARNESS_SPEC` from the
-   environment;
-2. maps the spec onto an Orket workload's tool allowlist and approval
-   policy (report mode: read-only tools; `merge_allowed: false`: no merge
-   tool at all);
-3. runs `orket agent submit ... --json` against a model it serves (for
-   example `--provider llama_cpp --model <exact served model>`);
-4. prints the contract's JSON object, with the Orket run id as
-   `session_id`.
+#### Orket's governed harness (Orket 0.8.1+)
 
-The wrapper and workload have been requested upstream in
-[McElyea/Orket#1](https://github.com/McElyea/Orket/issues/1). Until one exists, configure the Ollama
-recipe above, or your own wrapper, for local-model report runs.
+Orket ships
+[`examples/gardener_harness/`](https://github.com/McElyea/Orket/tree/main/examples/gardener_harness),
+adapted from
+[McElyea/Orket#2](https://github.com/McElyea/Orket/pull/2). Each dispatch
+becomes one governed `orket agent run`:
+- Orket's `structured_report.v1` verifier checks report delivery and source
+  references;
+- the run's evidence is retained for `orket agent inspect` and `replay`.
+
+Install Orket's `governed-report` example extension into an Orket project
+first (see that example's README), then:
+
+```bash
+GARDENER_HARNESS=command
+GARDENER_HARNESS_COMMAND="/path/to/orket-venv/bin/python /path/to/Orket/examples/gardener_harness/gardener_harness.py"
+GARDENER_HARNESS_MODEL=<exact model your provider serves>
+ORKET_GARDENER_CATALOG=/path/to/project/.orket/durable/config/extensions_catalog.json
+ORKET_GARDENER_PROVIDER_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp, the default provider
+```
+
+It reads only committed Git content. **Both the target clone and the
+conventions repo must be clean.** It also includes every tracked file of each
+extra directory, within a 64 KiB document budget, so a large conventions
+repo is refused before the model runs. Its own README has the full limits.
+
+#### `gardener-orket-extension` (headless)
+
+[Stephenson-Software/gardener-orket-extension](https://github.com/Stephenson-Software/gardener-orket-extension),
+built from Orket's extension template, is a lighter alternative:
+- `orket-extension gardener` sends one request to a running Orket host's
+  generic runtime API (`python server.py`);
+- it returns the report only if every citation in it refers to a supplied
+  source.
+
+It needs no extension installation and no clean repositories, and keeps no
+durable run record beyond gardener's own. Configure it with
+`GARDENER_HARNESS_COMMAND="/path/to/venv/bin/orket-extension gardener"` and
+the host's `EXTENSION_HOST_API_KEY`; its README lists the rest.
+
+#### What was verified
+
+On one machine (Ollama `llama3.2:3b`, 2 GB GPU), with gardener 0.3.0:
+
+- **Extension:** delivered a cited report once, in 105 s. It refused another
+  run as unsourced, and a third timed out in the host's model call.
+- **Orket's harness:** refused gardener's real conventions repo as over
+  budget. With a minimal conventions repo, it refused the report because
+  Ollama's default 4096-token context truncated the prompt. Its llama.cpp
+  default was not tested.
+
+So both paths are wired end to end and fail safely. Neither has yet produced
+a useful audit on that hardware. A larger model on a host with a larger
+context is the next step. Details are in the extension's
+`docs/verification.md`.
+
+**Write modes are not served** by either recipe. Enforcing
+`GARDENER_HARNESS_SPEC` for them would need an effect-capable Orket workload
+and approval flow, which hasn't been built.
