@@ -13,6 +13,19 @@ Windows (PowerShell):
 
     $env:PYTHONPATH = "."; python -m unittest discover -s tests -v
 
+Inside a headless `gardener tend` dispatch of this repo, use the bare form
+instead:
+
+    python3 -m unittest discover -s tests -v
+
+The prefixed form is refused there ("requires approval", which headlessly
+means denied): `dispatch.py`'s `TEND_BASE_ALLOWED_TOOLS` grants
+`Bash(python3 *)`, which matches on a command's leading tokens, and a
+leading `PYTHONPATH=.` assignment is not `python3`. The bare form is
+equivalent for this repo — `python3 -m` already puts the current directory
+on `sys.path`, and `gardener/` is a flat package at the repo root — so it
+discovers and runs the same tests. CI keeps the prefixed form.
+
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `subprocess.run` and never actually invokes `claude`. It covers both halves
 of the `bypassPermissions` posture, which are separate things: that no
