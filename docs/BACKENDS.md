@@ -150,6 +150,6 @@ the Orket recipe is a small wrapper, owned on the Orket side, that:
 4. prints the contract's JSON object, with the Orket run id as
    `session_id`.
 
-The wrapper and workload have been requested upstream (see
-`McElyea/Orket`'s issue tracker). Until one exists, configure the Ollama
+The wrapper and workload have been requested upstream in
+[McElyea/Orket#1](https://github.com/McElyea/Orket/issues/1). Until one exists, configure the Ollama
 recipe above, or your own wrapper, for local-model report runs.
