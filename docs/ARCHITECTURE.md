@@ -20,7 +20,7 @@ gardener/
                        `claude -p` by default (Mode/ModeSpec definitions and
                        tend_mode_spec() for every mode, including tend's
                        per-invocation merge gate), or a configured `command`
-                       backend via run_agent (see docs/BACKENDS.md)
+                       harness via run_agent (see docs/HARNESSES.md)
     dev_loop.py      — resolves/derives a target repo's <slug>-dev-loop skill,
                        builds the create-dev-loop and tend prompts (including
                        the headless-safety preamble)
@@ -105,8 +105,8 @@ gardener/
                        merge_allowlist, garden, overnight, conventions,
                        repo_lock, notify, transcript, run_log, sessions,
                        dashboard, live, selfupdate, usage, trace_client)
-  examples/backends/ — reference `command` agent backends (see
-                       docs/BACKENDS.md); not imported by gardener
+  examples/harnesses/ — reference `command` agent harnesses (see
+                       docs/HARNESSES.md); not imported by gardener
 ```
 
 ## Relationship to a conventions repo

@@ -11,7 +11,7 @@ file (`~/.local/state/gardener/garden.json` by default, overridable via
 never touched overnight just because it exists on this machine, only
 because it was explicitly added. See `gardener/garden.py`.
 
-**`gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]`** is the actual "tend
+**`gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]`** is the actual "tend
 to my garden while I sleep" entry point:
 
 0. Fast-forwards gardener's own checkout to `origin` first (on by default;
@@ -55,7 +55,8 @@ to my garden while I sleep" entry point:
    very first *batch* of a run is always attempted (as long as `--hours` is
    positive) so a run never silently dispatches nothing; every batch after
    the first requires enough headroom left in the budget for one more
-   worst-case `tend` call (`TEND_DEFAULT_TIMEOUT_SECONDS`, 45 min) before
+   worst-case `tend` call (`--timeout`, else `GARDENER_TEND_TIMEOUT`, else
+   `TEND_DEFAULT_TIMEOUT_SECONDS`, 45 min) before
    it's started — checked once per batch rather than once per repo when
    `--concurrency` > 1, since a batch's own wall-clock time is bounded by
    one repo's worst-case timeout (everything inside a batch runs in

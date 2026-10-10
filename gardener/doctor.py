@@ -167,28 +167,31 @@ def check_required_clis(
     config_path: Optional[Path] = None,
 ) -> list[Finding]:
     """`git`/`gh` always; the agent binary is whichever the configured
-    backend dispatches (`dispatch.load_backend_config`) — `claude` by
-    default, the `GARDENER_AGENT_COMMAND` program on the `command`
-    backend, where requiring `claude` would be a false ERROR."""
+    harness dispatches (`dispatch.load_harness_config`) — `claude` by
+    default, the `GARDENER_HARNESS_COMMAND` program on the `command`
+    harness, where requiring `claude` would be a false ERROR."""
     from gardener import dispatch
 
     required = dict(REQUIRED_CLIS)
     findings = []
     try:
-        config = dispatch.load_backend_config(env=env, config_path=config_path)
+        config = dispatch.load_harness_config(env=env, config_path=config_path)
     except dispatch.DispatchError as e:
         findings.append(
             Finding(
                 "cli",
                 Severity.ERROR,
-                f"agent backend misconfigured: {e}",
-                fix=f"fix {dispatch.BACKEND_ENV}/{dispatch.COMMAND_ENV} (env or notify.env)",
+                f"agent harness misconfigured: {e}",
+                fix=f"fix {dispatch.HARNESS_ENV}/{dispatch.COMMAND_ENV} (env or notify.env)",
             )
         )
         config = None
-    if config is not None and config.backend is dispatch.Backend.COMMAND:
-        del required["claude"]
-        required[config.command[0]] = f"every dispatch ({dispatch.COMMAND_ENV})"
+    if config is not None:
+        why = required.pop("claude")
+        if config.harness is dispatch.Harness.COMMAND:
+            required[config.command[0]] = f"every dispatch ({dispatch.COMMAND_ENV})"
+        else:
+            required[config.claude_bin] = why
     for name, why in required.items():
         if which_fn(name):
             findings.append(Finding("cli", Severity.OK, f"{name} found on PATH"))

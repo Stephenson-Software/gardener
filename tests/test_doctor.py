@@ -119,8 +119,8 @@ class TestRequiredClis(unittest.TestCase):
         )
         self.assertTrue(all(f.severity is Severity.OK for f in findings))
 
-    def test_command_backend_requires_its_command_not_claude(self):
-        env = {"GARDENER_AGENT_BACKEND": "command", "GARDENER_AGENT_COMMAND": "orket-agent --x"}
+    def test_command_harness_requires_its_command_not_claude(self):
+        env = {"GARDENER_HARNESS": "command", "GARDENER_HARNESS_COMMAND": "orket-agent --x"}
         findings = doctor.check_required_clis(
             which_fn=lambda name: None if name == "claude" else "/usr/bin/" + name,
             env=env, config_path=_NO_SETTINGS_FILE,
@@ -129,14 +129,22 @@ class TestRequiredClis(unittest.TestCase):
         self.assertTrue(any("orket-agent" in f.message for f in findings))
         self.assertFalse(any("claude" in f.message for f in findings))
 
-    def test_misconfigured_backend_is_an_error(self):
+    def test_claude_code_harness_requires_the_configured_claude_bin(self):
+        findings = doctor.check_required_clis(
+            which_fn=lambda name: None if name == "claude" else "/usr/bin/" + name,
+            env={"GARDENER_CLAUDE_BIN": "/opt/claude/bin/claude"}, config_path=_NO_SETTINGS_FILE,
+        )
+        self.assertTrue(all(f.severity is Severity.OK for f in findings))
+        self.assertTrue(any("/opt/claude/bin/claude" in f.message for f in findings))
+
+    def test_misconfigured_harness_is_an_error(self):
         findings = doctor.check_required_clis(
             which_fn=lambda name: "/usr/bin/" + name,
-            env={"GARDENER_AGENT_BACKEND": "nope"}, config_path=_NO_SETTINGS_FILE,
+            env={"GARDENER_HARNESS": "nope"}, config_path=_NO_SETTINGS_FILE,
         )
         errors = [f for f in findings if f.severity is Severity.ERROR]
         self.assertEqual(len(errors), 1)
-        self.assertIn("GARDENER_AGENT_BACKEND", errors[0].message)
+        self.assertIn("GARDENER_HARNESS", errors[0].message)
 
 
 class TestGhAuth(unittest.TestCase):

@@ -37,17 +37,18 @@ from gardener import (
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
-    CREATE_DEV_LOOP_TIMEOUT_SECONDS,
+    ALIGN_TIMEOUT_ENV,
     DEFAULT_TIMEOUT_SECONDS,
     TEND_DEFAULT_TIMEOUT_SECONDS,
+    TEND_TIMEOUT_ENV,
     DispatchError,
     Mode,
     is_device_global_failure,
     looks_like_auth_failure,
     looks_like_network_failure,
     looks_like_usage_limit,
-    check_backend_ready,
-    load_backend_config,
+    check_harness_ready,
+    load_harness_config,
     run_agent,
     tend_mode_spec,
 )
@@ -588,6 +589,14 @@ def cmd_align(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    try:
+        harness_config = load_harness_config()
+    except DispatchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.timeout is None:
+        args.timeout = harness_config.timeout_for(mode)
+
     print(f"gardener: aligning {args.repo} against {conventions_url} (mode={mode.value})", file=sys.stderr)
     if mode is Mode.REPORT:
         print("gardener: report-only — the run must leave the target clone unmodified", file=sys.stderr)
@@ -617,6 +626,7 @@ def cmd_align(args: argparse.Namespace) -> int:
                 add_dirs=[conv.path],
                 model=args.model,
                 timeout=args.timeout,
+                harness_config=harness_config,
             )
     except repo_lock.RepoLockedError as e:
         # Neither recorded nor alerted — see `_run_tend_dispatch`'s handler
@@ -745,6 +755,11 @@ def _dispatch_tend(args: argparse.Namespace) -> TendResult:
 def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
     """`_dispatch_tend`'s body — see it for why the two are separate."""
     try:
+        # Inside the try: a misconfigured harness is recorded and alerted
+        # like any other failed tend, not raised out of the batch.
+        harness_config = load_harness_config()
+        if getattr(args, "timeout", None) is None:
+            args.timeout = harness_config.tend_timeout
         with repo_lock.repo_lock(args.repo):
             target_dir = clone_or_refresh_target_repo(
                 args.repo, default_repos_cache_dir(), refresh=not args.no_refresh_target
@@ -788,7 +803,8 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                     # blocking it.
                     add_dirs=[dev_loop.LOCAL_SKILLS_DIR, dev_loop.COMMANDS_DIR],
                     model=args.model,
-                    timeout=CREATE_DEV_LOOP_TIMEOUT_SECONDS,
+                    timeout=harness_config.create_dev_loop_timeout,
+                    harness_config=harness_config,
                 )
                 # gh repo create is never in this mode's allowed_tools (a
                 # deliberate, higher-risk-class exclusion — see
@@ -864,6 +880,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                 model=args.model,
                 timeout=args.timeout,
                 mode_spec=tend_mode_spec(eligible),
+                harness_config=harness_config,
             )
     except repo_lock.RepoLockedError as e:
         # A held lock is the exclusion mechanism working as designed (see
@@ -1015,7 +1032,7 @@ def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnigh
         repo=repo,
         allow_merge=True,
         model=args.model,
-        timeout=TEND_DEFAULT_TIMEOUT_SECONDS,
+        timeout=getattr(args, "timeout", None),
         no_refresh_target=False,
         state_db=args.state_db,
     )
@@ -1180,21 +1197,28 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                 )
             )
 
-    # A backend that can't dispatch `tend` at all (missing binary, or the
-    # `command` backend without its unscoped opt-in) would otherwise fail
+    # A harness that can't dispatch `tend` at all (missing binary, or the
+    # `command` harness without its unscoped opt-in) would otherwise fail
     # every garden repo one by one, each recorded and alerted as that repo's
     # failure. Same setup-failure shape as the unreadable garden below.
     try:
-        check_backend_ready(Mode.TEND, load_backend_config())
+        harness_config = load_harness_config()
+        check_harness_ready(Mode.TEND, harness_config)
     except DispatchError as e:
         print(f"gardener: overnight: error: {e}", file=sys.stderr)
         try:
             notify.default_notifier().notify(
-                "gardener overnight: FAILED — agent backend not ready", str(e), notify.Level.ERROR
+                "gardener overnight: FAILED — agent harness not ready", str(e), notify.Level.ERROR
             )
         except Exception as notify_err:  # noqa: BLE001 - the alert must never mask the original error
             print(f"gardener: overnight: notification failed (non-fatal): {notify_err}", file=sys.stderr)
         return 1
+
+    # One repo's ceiling: `--timeout`, else GARDENER_TEND_TIMEOUT, else
+    # TEND_DEFAULT_TIMEOUT_SECONDS. Resolved once here so the headroom check
+    # below and every dispatched tend use the same number.
+    tend_timeout = getattr(args, "timeout", None) or harness_config.tend_timeout
+    args.timeout = tend_timeout
 
     try:
         garden_list = garden.list_garden(path=args.garden_file)
@@ -1346,17 +1370,17 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     for repo_batch in overnight.batch_repos(order, concurrency):
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
-        # wall-clock time is bounded by one repo's TEND_DEFAULT_TIMEOUT_SECONDS
+        # wall-clock time is bounded by one repo's tend timeout
         # (everything inside it runs in parallel, not stacked), so the
         # existing "elapsed + one repo's timeout <= budget" headroom check
         # is still the right test here — see overnight.batch_repos.
         if not overnight.has_time_for_another_repo(
-            elapsed, budget_seconds, TEND_DEFAULT_TIMEOUT_SECONDS, attempted
+            elapsed, budget_seconds, tend_timeout, attempted
         ):
             print(
                 f"gardener: overnight stopping — insufficient budget remaining for "
                 f"another repo ({budget_seconds - elapsed:.0f}s left, "
-                f"need {TEND_DEFAULT_TIMEOUT_SECONDS}s headroom)",
+                f"need {tend_timeout}s headroom)",
                 file=sys.stderr,
             )
             break
@@ -1912,10 +1936,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--file-issue", action="store_true",
         help="Authorize Claude to open one scoped GitHub issue summarizing the gaps",
     )
-    align.add_argument("--model", default=None, help="Model override passed through to `claude`")
+    align.add_argument("--model", default=None, help="Model override passed to the agent harness (default $GARDENER_HARNESS_MODEL)")
     align.add_argument(
-        "--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"Seconds to wait for the dispatched claude run (default {DEFAULT_TIMEOUT_SECONDS})",
+        "--timeout", type=int, default=None,
+        help=f"Seconds to wait for the dispatched agent run (default ${ALIGN_TIMEOUT_ENV} "
+             f"or {DEFAULT_TIMEOUT_SECONDS})",
     )
     align.add_argument(
         "--conventions-repo", default=None, metavar="GIT_URL",
@@ -1947,10 +1972,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Permit `gh pr merge` this run — still requires --repo be in the merge allow-list "
              "(see `gardener allowlist add`); either condition alone is not enough",
     )
-    tend.add_argument("--model", default=None, help="Model override passed through to `claude`")
+    tend.add_argument("--model", default=None, help="Model override passed to the agent harness (default $GARDENER_HARNESS_MODEL)")
     tend.add_argument(
-        "--timeout", type=int, default=TEND_DEFAULT_TIMEOUT_SECONDS,
-        help=f"Seconds to wait for the dispatched tend run (default {TEND_DEFAULT_TIMEOUT_SECONDS})",
+        "--timeout", type=int, default=None,
+        help=f"Seconds to wait for the dispatched tend run (default ${TEND_TIMEOUT_ENV} "
+             f"or {TEND_DEFAULT_TIMEOUT_SECONDS})",
     )
     tend.add_argument(
         "--no-refresh-target", action="store_true",
@@ -2004,6 +2030,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Overall time budget in hours (default {overnight.DEFAULT_OVERNIGHT_HOURS})",
     )
     overnight_parser.add_argument("--model", default=None, help="Model override passed through to each dispatched tend run")
+    overnight_parser.add_argument(
+        "--timeout", type=int, default=None,
+        help=f"Seconds each dispatched tend run may take, also used as the budget headroom "
+             f"(default ${TEND_TIMEOUT_ENV} or {TEND_DEFAULT_TIMEOUT_SECONDS})",
+    )
     overnight_parser.add_argument(
         "--concurrency", type=int, default=overnight.DEFAULT_OVERNIGHT_CONCURRENCY,
         help=f"How many repos to tend at once (default "

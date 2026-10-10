@@ -31,11 +31,11 @@ so a dispatched run never inherits whatever MCP servers (Gmail, Drive,
 Calendar, ...) happen to be configured for the invoking user.
 
 Everything above is how gardener scopes **Claude Code**, the default
-agent backend. On the `command` backend gardener hands the same spec to a
+agent harness. On the `command` harness gardener hands the same spec to a
 program it doesn't control, so the guarantees differ: the
 `bypassPermissions` check still runs, report runs are checked afterward
 for changes to the clone, and every other mode is refused without
-`GARDENER_AGENT_ALLOW_UNSCOPED=1`. See [BACKENDS.md](BACKENDS.md#safety).
+a mode listed in `GARDENER_HARNESS_ALLOW_UNSCOPED`. See [HARNESSES.md](HARNESSES.md#safety).
 
 ## `tend` mode, and the headless "ask the user" problem
 

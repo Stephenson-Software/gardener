@@ -1,34 +1,34 @@
 """Subprocess wrapper around the agent gardener dispatches — Claude Code's
 `claude` CLI by default, or an operator-configured command (see "Agent
-backends" below). Safety constraints live here, built into how each mode's
+harnesses" below). Safety constraints live here, built into how each mode's
 invocation is constructed, not applied afterward as a check on the result.
 
-## Agent backends
+## Agent harnesses
 
 Every caller in `cli.py` dispatches through `run_agent`, which picks a
-backend from `GARDENER_AGENT_BACKEND` (env first, then `notify.env`):
+harness from `GARDENER_HARNESS` (env first, then `notify.env`):
 
-- `claude-code` (the default, and the only backend before this existed):
+- `claude-code` (the default, and the only harness before this existed):
   `run_claude`, unchanged. Everything below this section describes it.
-- `command`: `run_command_agent` runs `GARDENER_AGENT_COMMAND` (split with
+- `command`: `run_command_harness` runs `GARDENER_HARNESS_COMMAND` (split with
   `shlex`, never a shell) in the target clone, with the prompt on stdin and
-  the mode's `ModeSpec` as JSON in `GARDENER_AGENT_SPEC`. This is how a
+  the mode's `ModeSpec` as JSON in `GARDENER_HARNESS_SPEC`. This is how a
   local-model runtime such as Orket plugs in, through a small wrapper —
-  see docs/BACKENDS.md for the full contract.
+  see docs/HARNESSES.md for the full contract.
 
 The safety model below is Claude Code's own tool scoping, which gardener
 can only *enforce* on an argv it builds for `claude`. On the `command`
-backend it can only *hand over* the same spec, so the posture changes:
+harness it can only *hand over* the same spec, so the posture changes:
 
 - `bypassPermissions` stays unreachable: `_check_permission_mode` runs for
-  both backends before anything is dispatched.
+  both harnesses before anything is dispatched.
 - Report mode is allowed, and checked after the fact instead of
   structurally: HEAD and `git status --porcelain` of the target clone are
   compared before and after, and a run that changed either is a failed run.
 - Every other mode (`--implement`, `--file-issue`, `tend`, `overnight`,
-  create-dev-loop) is refused unless the operator sets
-  `GARDENER_AGENT_ALLOW_UNSCOPED=1`, stating that the configured command
-  enforces the spec itself. The merge allow-list still decides whether
+  create-dev-loop) is refused unless the operator lists it in
+  `GARDENER_HARNESS_ALLOW_UNSCOPED` (or sets it to `1` for all of them),
+  stating that the configured command enforces the spec itself. The merge allow-list still decides whether
   `Bash(gh pr merge *)` is in that spec (`merge_allowed` in the JSON), but
   only the command can make it binding.
 
@@ -695,8 +695,8 @@ class DispatchResult:
 
 
 def _check_permission_mode(spec: ModeSpec) -> None:
-    """The bypassPermissions runtime gate, shared by every backend: the
-    `claude` argv builder below and `run_command_agent`, which hands the same
+    """The bypassPermissions runtime gate, shared by every harness: the
+    `claude` argv builder below and `run_command_harness`, which hands the same
     spec to an operator-configured command. Unreachable given MODE_SPECS
     above, but kept as a hard runtime gate rather than trusting the table
     never regresses."""
@@ -712,6 +712,7 @@ def _build_invocation(
     add_dirs: list[Path],
     model: Optional[str] = None,
     mode_spec: Optional[ModeSpec] = None,
+    claude_bin: str = CLAUDE_BIN,
 ) -> list[str]:
     spec = mode_spec if mode_spec is not None else MODE_SPECS[mode]
     _check_permission_mode(spec)
@@ -723,7 +724,7 @@ def _build_invocation(
     # invocation (it failed with "Input must be provided either through
     # stdin or as a prompt argument") before this ordering was fixed.
     argv = [
-        CLAUDE_BIN,
+        claude_bin,
         "-p", prompt,
         "--output-format", "json",
         "--permission-mode", spec.permission_mode,
@@ -749,6 +750,7 @@ def run_claude(
     mode_spec: Optional[ModeSpec] = None,
     auth_backoff_seconds: tuple[int, ...] = AUTH_RETRY_BACKOFF_SECONDS,
     sleep_fn=time.sleep,
+    claude_bin: str = CLAUDE_BIN,
 ) -> DispatchResult:
     """Dispatch one headless `claude -p` run and block until it finishes,
     retrying a limited number of times if — and only if — the run failed
@@ -788,7 +790,8 @@ def run_claude(
     attempts = len(auth_backoff_seconds) + 1
     for attempt in range(attempts):
         result = _run_claude_once(
-            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec
+            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec,
+            claude_bin=claude_bin,
         )
         if not result.auth_failed or attempt == attempts - 1:
             return result
@@ -810,19 +813,22 @@ def _run_claude_once(
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     mode_spec: Optional[ModeSpec] = None,
+    claude_bin: str = CLAUDE_BIN,
 ) -> DispatchResult:
     """One single `claude -p` invocation, with no retry — `run_claude`'s
     body before auth retries were added, unchanged apart from setting
     `auth_failed`. Kept separate so the retry policy above is readable on
     its own and testable without re-mocking the whole subprocess layer."""
-    if shutil.which(CLAUDE_BIN) is None:
+    if shutil.which(claude_bin) is None:
         raise DispatchError(
-            f"`{CLAUDE_BIN}` not found on PATH — install Claude Code CLI first"
+            f"`{claude_bin}` not found on PATH — install Claude Code CLI first"
         )
     if mode_spec is None and mode not in MODE_SPECS:
         raise DispatchError(f"unknown mode: {mode} (no mode_spec given and no fixed entry)")
 
-    argv = _build_invocation(mode, prompt, add_dirs or [], model=model, mode_spec=mode_spec)
+    argv = _build_invocation(
+        mode, prompt, add_dirs or [], model=model, mode_spec=mode_spec, claude_bin=claude_bin
+    )
 
     # Started right before the blocking call below so the poll runs
     # concurrently with the real dispatch, not before or after it — see
@@ -905,39 +911,68 @@ def _run_claude_once(
 
 
 # ---------------------------------------------------------------------------
-# Agent backends — see the module docstring's "Agent backends" section.
+# Agent harnesses — see the module docstring's "Agent harnesses" section.
 # ---------------------------------------------------------------------------
 
 
-class Backend(str, Enum):
+class Harness(str, Enum):
     CLAUDE_CODE = "claude-code"
     COMMAND = "command"
 
 
-DEFAULT_BACKEND = Backend.CLAUDE_CODE
+DEFAULT_HARNESS = Harness.CLAUDE_CODE
 
 # Settings, read env-first then from `notify.env` (the same precedence
 # `usage.py` and `hub.py` use, so a cron/Task Scheduler/`devsrv` run that
-# can't set env vars per invocation configures the backend the same way it
+# can't set env vars per invocation configures the harness the same way it
 # configures alerting).
-BACKEND_ENV = "GARDENER_AGENT_BACKEND"
-COMMAND_ENV = "GARDENER_AGENT_COMMAND"
-ALLOW_UNSCOPED_ENV = "GARDENER_AGENT_ALLOW_UNSCOPED"
+HARNESS_ENV = "GARDENER_HARNESS"
+COMMAND_ENV = "GARDENER_HARNESS_COMMAND"
+ALLOW_UNSCOPED_ENV = "GARDENER_HARNESS_ALLOW_UNSCOPED"
 
-# What a `command` backend receives besides the prompt on stdin.
-AGENT_MODE_ENV = "GARDENER_AGENT_MODE"
-AGENT_SPEC_ENV = "GARDENER_AGENT_SPEC"
-AGENT_MODEL_ENV = "GARDENER_AGENT_MODEL"
-AGENT_TIMEOUT_ENV = "GARDENER_AGENT_TIMEOUT"
+# Optional overrides for things that used to be constants. Each falls back
+# to the constant named beside it, so an unconfigured install behaves
+# exactly as before.
+CLAUDE_BIN_ENV = "GARDENER_CLAUDE_BIN"                        # CLAUDE_BIN
+ALIGN_TIMEOUT_ENV = "GARDENER_ALIGN_TIMEOUT"                  # DEFAULT_TIMEOUT_SECONDS
+TEND_TIMEOUT_ENV = "GARDENER_TEND_TIMEOUT"                    # TEND_DEFAULT_TIMEOUT_SECONDS
+CREATE_DEV_LOOP_TIMEOUT_ENV = "GARDENER_CREATE_DEV_LOOP_TIMEOUT"  # CREATE_DEV_LOOP_TIMEOUT_SECONDS
 
-_TRUE = {"1", "true", "yes", "on"}
+# Read as the default model for every dispatch on either harness (`--model`
+# wins), and handed to a `command` harness under the same name.
+MODEL_ENV = "GARDENER_HARNESS_MODEL"
+
+# What a `command` harness receives besides the prompt on stdin.
+MODE_ENV = "GARDENER_HARNESS_MODE"
+SPEC_ENV = "GARDENER_HARNESS_SPEC"
+TIMEOUT_ENV = "GARDENER_HARNESS_TIMEOUT"
+
+_TRUE = {"1", "true", "yes", "on", "all"}
+_FALSE = {"", "0", "false", "no", "off", "none"}
+
+#: Every mode a `command` harness refuses without opt-in: all but report.
+UNSCOPED_MODES: frozenset = frozenset(m for m in Mode if m is not Mode.REPORT)
 
 
 @dataclass(frozen=True)
-class BackendConfig:
-    backend: Backend = DEFAULT_BACKEND
+class HarnessConfig:
+    harness: Harness = DEFAULT_HARNESS
     command: tuple[str, ...] = ()
-    allow_unscoped: bool = False
+    #: Modes a `command` harness may run beyond report. Empty unless the
+    #: operator opts in via GARDENER_HARNESS_ALLOW_UNSCOPED.
+    unscoped_modes: frozenset = frozenset()
+    claude_bin: str = CLAUDE_BIN
+    model: Optional[str] = None
+    align_timeout: int = DEFAULT_TIMEOUT_SECONDS
+    tend_timeout: int = TEND_DEFAULT_TIMEOUT_SECONDS
+    create_dev_loop_timeout: int = CREATE_DEV_LOOP_TIMEOUT_SECONDS
+
+    def timeout_for(self, mode: Mode) -> int:
+        if mode is Mode.TEND:
+            return self.tend_timeout
+        if mode is Mode.CREATE_DEV_LOOP:
+            return self.create_dev_loop_timeout
+        return self.align_timeout
 
 
 def _settings_file() -> Path:
@@ -960,12 +995,12 @@ def _read_settings_file(path: Path) -> dict[str, str]:
         return {}
 
 
-def load_backend_config(env=None, config_path: Optional[Path] = None) -> BackendConfig:
-    """Resolve the agent backend from the environment, then `notify.env`.
-    Unset means Claude Code, exactly as before backends existed.
+def load_harness_config(env=None, config_path: Optional[Path] = None) -> HarnessConfig:
+    """Resolve the agent harness from the environment, then `notify.env`.
+    Unset means Claude Code, exactly as before harnesses existed.
 
     Raises DispatchError for a configuration that names something gardener
-    can't run (unknown backend, `command` with no command), so a typo
+    can't run (unknown harness, `command` with no command), so a typo
     fails loudly at dispatch instead of silently falling back to Claude.
     """
     source = os.environ if env is None else env
@@ -980,48 +1015,101 @@ def load_backend_config(env=None, config_path: Optional[Path] = None) -> Backend
             file_values = _read_settings_file(config_path or _settings_file())
         return (file_values.get(name) or "").strip()
 
-    name = setting(BACKEND_ENV) or DEFAULT_BACKEND.value
+    def timeout(name: str, default: int) -> int:
+        raw = setting(name)
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value <= 0:
+            raise DispatchError(f"{name}={raw!r} must be a positive whole number of seconds")
+        return value
+
+    common = dict(
+        claude_bin=setting(CLAUDE_BIN_ENV) or CLAUDE_BIN,
+        model=setting(MODEL_ENV) or None,
+        align_timeout=timeout(ALIGN_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
+        tend_timeout=timeout(TEND_TIMEOUT_ENV, TEND_DEFAULT_TIMEOUT_SECONDS),
+        create_dev_loop_timeout=timeout(CREATE_DEV_LOOP_TIMEOUT_ENV, CREATE_DEV_LOOP_TIMEOUT_SECONDS),
+    )
+
+    name = setting(HARNESS_ENV) or DEFAULT_HARNESS.value
     try:
-        backend = Backend(name)
+        harness = Harness(name)
     except ValueError:
-        choices = ", ".join(b.value for b in Backend)
-        raise DispatchError(f"unknown {BACKEND_ENV}={name!r} (expected one of: {choices})") from None
-    if backend is Backend.CLAUDE_CODE:
-        return BackendConfig(backend=backend)
+        choices = ", ".join(h.value for h in Harness)
+        raise DispatchError(f"unknown {HARNESS_ENV}={name!r} (expected one of: {choices})") from None
+    if harness is Harness.CLAUDE_CODE:
+        return HarnessConfig(harness=harness, **common)
 
     raw_command = setting(COMMAND_ENV)
     if not raw_command:
-        raise DispatchError(f"{BACKEND_ENV}=command needs {COMMAND_ENV} set to the agent command to run")
+        raise DispatchError(f"{HARNESS_ENV}=command needs {COMMAND_ENV} set to the agent command to run")
     try:
         command = tuple(shlex.split(raw_command))
     except ValueError as e:
         raise DispatchError(f"could not parse {COMMAND_ENV}: {e}") from None
     if not command:
         raise DispatchError(f"{COMMAND_ENV} is empty")
-    return BackendConfig(
-        backend=backend,
+    return HarnessConfig(
+        harness=harness,
         command=command,
-        allow_unscoped=setting(ALLOW_UNSCOPED_ENV).lower() in _TRUE,
+        unscoped_modes=_parse_unscoped_modes(setting(ALLOW_UNSCOPED_ENV)),
+        **common,
     )
 
 
-def check_backend_ready(mode: Mode, config: BackendConfig) -> None:
+def _parse_unscoped_modes(raw: str) -> frozenset:
+    """`1`/`true`/`all` opts every non-report mode in; a comma-separated
+    list of mode names (`implement,file-issue`) opts in only those; blank or
+    `0`/`false` opts in nothing. An unknown name raises rather than being
+    ignored, since a typo here would otherwise silently keep a mode refused
+    (or, worse, be read as consent to something else)."""
+    value = raw.strip().lower()
+    if value in _FALSE:
+        return frozenset()
+    if value in _TRUE:
+        return UNSCOPED_MODES
+    modes = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            mode = Mode(part)
+        except ValueError:
+            choices = ", ".join(m.value for m in sorted(UNSCOPED_MODES, key=lambda m: m.value))
+            raise DispatchError(
+                f"unknown mode {part!r} in {ALLOW_UNSCOPED_ENV} (expected all, or any of: {choices})"
+            ) from None
+        if mode is not Mode.REPORT:
+            modes.add(mode)
+    return frozenset(modes)
+
+
+def check_harness_ready(mode: Mode, config: HarnessConfig) -> None:
     """Raise DispatchError if `config` can't dispatch `mode` at all — the
-    binary is missing, or a non-report mode was asked of a `command` backend
+    binary is missing, or a non-report mode was asked of a `command` harness
     without the unscoped opt-in. `cmd_overnight` calls this once up front so
-    a misconfigured backend aborts the batch instead of failing every repo
+    a misconfigured harness aborts the batch instead of failing every repo
     in it one by one."""
-    if config.backend is Backend.CLAUDE_CODE:
-        if shutil.which(CLAUDE_BIN) is None:
-            raise DispatchError(f"`{CLAUDE_BIN}` not found on PATH — install Claude Code CLI first")
+    if config.harness is Harness.CLAUDE_CODE:
+        if shutil.which(config.claude_bin) is None:
+            raise DispatchError(
+                f"`{config.claude_bin}` not found — install Claude Code CLI first, or point "
+                f"{CLAUDE_BIN_ENV} at it"
+            )
         return
     if shutil.which(config.command[0]) is None:
         raise DispatchError(f"agent command `{config.command[0]}` not found ({COMMAND_ENV})")
-    if mode is not Mode.REPORT and not config.allow_unscoped:
+    if mode not in config.unscoped_modes and mode is not Mode.REPORT:
         raise DispatchError(
-            f"refusing {mode.value} mode on the `command` backend: gardener cannot enforce "
-            f"its tool scoping on a command it does not control. Set {ALLOW_UNSCOPED_ENV}=1 "
-            "once that command enforces the GARDENER_AGENT_SPEC it is given (see docs/BACKENDS.md)"
+            f"refusing {mode.value} mode on the `command` harness: gardener cannot enforce "
+            f"its tool scoping on a command it does not control. Add {mode.value} to "
+            f"{ALLOW_UNSCOPED_ENV} (or set it to 1 for every mode) once that command "
+            f"enforces the {SPEC_ENV} it is given (see docs/HARNESSES.md)"
         )
 
 
@@ -1031,19 +1119,24 @@ def run_agent(
     cwd: Path,
     add_dirs: Optional[list[Path]] = None,
     model: Optional[str] = None,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    timeout: Optional[int] = None,
     mode_spec: Optional[ModeSpec] = None,
-    backend_config: Optional[BackendConfig] = None,
+    harness_config: Optional[HarnessConfig] = None,
 ) -> DispatchResult:
-    """Dispatch one agent run on the configured backend. Every caller in
+    """Dispatch one agent run on the configured harness. Every caller in
     `cli.py` goes through here; `run_claude` stays the Claude Code
-    implementation, unchanged."""
-    config = backend_config if backend_config is not None else load_backend_config()
-    if config.backend is Backend.CLAUDE_CODE:
+    implementation, unchanged. An unset `model`/`timeout` falls back to the
+    harness configuration (GARDENER_HARNESS_MODEL, the per-mode timeout
+    settings), then to the built-in defaults."""
+    config = harness_config if harness_config is not None else load_harness_config()
+    model = model or config.model
+    timeout = timeout if timeout is not None else config.timeout_for(mode)
+    if config.harness is Harness.CLAUDE_CODE:
         return run_claude(
-            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec
+            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec,
+            claude_bin=config.claude_bin,
         )
-    return run_command_agent(
+    return run_command_harness(
         mode,
         prompt,
         cwd,
@@ -1082,11 +1175,11 @@ def _tree_snapshot(cwd: Path, run_fn) -> str:
     return "\n".join(parts)
 
 
-def run_command_agent(
+def run_command_harness(
     mode: Mode,
     prompt: str,
     cwd: Path,
-    config: BackendConfig,
+    config: HarnessConfig,
     add_dirs: Optional[list[Path]] = None,
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
@@ -1096,31 +1189,32 @@ def run_command_agent(
     """Run one dispatch through an operator-configured command (Orket, or
     any other agent runtime). The contract — prompt on stdin, mode and spec
     in the environment, an optional `claude`-shaped JSON envelope on stdout
-    — is documented in docs/BACKENDS.md.
+    — is documented in docs/HARNESSES.md.
 
     Same "report, don't raise" posture as `run_claude`: setup problems raise
     DispatchError, a failed run comes back as a DispatchResult. No auth
     retry: the auth markers describe `claude`'s own failure wording, so a
-    retry here would be keyed on text this backend never promised to emit.
-    `blocked` is still set from the shared markers, so an agent that reports
-    an exhausted quota or an unreachable GitHub in the same words still
-    stops an overnight batch.
+    retry here would be keyed on text this harness never promised to emit.
+    `blocked` is set when the harness says so (`"blocked": true` in its
+    JSON) or from the shared markers, so an agent that reports an exhausted
+    quota or an unreachable GitHub in the same words still stops an
+    overnight batch.
     """
     spec = mode_spec if mode_spec is not None else MODE_SPECS.get(mode)
     if spec is None:
         raise DispatchError(f"unknown mode: {mode} (no mode_spec given and no fixed entry)")
     _check_permission_mode(spec)
-    check_backend_ready(mode, config)
+    check_harness_ready(mode, config)
     dirs = add_dirs or []
 
     env = dict(os.environ)
-    env[AGENT_MODE_ENV] = mode.value
-    env[AGENT_SPEC_ENV] = json.dumps(_spec_payload(mode, spec, dirs))
-    env[AGENT_TIMEOUT_ENV] = str(timeout)
+    env[MODE_ENV] = mode.value
+    env[SPEC_ENV] = json.dumps(_spec_payload(mode, spec, dirs))
+    env[TIMEOUT_ENV] = str(timeout)
     if model:
-        env[AGENT_MODEL_ENV] = model
+        env[MODEL_ENV] = model
     else:
-        env.pop(AGENT_MODEL_ENV, None)
+        env.pop(MODEL_ENV, None)
 
     before = _tree_snapshot(cwd, run_fn) if mode is Mode.REPORT else None
 
@@ -1163,9 +1257,14 @@ def run_command_agent(
         cost = parsed.get("total_cost_usd")
         session_id = parsed.get("session_id")
         denials = parsed.get("permission_denials") or []
+        # A harness's own failure wording (a local model server that's
+        # down, say) can't be anticipated by the shared markers, so it may
+        # declare the failure device-global itself.
+        declared_blocked = bool(parsed.get("blocked"))
     else:
         # Plain text is a valid answer: the whole of stdout is the result.
         result_text, is_error, cost, session_id, denials = stdout.strip(), False, None, None, []
+        declared_blocked = False
 
     ok = proc.returncode == 0 and not is_error
     if before is not None and _tree_snapshot(cwd, run_fn) != before:
@@ -1186,7 +1285,7 @@ def run_command_agent(
         session_id=session_id,
         permission_denials=denials,
         is_error=is_error,
-        blocked=(not ok) and is_device_global_failure(result_text, stderr),
+        blocked=(not ok) and (declared_blocked or is_device_global_failure(result_text, stderr)),
     )
 
 

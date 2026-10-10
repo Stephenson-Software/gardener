@@ -641,7 +641,7 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Agent backends. These run a real stub agent (a tiny Python script, never
+# Agent harnesses. These run a real stub agent (a tiny Python script, never
 # `claude`) against a real throwaway git repo, so the stdin/env/stdout
 # contract and the report-mode mutation check are exercised end to end.
 # ---------------------------------------------------------------------------
@@ -653,77 +653,157 @@ import textwrap
 
 from gardener import dispatch
 from gardener.dispatch import (
-    Backend,
-    BackendConfig,
-    check_backend_ready,
-    load_backend_config,
+    Harness,
+    HarnessConfig,
+    check_harness_ready,
+    load_harness_config,
     run_agent,
-    run_command_agent,
+    run_command_harness,
 )
 
 _NO_SETTINGS_FILE = Path("/nonexistent/gardener-test/notify.env")
 
 
-class TestLoadBackendConfig(unittest.TestCase):
+class TestLoadHarnessConfig(unittest.TestCase):
     def test_unset_means_claude_code(self):
-        config = load_backend_config(env={}, config_path=_NO_SETTINGS_FILE)
-        self.assertIs(config.backend, Backend.CLAUDE_CODE)
+        config = load_harness_config(env={}, config_path=_NO_SETTINGS_FILE)
+        self.assertIs(config.harness, Harness.CLAUDE_CODE)
 
-    def test_command_backend_from_env(self):
-        config = load_backend_config(
+    def test_command_harness_from_env(self):
+        config = load_harness_config(
             env={
-                dispatch.BACKEND_ENV: "command",
+                dispatch.HARNESS_ENV: "command",
                 dispatch.COMMAND_ENV: "orket-agent --profile 'big model'",
                 dispatch.ALLOW_UNSCOPED_ENV: "1",
             },
             config_path=_NO_SETTINGS_FILE,
         )
-        self.assertIs(config.backend, Backend.COMMAND)
+        self.assertIs(config.harness, Harness.COMMAND)
         self.assertEqual(config.command, ("orket-agent", "--profile", "big model"))
-        self.assertTrue(config.allow_unscoped)
+        self.assertEqual(config.unscoped_modes, dispatch.UNSCOPED_MODES)
 
     def test_falls_back_to_notify_env_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notify.env"
-            path.write_text("GARDENER_AGENT_BACKEND=command\nGARDENER_AGENT_COMMAND=agent\n")
-            config = load_backend_config(env={}, config_path=path)
-        self.assertIs(config.backend, Backend.COMMAND)
+            path.write_text("GARDENER_HARNESS=command\nGARDENER_HARNESS_COMMAND=agent\n")
+            config = load_harness_config(env={}, config_path=path)
+        self.assertIs(config.harness, Harness.COMMAND)
         self.assertEqual(config.command, ("agent",))
-        self.assertFalse(config.allow_unscoped)
+        self.assertEqual(config.unscoped_modes, frozenset())
 
     def test_env_wins_over_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notify.env"
-            path.write_text("GARDENER_AGENT_BACKEND=command\nGARDENER_AGENT_COMMAND=agent\n")
-            config = load_backend_config(env={dispatch.BACKEND_ENV: "claude-code"}, config_path=path)
-        self.assertIs(config.backend, Backend.CLAUDE_CODE)
+            path.write_text("GARDENER_HARNESS=command\nGARDENER_HARNESS_COMMAND=agent\n")
+            config = load_harness_config(env={dispatch.HARNESS_ENV: "claude-code"}, config_path=path)
+        self.assertIs(config.harness, Harness.CLAUDE_CODE)
 
-    def test_unknown_backend_raises_instead_of_falling_back(self):
+    def test_unknown_harness_raises_instead_of_falling_back(self):
         with self.assertRaises(DispatchError):
-            load_backend_config(env={dispatch.BACKEND_ENV: "claud"}, config_path=_NO_SETTINGS_FILE)
+            load_harness_config(env={dispatch.HARNESS_ENV: "claud"}, config_path=_NO_SETTINGS_FILE)
 
-    def test_command_backend_without_command_raises(self):
+    def test_command_harness_without_command_raises(self):
         with self.assertRaises(DispatchError):
-            load_backend_config(env={dispatch.BACKEND_ENV: "command"}, config_path=_NO_SETTINGS_FILE)
+            load_harness_config(env={dispatch.HARNESS_ENV: "command"}, config_path=_NO_SETTINGS_FILE)
+
+    def _command(self, **extra):
+        env = {dispatch.HARNESS_ENV: "command", dispatch.COMMAND_ENV: "agent", **extra}
+        return load_harness_config(env=env, config_path=_NO_SETTINGS_FILE)
+
+    def test_unscoped_opt_in_can_name_individual_modes(self):
+        config = self._command(**{dispatch.ALLOW_UNSCOPED_ENV: "implement, file-issue"})
+        self.assertEqual(config.unscoped_modes, frozenset({Mode.IMPLEMENT, Mode.FILE_ISSUE}))
+
+    def test_unscoped_opt_in_all_and_off_spellings(self):
+        for raw in ("1", "true", "ALL", "yes"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    self._command(**{dispatch.ALLOW_UNSCOPED_ENV: raw}).unscoped_modes,
+                    dispatch.UNSCOPED_MODES,
+                )
+        for raw in ("0", "false", "off", "none"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    self._command(**{dispatch.ALLOW_UNSCOPED_ENV: raw}).unscoped_modes, frozenset()
+                )
+        self.assertNotIn(Mode.REPORT, dispatch.UNSCOPED_MODES)
+
+    def test_unscoped_opt_in_unknown_mode_raises(self):
+        with self.assertRaises(DispatchError) as cm:
+            self._command(**{dispatch.ALLOW_UNSCOPED_ENV: "implement,tned"})
+        self.assertIn("tned", str(cm.exception))
+
+    def test_defaults_match_the_constants_when_nothing_is_set(self):
+        config = load_harness_config(env={}, config_path=_NO_SETTINGS_FILE)
+        self.assertEqual(config.claude_bin, dispatch.CLAUDE_BIN)
+        self.assertIsNone(config.model)
+        self.assertEqual(config.timeout_for(Mode.REPORT), dispatch.DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(config.timeout_for(Mode.IMPLEMENT), dispatch.DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(config.timeout_for(Mode.TEND), dispatch.TEND_DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(
+            config.timeout_for(Mode.CREATE_DEV_LOOP), dispatch.CREATE_DEV_LOOP_TIMEOUT_SECONDS
+        )
+
+    def test_claude_bin_model_and_timeouts_are_settings_on_either_harness(self):
+        extra = {
+            dispatch.CLAUDE_BIN_ENV: "/opt/claude/bin/claude",
+            dispatch.MODEL_ENV: "qwen2.5-coder:32b",
+            dispatch.ALIGN_TIMEOUT_ENV: "60",
+            dispatch.TEND_TIMEOUT_ENV: "7200",
+            dispatch.CREATE_DEV_LOOP_TIMEOUT_ENV: "1200",
+        }
+        for config in (
+            load_harness_config(env=extra, config_path=_NO_SETTINGS_FILE),
+            self._command(**extra),
+        ):
+            with self.subTest(harness=config.harness):
+                self.assertEqual(config.claude_bin, "/opt/claude/bin/claude")
+                self.assertEqual(config.model, "qwen2.5-coder:32b")
+                self.assertEqual(config.timeout_for(Mode.REPORT), 60)
+                self.assertEqual(config.timeout_for(Mode.TEND), 7200)
+                self.assertEqual(config.timeout_for(Mode.CREATE_DEV_LOOP), 1200)
+
+    def test_bad_timeout_raises(self):
+        for raw in ("0", "-5", "soon", "1.5"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(DispatchError):
+                    load_harness_config(
+                        env={dispatch.TEND_TIMEOUT_ENV: raw}, config_path=_NO_SETTINGS_FILE
+                    )
 
 
 class TestRunAgentRouting(unittest.TestCase):
     @patch("gardener.dispatch.run_claude")
-    def test_claude_code_backend_delegates_to_run_claude_unchanged(self, mock_run_claude):
+    def test_claude_code_harness_delegates_to_run_claude_unchanged(self, mock_run_claude):
         spec = tend_mode_spec(True)
         run_agent(
             Mode.TEND, "p", Path("/tmp"), model="m", timeout=7, mode_spec=spec,
-            backend_config=BackendConfig(),
+            harness_config=HarnessConfig(),
         )
         mock_run_claude.assert_called_once_with(
-            Mode.TEND, "p", Path("/tmp"), add_dirs=None, model="m", timeout=7, mode_spec=spec
+            Mode.TEND, "p", Path("/tmp"), add_dirs=None, model="m", timeout=7, mode_spec=spec,
+            claude_bin=dispatch.CLAUDE_BIN,
         )
 
-    @patch("gardener.dispatch.run_command_agent")
     @patch("gardener.dispatch.run_claude")
-    def test_command_backend_never_touches_claude(self, mock_run_claude, mock_command):
-        config = BackendConfig(backend=Backend.COMMAND, command=("agent",))
-        run_agent(Mode.REPORT, "p", Path("/tmp"), backend_config=config)
+    def test_unset_model_and_timeout_come_from_the_config(self, mock_run_claude):
+        config = HarnessConfig(claude_bin="/opt/claude", model="opus", tend_timeout=99)
+        run_agent(Mode.TEND, "p", Path("/tmp"), mode_spec=tend_mode_spec(False), harness_config=config)
+        kwargs = mock_run_claude.call_args.kwargs
+        self.assertEqual((kwargs["model"], kwargs["timeout"], kwargs["claude_bin"]), ("opus", 99, "/opt/claude"))
+
+    @patch("gardener.dispatch.run_claude")
+    def test_explicit_model_and_timeout_win_over_the_config(self, mock_run_claude):
+        config = HarnessConfig(model="opus", align_timeout=99)
+        run_agent(Mode.REPORT, "p", Path("/tmp"), model="sonnet", timeout=5, harness_config=config)
+        kwargs = mock_run_claude.call_args.kwargs
+        self.assertEqual((kwargs["model"], kwargs["timeout"]), ("sonnet", 5))
+
+    @patch("gardener.dispatch.run_command_harness")
+    @patch("gardener.dispatch.run_claude")
+    def test_command_harness_never_touches_claude(self, mock_run_claude, mock_command):
+        config = HarnessConfig(harness=Harness.COMMAND, command=("agent",))
+        run_agent(Mode.REPORT, "p", Path("/tmp"), harness_config=config)
         mock_run_claude.assert_not_called()
         mock_command.assert_called_once()
 
@@ -754,9 +834,9 @@ _ECHO_AGENT = """
         "session_id": "orket-run-1",
         "total_cost_usd": 0,
         "permission_denials": [],
-        "spec": json.loads(os.environ["GARDENER_AGENT_SPEC"]),
-        "mode": os.environ["GARDENER_AGENT_MODE"],
-        "model": os.environ.get("GARDENER_AGENT_MODEL"),
+        "spec": json.loads(os.environ["GARDENER_HARNESS_SPEC"]),
+        "mode": os.environ["GARDENER_HARNESS_MODE"],
+        "model": os.environ.get("GARDENER_HARNESS_MODEL"),
         "cwd": os.getcwd(),
     }))
 """
@@ -771,13 +851,14 @@ class TestRunCommandAgent(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _config(self, body: str, allow_unscoped: bool = False) -> BackendConfig:
-        return BackendConfig(
-            backend=Backend.COMMAND, command=_stub_agent(self.tmp, body), allow_unscoped=allow_unscoped
+    def _config(self, body: str, allow_unscoped: bool = False) -> HarnessConfig:
+        modes = dispatch.UNSCOPED_MODES if allow_unscoped else frozenset()
+        return HarnessConfig(
+            harness=Harness.COMMAND, command=_stub_agent(self.tmp, body), unscoped_modes=modes
         )
 
     def test_report_run_gets_prompt_on_stdin_and_spec_in_env(self):
-        result = run_command_agent(
+        result = run_command_harness(
             Mode.REPORT, "audit this", self.repo, self._config(_ECHO_AGENT),
             add_dirs=[Path("/conv")], model="qwen",
         )
@@ -795,13 +876,13 @@ class TestRunCommandAgent(unittest.TestCase):
 
     def test_plain_text_stdout_is_the_result(self):
         body = "import sys; sys.stdin.read(); print('no gaps found')"
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
         self.assertTrue(result.ok)
         self.assertEqual(result.result_text, "no gaps found")
 
     def test_nonzero_exit_is_a_failed_run_not_an_exception(self):
         body = "import sys; sys.stdin.read(); print('model unavailable', file=sys.stderr); sys.exit(3)"
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
         self.assertFalse(result.ok)
         self.assertEqual(result.exit_code, 3)
         self.assertIn("model unavailable", result.stderr)
@@ -809,7 +890,7 @@ class TestRunCommandAgent(unittest.TestCase):
 
     def test_report_run_that_modifies_the_clone_fails(self):
         body = "import sys; sys.stdin.read(); open('touched.txt', 'w').write('x'); print('done')"
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
         self.assertFalse(result.ok)
         self.assertTrue(result.is_error)
         self.assertIn("modified the target clone", result.stderr)
@@ -822,7 +903,7 @@ class TestRunCommandAgent(unittest.TestCase):
                             "commit", "-q", "--allow-empty", "-m", "sneaky"], check=True)
             print("done")
         """
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
         self.assertFalse(result.ok)
         self.assertIn("modified the target clone", result.stderr)
 
@@ -835,14 +916,14 @@ class TestRunCommandAgent(unittest.TestCase):
         ):
             with self.subTest(mode=mode):
                 with self.assertRaises(DispatchError) as cm:
-                    run_command_agent(mode, "p", self.repo, self._config(_ECHO_AGENT), mode_spec=spec)
+                    run_command_harness(mode, "p", self.repo, self._config(_ECHO_AGENT), mode_spec=spec)
                 self.assertIn(dispatch.ALLOW_UNSCOPED_ENV, str(cm.exception))
 
     def test_tend_with_opt_in_hands_over_merge_eligibility(self):
         config = self._config(_ECHO_AGENT, allow_unscoped=True)
         for eligible in (False, True):
             with self.subTest(eligible=eligible):
-                result = run_command_agent(
+                result = run_command_harness(
                     Mode.TEND, "p", self.repo, config, mode_spec=tend_mode_spec(eligible)
                 )
                 self.assertTrue(result.ok, result.stderr)
@@ -850,20 +931,20 @@ class TestRunCommandAgent(unittest.TestCase):
                 self.assertEqual(spec["merge_allowed"], eligible)
                 self.assertEqual(MERGE_ALLOWED_TOOL in spec["allowed_tools"], eligible)
 
-    def test_bypass_permissions_unreachable_on_command_backend_too(self):
+    def test_bypass_permissions_unreachable_on_command_harness_too(self):
         bad = ModeSpec(tools=("Read",), permission_mode=FORBIDDEN_PERMISSION_MODE)
         config = self._config(_ECHO_AGENT, allow_unscoped=True)
         with self.assertRaises(DispatchError):
-            run_command_agent(Mode.TEND, "p", self.repo, config, mode_spec=bad)
+            run_command_harness(Mode.TEND, "p", self.repo, config, mode_spec=bad)
 
     def test_missing_command_raises(self):
-        config = BackendConfig(backend=Backend.COMMAND, command=("/nonexistent/agent",))
+        config = HarnessConfig(harness=Harness.COMMAND, command=("/nonexistent/agent",))
         with self.assertRaises(DispatchError):
-            run_command_agent(Mode.REPORT, "p", self.repo, config)
+            run_command_harness(Mode.REPORT, "p", self.repo, config)
 
     def test_timeout_is_reported(self):
         body = "import sys, time; sys.stdin.read(); time.sleep(30)"
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body), timeout=1)
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body), timeout=1)
         self.assertFalse(result.ok)
         self.assertTrue(result.timed_out)
 
@@ -873,24 +954,71 @@ class TestRunCommandAgent(unittest.TestCase):
             sys.stdin.read()
             print(json.dumps({"result": "rate limit reached for local server", "is_error": True}))
         """
-        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
         self.assertFalse(result.ok)
         self.assertTrue(result.blocked)
         self.assertFalse(result.auth_failed)
 
+    def test_harness_can_declare_a_failure_blocked_in_its_own_words(self):
+        body = """
+            import json, sys
+            sys.stdin.read()
+            print(json.dumps({"result": "llama-server is not running", "is_error": True, "blocked": True}))
+        """
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertTrue(result.blocked)
 
-class TestCheckBackendReady(unittest.TestCase):
-    def test_command_backend_report_needs_no_opt_in(self):
-        config = BackendConfig(backend=Backend.COMMAND, command=(sys.executable,))
-        check_backend_ready(Mode.REPORT, config)
+    def test_declared_blocked_is_ignored_on_a_successful_run(self):
+        body = """
+            import json, sys
+            sys.stdin.read()
+            print(json.dumps({"result": "fine", "blocked": True}))
+        """
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertTrue(result.ok)
+        self.assertFalse(result.blocked)
 
-    def test_command_backend_tend_needs_opt_in(self):
-        config = BackendConfig(backend=Backend.COMMAND, command=(sys.executable,))
+
+class TestCheckHarnessReady(unittest.TestCase):
+    def test_command_harness_report_needs_no_opt_in(self):
+        config = HarnessConfig(harness=Harness.COMMAND, command=(sys.executable,))
+        check_harness_ready(Mode.REPORT, config)
+
+    def test_command_harness_tend_needs_opt_in(self):
+        config = HarnessConfig(harness=Harness.COMMAND, command=(sys.executable,))
         with self.assertRaises(DispatchError):
-            check_backend_ready(Mode.TEND, config)
-        check_backend_ready(Mode.TEND, BackendConfig(Backend.COMMAND, (sys.executable,), True))
+            check_harness_ready(Mode.TEND, config)
+        check_harness_ready(
+            Mode.TEND,
+            HarnessConfig(Harness.COMMAND, (sys.executable,), unscoped_modes=dispatch.UNSCOPED_MODES),
+        )
+
+    def test_opt_in_is_per_mode(self):
+        config = HarnessConfig(
+            Harness.COMMAND, (sys.executable,), unscoped_modes=frozenset({Mode.IMPLEMENT})
+        )
+        check_harness_ready(Mode.IMPLEMENT, config)
+        for mode in (Mode.TEND, Mode.FILE_ISSUE, Mode.CREATE_DEV_LOOP):
+            with self.subTest(mode=mode):
+                with self.assertRaises(DispatchError) as cm:
+                    check_harness_ready(mode, config)
+                self.assertIn(mode.value, str(cm.exception))
 
     @patch("gardener.dispatch.shutil.which", return_value=None)
-    def test_claude_code_backend_needs_claude(self, _which):
+    def test_claude_code_harness_needs_claude(self, _which):
         with self.assertRaises(DispatchError):
-            check_backend_ready(Mode.TEND, BackendConfig())
+            check_harness_ready(Mode.TEND, HarnessConfig())
+
+    def test_claude_code_harness_checks_the_configured_claude_bin(self):
+        check_harness_ready(Mode.TEND, HarnessConfig(claude_bin=sys.executable))
+        with self.assertRaises(DispatchError) as cm:
+            check_harness_ready(Mode.TEND, HarnessConfig(claude_bin="/nonexistent/claude"))
+        self.assertIn(dispatch.CLAUDE_BIN_ENV, str(cm.exception))
+
+
+class TestClaudeBinInArgv(unittest.TestCase):
+    def test_build_invocation_uses_the_configured_binary(self):
+        argv = _build_invocation(Mode.REPORT, "p", [], claude_bin="/opt/claude/bin/claude")
+        self.assertEqual(argv[0], "/opt/claude/bin/claude")
+        self.assertEqual(_build_invocation(Mode.REPORT, "p", [])[0], "claude")
