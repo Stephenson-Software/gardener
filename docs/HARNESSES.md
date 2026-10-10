@@ -162,43 +162,66 @@ to, runs it, and records it in a hash-chained ledger. That makes it the
 natural place to enforce `GARDENER_HARNESS_SPEC` for the write modes, which
 is what `GARDENER_HARNESS_ALLOW_UNSCOPED` asks for.
 
-Orket 0.8.0 can't run this directly: every `orket agent submit` run is
-verified by its ticket-demo verifier, so no other workload can complete. A
-change and a ready-made harness are proposed upstream in
-[McElyea/Orket#2](https://github.com/McElyea/Orket/pull/2), pending the Orket
-maintainer's review. It adds:
+Two Orket recipes exist. Both serve report mode only and refuse every other
+mode.
 
-- an opt-in, report-only completion verifier
-  (`agent_advisory_report_verification.v1`), which accepts a report only if
-  its `source_refs` come from the supplied snapshot and it proposes no
-  effects;
-- `examples/gardener_harness/gardener_harness.py`, which implements this
-  contract for report mode and refuses every other mode.
+#### Orket's governed harness (Orket 0.8.1+)
 
-With that branch installed:
+Orket ships
+[`examples/gardener_harness/`](https://github.com/McElyea/Orket/tree/main/examples/gardener_harness),
+adapted from
+[McElyea/Orket#2](https://github.com/McElyea/Orket/pull/2). Each dispatch
+becomes one governed `orket agent run`:
+- Orket's `structured_report.v1` verifier checks report delivery and source
+  references;
+- the run's evidence is retained for `orket agent inspect` and `replay`.
+
+Install Orket's `governed-report` example extension into an Orket project
+first (see that example's README), then:
 
 ```bash
 GARDENER_HARNESS=command
 GARDENER_HARNESS_COMMAND="/path/to/orket-venv/bin/python /path/to/Orket/examples/gardener_harness/gardener_harness.py"
 GARDENER_HARNESS_MODEL=<exact model your provider serves>
-ORKET_GARDENER_PROVIDER=ollama   # or llama_cpp, lmstudio, openai_compat
+ORKET_GARDENER_CATALOG=/path/to/project/.orket/durable/config/extensions_catalog.json
+ORKET_GARDENER_PROVIDER_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp, the default provider
 ```
 
-The model gets no tools. The wrapper sends a bounded snapshot: files the
-prompt names, the repository's docs, and its file listing. Each report's
-footer names the Orket run, so it can be inspected with
-`orket agent inspect`.
+It reads only committed Git content. **Both the target clone and the
+conventions repo must be clean.** It also includes every tracked file of each
+extra directory, within a 64 KiB document budget, so a large conventions
+repo is refused before the model runs. Its own README has the full limits.
 
-**Verified:** a real `gardener align` (0.3.0) completed through it on Ollama
-`llama3.2:3b`.
+#### `gardener-orket-extension` (headless)
 
-**Limits:** Orket's packaged prompt profile caps that model's structured
-output at 512 tokens, and the governed Ollama provider uses the server's
-default context window. So with a small model, the wrapper keeps the snapshot
-and report short (`ORKET_GARDENER_MAX_TOTAL_BYTES`,
-`ORKET_GARDENER_REPORT_WORDS`). The checklist a 3B model produces is often
-wrong; the run proves the governed path, not audit quality.
+[Stephenson-Software/gardener-orket-extension](https://github.com/Stephenson-Software/gardener-orket-extension),
+built from Orket's extension template, is a lighter alternative:
+- `orket-extension gardener` sends one request to a running Orket host's
+  generic runtime API (`python server.py`);
+- it returns the report only if every citation in it refers to a supplied
+  source.
 
-**Write modes are not served.** Enforcing `GARDENER_HARNESS_SPEC` for them
-in Orket would need an effect-capable workload and Orket's approval flow,
-which hasn't been built.
+It needs no extension installation and no clean repositories, and keeps no
+durable run record beyond gardener's own. Configure it with
+`GARDENER_HARNESS_COMMAND="/path/to/venv/bin/orket-extension gardener"` and
+the host's `EXTENSION_HOST_API_KEY`; its README lists the rest.
+
+#### What was verified
+
+On one machine (Ollama `llama3.2:3b`, 2 GB GPU), with gardener 0.3.0:
+
+- **Extension:** delivered a cited report once, in 105 s. It refused another
+  run as unsourced, and a third timed out in the host's model call.
+- **Orket's harness:** refused gardener's real conventions repo as over
+  budget. With a minimal conventions repo, it refused the report because
+  Ollama's default 4096-token context truncated the prompt. Its llama.cpp
+  default was not tested.
+
+So both paths are wired end to end and fail safely. Neither has yet produced
+a useful audit on that hardware. A larger model on a host with a larger
+context is the next step. Details are in the extension's
+`docs/verification.md`.
+
+**Write modes are not served** by either recipe. Enforcing
+`GARDENER_HARNESS_SPEC` for them would need an effect-capable Orket workload
+and approval flow, which hasn't been built.
