@@ -1,5 +1,15 @@
 # Project Status
 
+**0.4.0 (2026-10-10):** `GARDENER_CONVENTIONS_SUBDIR` / `align
+--conventions-subdir` roots `align` at a compact rubric inside the
+conventions repo, for harnesses with a document budget. It was verified
+with real Claude Code runs:
+- without it, the conventions root is the repo root as before;
+- with it, every convention doc the session read came from the
+  subdirectory.
+
+Record: [verification/0.4.0.md](verification/0.4.0.md).
+
 **0.3.0 (2026-10-10):** the agent-harness layer
 ([HARNESSES.md](HARNESSES.md)) was verified with real runs before
 release. The default Claude Code path was checked three ways:
