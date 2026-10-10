@@ -575,6 +575,10 @@ scratch directory so the run doesn't land in your real history or alerts.
 Then confirm `gardener tend` and `gardener overnight` refuse with the
 `GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
 
+The record of the real runs behind a release lives in `docs/verification/`.
+[0.3.0](verification/0.3.0.md) covers the harness layer, both the Claude
+Code regression check and the `command` harness.
+
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.
 
