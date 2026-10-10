@@ -162,21 +162,43 @@ to, runs it, and records it in a hash-chained ledger. That makes it the
 natural place to enforce `GARDENER_HARNESS_SPEC` for the write modes, which
 is what `GARDENER_HARNESS_ALLOW_UNSCOPED` asks for.
 
-As of Orket 0.8.0 there is no ready-made "run this prompt in this
-directory" workload. `orket agent submit` needs an extension catalog, a
-registered workload and an `agent_iteration_request.v1` JSON request. So
-the Orket recipe is a small wrapper, owned on the Orket side, that:
+Orket 0.8.0 can't run this directly: every `orket agent submit` run is
+verified by its ticket-demo verifier, so no other workload can complete. A
+change and a ready-made harness are proposed upstream in
+[McElyea/Orket#2](https://github.com/McElyea/Orket/pull/2), pending the Orket
+maintainer's review. It adds:
 
-1. reads the prompt from stdin and `GARDENER_HARNESS_SPEC` from the
-   environment;
-2. maps the spec onto an Orket workload's tool allowlist and approval
-   policy (report mode: read-only tools; `merge_allowed: false`: no merge
-   tool at all);
-3. runs `orket agent submit ... --json` against a model it serves (for
-   example `--provider llama_cpp --model <exact served model>`);
-4. prints the contract's JSON object, with the Orket run id as
-   `session_id`.
+- an opt-in, report-only completion verifier
+  (`agent_advisory_report_verification.v1`), which accepts a report only if
+  its `source_refs` come from the supplied snapshot and it proposes no
+  effects;
+- `examples/gardener_harness/gardener_harness.py`, which implements this
+  contract for report mode and refuses every other mode.
 
-The wrapper and workload have been requested upstream in
-[McElyea/Orket#1](https://github.com/McElyea/Orket/issues/1). Until one exists, configure the Ollama
-recipe above, or your own wrapper, for local-model report runs.
+With that branch installed:
+
+```bash
+GARDENER_HARNESS=command
+GARDENER_HARNESS_COMMAND="/path/to/orket-venv/bin/python /path/to/Orket/examples/gardener_harness/gardener_harness.py"
+GARDENER_HARNESS_MODEL=<exact model your provider serves>
+ORKET_GARDENER_PROVIDER=ollama   # or llama_cpp, lmstudio, openai_compat
+```
+
+The model gets no tools. The wrapper sends a bounded snapshot: files the
+prompt names, the repository's docs, and its file listing. Each report's
+footer names the Orket run, so it can be inspected with
+`orket agent inspect`.
+
+**Verified:** a real `gardener align` (0.3.0) completed through it on Ollama
+`llama3.2:3b`.
+
+**Limits:** Orket's packaged prompt profile caps that model's structured
+output at 512 tokens, and the governed Ollama provider uses the server's
+default context window. So with a small model, the wrapper keeps the snapshot
+and report short (`ORKET_GARDENER_MAX_TOTAL_BYTES`,
+`ORKET_GARDENER_REPORT_WORDS`). The checklist a 3B model produces is often
+wrong; the run proves the governed path, not audit quality.
+
+**Write modes are not served.** Enforcing `GARDENER_HARNESS_SPEC` for them
+in Orket would need an effect-capable workload and Orket's approval flow,
+which hasn't been built.
