@@ -329,6 +329,16 @@ for anyone who'd rather trigger it by hand than wait for the next
 `overnight` run. `--check` fetches and reports whether an update is
 available (and, if so, the old/new commit) without applying it.
 
+## Agent backends
+
+Every dispatch goes to Claude Code unless `GARDENER_AGENT_BACKEND=command`
+is set (environment or `notify.env`), in which case `align`, `tend` and
+`overnight` run `GARDENER_AGENT_COMMAND` instead. Report mode needs nothing
+more; every other mode also needs `GARDENER_AGENT_ALLOW_UNSCOPED=1`, and
+`overnight` refuses to start without it. `--model` is passed to the command
+as `GARDENER_AGENT_MODEL`. See [BACKENDS.md](BACKENDS.md) for the command
+contract, the safety differences, and the Ollama and Orket recipes.
+
 ## Other flags
 
 - `--model <name>` — override the model `claude` uses (`align`, `tend`, and

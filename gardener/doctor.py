@@ -161,9 +161,35 @@ def canonical_repo_name(
     return name if isinstance(name, str) and name else None
 
 
-def check_required_clis(which_fn: Callable[[str], Optional[str]] = shutil.which) -> list[Finding]:
+def check_required_clis(
+    which_fn: Callable[[str], Optional[str]] = shutil.which,
+    env: Optional[dict] = None,
+    config_path: Optional[Path] = None,
+) -> list[Finding]:
+    """`git`/`gh` always; the agent binary is whichever the configured
+    backend dispatches (`dispatch.load_backend_config`) — `claude` by
+    default, the `GARDENER_AGENT_COMMAND` program on the `command`
+    backend, where requiring `claude` would be a false ERROR."""
+    from gardener import dispatch
+
+    required = dict(REQUIRED_CLIS)
     findings = []
-    for name, why in REQUIRED_CLIS.items():
+    try:
+        config = dispatch.load_backend_config(env=env, config_path=config_path)
+    except dispatch.DispatchError as e:
+        findings.append(
+            Finding(
+                "cli",
+                Severity.ERROR,
+                f"agent backend misconfigured: {e}",
+                fix=f"fix {dispatch.BACKEND_ENV}/{dispatch.COMMAND_ENV} (env or notify.env)",
+            )
+        )
+        config = None
+    if config is not None and config.backend is dispatch.Backend.COMMAND:
+        del required["claude"]
+        required[config.command[0]] = f"every dispatch ({dispatch.COMMAND_ENV})"
+    for name, why in required.items():
         if which_fn(name):
             findings.append(Finding("cli", Severity.OK, f"{name} found on PATH"))
         else:

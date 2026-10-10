@@ -5,7 +5,7 @@
 
 This module is pure orchestration — it validates input, prepares the
 target repo and conventions checkouts, builds the prompt, calls
-`dispatch.run_claude`, and records the outcome. All judgment about what's
+`dispatch.run_agent`, and records the outcome. All judgment about what's
 actually wrong with a repo (or what to actually change) happens inside the
 dispatched Claude run, not here. `tend`'s own safety mechanics (which tools
 exist, which get pre-approved, the headless-dispatch prompt preamble) live
@@ -46,7 +46,9 @@ from gardener.dispatch import (
     looks_like_auth_failure,
     looks_like_network_failure,
     looks_like_usage_limit,
-    run_claude,
+    check_backend_ready,
+    load_backend_config,
+    run_agent,
     tend_mode_spec,
 )
 
@@ -588,7 +590,7 @@ def cmd_align(args: argparse.Namespace) -> int:
 
     print(f"gardener: aligning {args.repo} against {conventions_url} (mode={mode.value})", file=sys.stderr)
     if mode is Mode.REPORT:
-        print("gardener: report-only — Claude has no write/shell tools in this run", file=sys.stderr)
+        print("gardener: report-only — the run must leave the target clone unmodified", file=sys.stderr)
 
     try:
         with repo_lock.repo_lock(args.repo):
@@ -607,8 +609,8 @@ def cmd_align(args: argparse.Namespace) -> int:
                 mode, args.repo, target_dir, conv.path, branch, conventions_url
             )
 
-            print("gardener: dispatching claude (this can take a while)...", file=sys.stderr)
-            result = run_claude(
+            print("gardener: dispatching the agent (this can take a while)...", file=sys.stderr)
+            result = run_agent(
                 mode=mode,
                 prompt=prompt,
                 cwd=target_dir,
@@ -766,7 +768,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                     file=sys.stderr,
                 )
                 create_prompt = dev_loop.build_create_dev_loop_prompt(args.repo, slug, target_dir)
-                create_result = run_claude(
+                create_result = run_agent(
                     mode=Mode.CREATE_DEV_LOOP,
                     prompt=create_prompt,
                     cwd=target_dir,
@@ -855,7 +857,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
             tend_prompt = dev_loop.build_tend_prompt(
                 args.repo, slug, target_dir, branch, eligible, orphaned_pr=orphaned_pr
             )
-            result = run_claude(
+            result = run_agent(
                 mode=Mode.TEND,
                 prompt=tend_prompt,
                 cwd=target_dir,
@@ -1177,6 +1179,22 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                     selfupdate.UpdateStatus.ERROR, f"unexpected error: {e}"
                 )
             )
+
+    # A backend that can't dispatch `tend` at all (missing binary, or the
+    # `command` backend without its unscoped opt-in) would otherwise fail
+    # every garden repo one by one, each recorded and alerted as that repo's
+    # failure. Same setup-failure shape as the unreadable garden below.
+    try:
+        check_backend_ready(Mode.TEND, load_backend_config())
+    except DispatchError as e:
+        print(f"gardener: overnight: error: {e}", file=sys.stderr)
+        try:
+            notify.default_notifier().notify(
+                "gardener overnight: FAILED — agent backend not ready", str(e), notify.Level.ERROR
+            )
+        except Exception as notify_err:  # noqa: BLE001 - the alert must never mask the original error
+            print(f"gardener: overnight: notification failed (non-fatal): {notify_err}", file=sys.stderr)
+        return 1
 
     try:
         garden_list = garden.list_garden(path=args.garden_file)

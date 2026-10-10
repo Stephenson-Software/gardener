@@ -526,6 +526,24 @@ a real `claude` process —
 see [Manual/end-to-end verification](#manualend-to-end-verification) for
 that.
 
+The agent-backend tests at the end of `tests/test_dispatch.py`
+(`TestLoadBackendConfig`, `TestRunAgentRouting`, `TestRunCommandAgent`,
+`TestCheckBackendReady`) cover `GARDENER_AGENT_*` resolution (env before
+`notify.env`, an unknown backend raising instead of falling back to
+Claude), `run_agent` routing the default backend to `run_claude`
+unchanged, and the `command` contract end to end. That last group runs a
+real stub agent (a few lines of Python written to a tmp dir, never
+`claude`) in a real throwaway git repo: the prompt arrives on stdin, the
+mode and spec in the environment, plain-text and JSON stdout are both
+parsed, a report run that edits or commits in the clone is failed, every
+write mode is refused without `GARDENER_AGENT_ALLOW_UNSCOPED`, `tend`'s
+`merge_allowed` follows `tend_mode_spec()`, `bypassPermissions` is refused
+on this backend too, and a usage-limit message still sets `blocked`.
+`tests/test_doctor.py` asserts the CLI check requires the configured
+command instead of `claude` on that backend, and `tests/test_cli.py`'s
+`TestOvernightBackendPreflight` asserts an unready backend aborts
+`overnight` with one alert before any repo is dispatched.
+
 ## Manual/end-to-end verification
 
 Because the whole point of this tool is dispatching a real Claude Code
@@ -541,6 +559,14 @@ have access to and confirm three things:
 3. `gh repo view <owner/repo> --json pushedAt` is unchanged from before the
    run, and `gh pr list` / `gh issue list` show nothing new — report mode
    must not have touched the real repo on GitHub either.
+
+For a change to the `command` backend, run the same three checks with
+`GARDENER_AGENT_BACKEND=command` and a real agent command (the bundled
+`examples/backends/ollama_report_agent.py` against a local Ollama model is
+enough), with `GARDENER_STATE_DIR`/`GARDENER_CACHE_DIR` pointed at a
+scratch directory so the run doesn't land in your real history or alerts.
+Then confirm `gardener tend` and `gardener overnight` refuse with the
+`GARDENER_AGENT_ALLOW_UNSCOPED` message when it isn't set.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.

@@ -1,7 +1,36 @@
-"""Subprocess wrapper around the `claude` CLI — gardener's only integration
-point with Claude Code. Safety constraints live here, built into how each
-mode's invocation is constructed, not applied afterward as a check on the
-result.
+"""Subprocess wrapper around the agent gardener dispatches — Claude Code's
+`claude` CLI by default, or an operator-configured command (see "Agent
+backends" below). Safety constraints live here, built into how each mode's
+invocation is constructed, not applied afterward as a check on the result.
+
+## Agent backends
+
+Every caller in `cli.py` dispatches through `run_agent`, which picks a
+backend from `GARDENER_AGENT_BACKEND` (env first, then `notify.env`):
+
+- `claude-code` (the default, and the only backend before this existed):
+  `run_claude`, unchanged. Everything below this section describes it.
+- `command`: `run_command_agent` runs `GARDENER_AGENT_COMMAND` (split with
+  `shlex`, never a shell) in the target clone, with the prompt on stdin and
+  the mode's `ModeSpec` as JSON in `GARDENER_AGENT_SPEC`. This is how a
+  local-model runtime such as Orket plugs in, through a small wrapper —
+  see docs/BACKENDS.md for the full contract.
+
+The safety model below is Claude Code's own tool scoping, which gardener
+can only *enforce* on an argv it builds for `claude`. On the `command`
+backend it can only *hand over* the same spec, so the posture changes:
+
+- `bypassPermissions` stays unreachable: `_check_permission_mode` runs for
+  both backends before anything is dispatched.
+- Report mode is allowed, and checked after the fact instead of
+  structurally: HEAD and `git status --porcelain` of the target clone are
+  compared before and after, and a run that changed either is a failed run.
+- Every other mode (`--implement`, `--file-issue`, `tend`, `overnight`,
+  create-dev-loop) is refused unless the operator sets
+  `GARDENER_AGENT_ALLOW_UNSCOPED=1`, stating that the configured command
+  enforces the spec itself. The merge allow-list still decides whether
+  `Bash(gh pr merge *)` is in that spec (`merge_allowed` in the JSON), but
+  only the command can make it binding.
 
 ## Sync vs. background dispatch
 
@@ -270,6 +299,8 @@ affect (or even be noticed by) the real dispatch.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -663,6 +694,18 @@ class DispatchResult:
     blocked: bool = False
 
 
+def _check_permission_mode(spec: ModeSpec) -> None:
+    """The bypassPermissions runtime gate, shared by every backend: the
+    `claude` argv builder below and `run_command_agent`, which hands the same
+    spec to an operator-configured command. Unreachable given MODE_SPECS
+    above, but kept as a hard runtime gate rather than trusting the table
+    never regresses."""
+    if spec.permission_mode == FORBIDDEN_PERMISSION_MODE:
+        raise DispatchError("refusing to dispatch with bypassPermissions")
+    if spec.permission_mode not in ALLOWED_PERMISSION_MODES:
+        raise DispatchError(f"unrecognized permission mode: {spec.permission_mode}")
+
+
 def _build_invocation(
     mode: Mode,
     prompt: str,
@@ -671,12 +714,7 @@ def _build_invocation(
     mode_spec: Optional[ModeSpec] = None,
 ) -> list[str]:
     spec = mode_spec if mode_spec is not None else MODE_SPECS[mode]
-    if spec.permission_mode == FORBIDDEN_PERMISSION_MODE:
-        # Unreachable given MODE_SPECS above, but kept as a hard runtime
-        # gate rather than trusting the table never regresses.
-        raise DispatchError("refusing to dispatch with bypassPermissions")
-    if spec.permission_mode not in ALLOWED_PERMISSION_MODES:
-        raise DispatchError(f"unrecognized permission mode: {spec.permission_mode}")
+    _check_permission_mode(spec)
 
     # The prompt goes immediately after -p, not at the end: --add-dir takes
     # a variadic list (`<directories...>`) and will otherwise swallow a
@@ -864,3 +902,297 @@ def _run_claude_once(
         auth_failed=(not ok) and looks_like_auth_failure(result_text, proc.stderr or ""),
         blocked=(not ok) and is_device_global_failure(result_text, proc.stderr or ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent backends — see the module docstring's "Agent backends" section.
+# ---------------------------------------------------------------------------
+
+
+class Backend(str, Enum):
+    CLAUDE_CODE = "claude-code"
+    COMMAND = "command"
+
+
+DEFAULT_BACKEND = Backend.CLAUDE_CODE
+
+# Settings, read env-first then from `notify.env` (the same precedence
+# `usage.py` and `hub.py` use, so a cron/Task Scheduler/`devsrv` run that
+# can't set env vars per invocation configures the backend the same way it
+# configures alerting).
+BACKEND_ENV = "GARDENER_AGENT_BACKEND"
+COMMAND_ENV = "GARDENER_AGENT_COMMAND"
+ALLOW_UNSCOPED_ENV = "GARDENER_AGENT_ALLOW_UNSCOPED"
+
+# What a `command` backend receives besides the prompt on stdin.
+AGENT_MODE_ENV = "GARDENER_AGENT_MODE"
+AGENT_SPEC_ENV = "GARDENER_AGENT_SPEC"
+AGENT_MODEL_ENV = "GARDENER_AGENT_MODEL"
+AGENT_TIMEOUT_ENV = "GARDENER_AGENT_TIMEOUT"
+
+_TRUE = {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class BackendConfig:
+    backend: Backend = DEFAULT_BACKEND
+    command: tuple[str, ...] = ()
+    allow_unscoped: bool = False
+
+
+def _settings_file() -> Path:
+    # Imported here, not at module top: notify.py is only needed for its
+    # settings-file location, and dispatch.py has never depended on it.
+    from gardener import notify
+
+    return notify.default_webhook_config_path()
+
+
+def _read_settings_file(path: Path) -> dict[str, str]:
+    from gardener import notify
+
+    try:
+        if not path.is_file():
+            return {}
+        return notify._parse_env_style_file(path)
+    except OSError as e:
+        print(f"gardener: could not read {path}: {e}", file=sys.stderr)
+        return {}
+
+
+def load_backend_config(env=None, config_path: Optional[Path] = None) -> BackendConfig:
+    """Resolve the agent backend from the environment, then `notify.env`.
+    Unset means Claude Code, exactly as before backends existed.
+
+    Raises DispatchError for a configuration that names something gardener
+    can't run (unknown backend, `command` with no command), so a typo
+    fails loudly at dispatch instead of silently falling back to Claude.
+    """
+    source = os.environ if env is None else env
+    file_values: Optional[dict[str, str]] = None
+
+    def setting(name: str) -> str:
+        nonlocal file_values
+        value = (source.get(name) or "").strip()
+        if value:
+            return value
+        if file_values is None:
+            file_values = _read_settings_file(config_path or _settings_file())
+        return (file_values.get(name) or "").strip()
+
+    name = setting(BACKEND_ENV) or DEFAULT_BACKEND.value
+    try:
+        backend = Backend(name)
+    except ValueError:
+        choices = ", ".join(b.value for b in Backend)
+        raise DispatchError(f"unknown {BACKEND_ENV}={name!r} (expected one of: {choices})") from None
+    if backend is Backend.CLAUDE_CODE:
+        return BackendConfig(backend=backend)
+
+    raw_command = setting(COMMAND_ENV)
+    if not raw_command:
+        raise DispatchError(f"{BACKEND_ENV}=command needs {COMMAND_ENV} set to the agent command to run")
+    try:
+        command = tuple(shlex.split(raw_command))
+    except ValueError as e:
+        raise DispatchError(f"could not parse {COMMAND_ENV}: {e}") from None
+    if not command:
+        raise DispatchError(f"{COMMAND_ENV} is empty")
+    return BackendConfig(
+        backend=backend,
+        command=command,
+        allow_unscoped=setting(ALLOW_UNSCOPED_ENV).lower() in _TRUE,
+    )
+
+
+def check_backend_ready(mode: Mode, config: BackendConfig) -> None:
+    """Raise DispatchError if `config` can't dispatch `mode` at all — the
+    binary is missing, or a non-report mode was asked of a `command` backend
+    without the unscoped opt-in. `cmd_overnight` calls this once up front so
+    a misconfigured backend aborts the batch instead of failing every repo
+    in it one by one."""
+    if config.backend is Backend.CLAUDE_CODE:
+        if shutil.which(CLAUDE_BIN) is None:
+            raise DispatchError(f"`{CLAUDE_BIN}` not found on PATH — install Claude Code CLI first")
+        return
+    if shutil.which(config.command[0]) is None:
+        raise DispatchError(f"agent command `{config.command[0]}` not found ({COMMAND_ENV})")
+    if mode is not Mode.REPORT and not config.allow_unscoped:
+        raise DispatchError(
+            f"refusing {mode.value} mode on the `command` backend: gardener cannot enforce "
+            f"its tool scoping on a command it does not control. Set {ALLOW_UNSCOPED_ENV}=1 "
+            "once that command enforces the GARDENER_AGENT_SPEC it is given (see docs/BACKENDS.md)"
+        )
+
+
+def run_agent(
+    mode: Mode,
+    prompt: str,
+    cwd: Path,
+    add_dirs: Optional[list[Path]] = None,
+    model: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    mode_spec: Optional[ModeSpec] = None,
+    backend_config: Optional[BackendConfig] = None,
+) -> DispatchResult:
+    """Dispatch one agent run on the configured backend. Every caller in
+    `cli.py` goes through here; `run_claude` stays the Claude Code
+    implementation, unchanged."""
+    config = backend_config if backend_config is not None else load_backend_config()
+    if config.backend is Backend.CLAUDE_CODE:
+        return run_claude(
+            mode, prompt, cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec
+        )
+    return run_command_agent(
+        mode,
+        prompt,
+        cwd,
+        config,
+        add_dirs=add_dirs,
+        model=model,
+        timeout=timeout,
+        mode_spec=mode_spec,
+    )
+
+
+def _spec_payload(mode: Mode, spec: ModeSpec, add_dirs: list[Path]) -> dict:
+    return {
+        "mode": mode.value,
+        "tools": list(spec.tools),
+        "permission_mode": spec.permission_mode,
+        "allowed_tools": list(spec.allowed_tools),
+        "add_dirs": [str(d) for d in add_dirs],
+        "merge_allowed": MERGE_ALLOWED_TOOL in spec.allowed_tools,
+    }
+
+
+def _tree_snapshot(cwd: Path, run_fn) -> str:
+    """HEAD plus `git status --porcelain` — enough to tell whether a
+    report-mode run changed the target clone. A git failure is folded into
+    the snapshot text rather than raised, so an unreadable tree before and
+    after still compares equal and a tree that *becomes* unreadable does
+    not."""
+    parts = []
+    for argv in (["git", "rev-parse", "HEAD"], ["git", "status", "--porcelain"]):
+        try:
+            proc = run_fn(argv, cwd=str(cwd), capture_output=True, text=True, timeout=60)
+            parts.append(f"{proc.returncode}\n{proc.stdout}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            parts.append(f"error: {e}")
+    return "\n".join(parts)
+
+
+def run_command_agent(
+    mode: Mode,
+    prompt: str,
+    cwd: Path,
+    config: BackendConfig,
+    add_dirs: Optional[list[Path]] = None,
+    model: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    mode_spec: Optional[ModeSpec] = None,
+    run_fn=subprocess.run,
+) -> DispatchResult:
+    """Run one dispatch through an operator-configured command (Orket, or
+    any other agent runtime). The contract — prompt on stdin, mode and spec
+    in the environment, an optional `claude`-shaped JSON envelope on stdout
+    — is documented in docs/BACKENDS.md.
+
+    Same "report, don't raise" posture as `run_claude`: setup problems raise
+    DispatchError, a failed run comes back as a DispatchResult. No auth
+    retry: the auth markers describe `claude`'s own failure wording, so a
+    retry here would be keyed on text this backend never promised to emit.
+    `blocked` is still set from the shared markers, so an agent that reports
+    an exhausted quota or an unreachable GitHub in the same words still
+    stops an overnight batch.
+    """
+    spec = mode_spec if mode_spec is not None else MODE_SPECS.get(mode)
+    if spec is None:
+        raise DispatchError(f"unknown mode: {mode} (no mode_spec given and no fixed entry)")
+    _check_permission_mode(spec)
+    check_backend_ready(mode, config)
+    dirs = add_dirs or []
+
+    env = dict(os.environ)
+    env[AGENT_MODE_ENV] = mode.value
+    env[AGENT_SPEC_ENV] = json.dumps(_spec_payload(mode, spec, dirs))
+    env[AGENT_TIMEOUT_ENV] = str(timeout)
+    if model:
+        env[AGENT_MODEL_ENV] = model
+    else:
+        env.pop(AGENT_MODEL_ENV, None)
+
+    before = _tree_snapshot(cwd, run_fn) if mode is Mode.REPORT else None
+
+    start = time.monotonic()
+    try:
+        proc = run_fn(
+            list(config.command),
+            input=prompt,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        return DispatchResult(
+            ok=False,
+            result_text="",
+            raw_stdout=_text(e.stdout),
+            stderr=_text(e.stderr) + f"\ntimed out after {timeout}s",
+            exit_code=None,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            cost_usd=None,
+            session_id=None,
+            permission_denials=[],
+            is_error=True,
+            timed_out=True,
+        )
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and "result" in parsed:
+        result_text = str(parsed.get("result") or "")
+        is_error = bool(parsed.get("is_error"))
+        cost = parsed.get("total_cost_usd")
+        session_id = parsed.get("session_id")
+        denials = parsed.get("permission_denials") or []
+    else:
+        # Plain text is a valid answer: the whole of stdout is the result.
+        result_text, is_error, cost, session_id, denials = stdout.strip(), False, None, None, []
+
+    ok = proc.returncode == 0 and not is_error
+    if before is not None and _tree_snapshot(cwd, run_fn) != before:
+        # The structural ceiling `--tools Read,Grep,Glob` gives report mode
+        # on Claude Code doesn't exist here, so it is checked after the fact
+        # instead: a report run that changed the clone is a failed run.
+        ok, is_error = False, True
+        stderr += "\nreport-mode dispatch modified the target clone (HEAD or working tree changed)"
+
+    return DispatchResult(
+        ok=ok,
+        result_text=result_text,
+        raw_stdout=stdout,
+        stderr=stderr,
+        exit_code=proc.returncode,
+        duration_ms=duration_ms,
+        cost_usd=cost,
+        session_id=session_id,
+        permission_denials=denials,
+        is_error=is_error,
+        blocked=(not ok) and is_device_global_failure(result_text, stderr),
+    )
+
+
+def _text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value

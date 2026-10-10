@@ -99,17 +99,44 @@ class TestReport(unittest.TestCase):
         self.assertIs(report.worst, Severity.OK)
 
 
+_NO_SETTINGS_FILE = Path("/nonexistent/gardener-test/notify.env")
+
+
 class TestRequiredClis(unittest.TestCase):
     def test_missing_cli_is_an_error_naming_what_breaks(self):
-        findings = doctor.check_required_clis(which_fn=lambda name: None if name == "gh" else "/usr/bin/" + name)
+        findings = doctor.check_required_clis(
+            which_fn=lambda name: None if name == "gh" else "/usr/bin/" + name,
+            env={}, config_path=_NO_SETTINGS_FILE,
+        )
         errors = [f for f in findings if f.severity is Severity.ERROR]
         self.assertEqual(len(errors), 1)
         self.assertIn("gh", errors[0].message)
         self.assertIn(doctor.REQUIRED_CLIS["gh"], errors[0].message)
 
     def test_all_present(self):
-        findings = doctor.check_required_clis(which_fn=lambda name: "/usr/bin/" + name)
+        findings = doctor.check_required_clis(
+            which_fn=lambda name: "/usr/bin/" + name, env={}, config_path=_NO_SETTINGS_FILE
+        )
         self.assertTrue(all(f.severity is Severity.OK for f in findings))
+
+    def test_command_backend_requires_its_command_not_claude(self):
+        env = {"GARDENER_AGENT_BACKEND": "command", "GARDENER_AGENT_COMMAND": "orket-agent --x"}
+        findings = doctor.check_required_clis(
+            which_fn=lambda name: None if name == "claude" else "/usr/bin/" + name,
+            env=env, config_path=_NO_SETTINGS_FILE,
+        )
+        self.assertTrue(all(f.severity is Severity.OK for f in findings))
+        self.assertTrue(any("orket-agent" in f.message for f in findings))
+        self.assertFalse(any("claude" in f.message for f in findings))
+
+    def test_misconfigured_backend_is_an_error(self):
+        findings = doctor.check_required_clis(
+            which_fn=lambda name: "/usr/bin/" + name,
+            env={"GARDENER_AGENT_BACKEND": "nope"}, config_path=_NO_SETTINGS_FILE,
+        )
+        errors = [f for f in findings if f.severity is Severity.ERROR]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("GARDENER_AGENT_BACKEND", errors[0].message)
 
 
 class TestGhAuth(unittest.TestCase):

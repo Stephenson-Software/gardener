@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
+    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
     selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -83,6 +83,7 @@ CONVENTIONS_URL = "https://example.invalid/conventions.git"
 #: Set by `setUpModule` so a test that forgets to patch the notifier
 #: cannot reach a real Discord webhook. See that function's docstring.
 _notifier_fence = None
+_backend_preflight_patch = None
 
 
 def setUpModule():
@@ -125,13 +126,26 @@ def setUpModule():
     os.environ.pop(hub.URL_ENV, None)
     os.environ["GARDENER_STATE_DIR"] = _notifier_fence.name
     os.environ[usage.ENV_ENABLED] = "false"
+    # The agent backend is resolved from the same env/notify.env settings:
+    # an operator's own GARDENER_AGENT_* must not change which backend these
+    # tests think they're driving. `cmd_overnight`'s backend pre-flight also
+    # looks for a real `claude` on PATH, which CI doesn't have; it is
+    # patched module-wide here and exercised directly in TestOvernightBackendPreflight.
+    for name in (dispatch.BACKEND_ENV, dispatch.COMMAND_ENV, dispatch.ALLOW_UNSCOPED_ENV):
+        os.environ.pop(name, None)
+    global _backend_preflight_patch
+    _backend_preflight_patch = patch("gardener.cli.check_backend_ready")
+    _backend_preflight_patch.start()
 
 
 def tearDownModule():
-    global _notifier_fence
+    global _notifier_fence, _backend_preflight_patch
     if _notifier_fence is not None:
         _notifier_fence.cleanup()
         _notifier_fence = None
+    if _backend_preflight_patch is not None:
+        _backend_preflight_patch.stop()
+        _backend_preflight_patch = None
     os.environ.pop(usage.ENV_ENABLED, None)
 
 
@@ -1302,7 +1316,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertIn("GARDENER_CONVENTIONS_URL", stderr.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1327,7 +1341,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.INFO)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1354,7 +1368,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.WARNING)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1381,7 +1395,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.WARNING)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1429,7 +1443,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertIn("mutually exclusive", err.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
     def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
         self, mock_lock, mock_run_claude, mock_default_notifier
@@ -1477,7 +1491,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         )
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1504,7 +1518,7 @@ class TestCmdTendNotifications(unittest.TestCase):
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.state.record_run", side_effect=RuntimeError("sqlite is locked"))
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1530,7 +1544,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         mock_notifier.notify.assert_called_once()
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1563,7 +1577,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("gardener: done in 100ms", stderr.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr")
@@ -1597,7 +1611,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("gardener found an existing OPEN pull request", kwargs["prompt"])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1664,7 +1678,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(level, Level.ERROR)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1690,7 +1704,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         mock_run_claude.assert_called_once()
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", side_effect=[False, True])
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1736,7 +1750,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(bootstrap[0].outcome, state.CREATED_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.step6_unreachable", return_value=True)
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", side_effect=[False, True])
     @patch("gardener.cli.current_branch", return_value="main")
@@ -1786,7 +1800,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(bootstrap[0].outcome, state.CREATED_INCOMPLETE_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1827,7 +1841,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         )
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
     def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
@@ -2004,7 +2018,7 @@ class TestDenialsArePrintedBeforeTheNoteThatCitesThem(unittest.TestCase):
         self.assertIn("denials=2", stderr_text)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -2028,7 +2042,7 @@ class TestDenialsArePrintedBeforeTheNoteThatCitesThem(unittest.TestCase):
         self._assert_denials_precede_the_note(stderr.getvalue(), "Claude")
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2089,7 +2103,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         return dashboard.parse_in_progress(stderr.getvalue().splitlines())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2144,7 +2158,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         self.assertEqual(self._in_progress(stderr), [])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2183,7 +2197,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         self.assertEqual(self._in_progress(stderr), [])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -3948,3 +3962,45 @@ class TestSessionCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOvernightBackendPreflight(unittest.TestCase):
+    """A backend that can't dispatch `tend` aborts the batch once, up front,
+    instead of failing every garden repo one by one. The module-wide fence
+    patches `check_backend_ready`; these tests replace that patch with the
+    behavior under test."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.garden_file.write_text(json.dumps(["o/a", "o/b"]))
+        self.args = argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=tmp / "cursor.json", state_db=tmp / "state.sqlite3",
+            concurrency=1, strategy="round-robin", random_seed=None, self_update=False,
+        )
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.check_backend_ready", side_effect=dispatch.DispatchError("refusing tend mode"))
+    def test_unready_backend_aborts_before_any_dispatch(self, _ready, mock_notifier, mock_dispatch):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            exit_code = cmd_overnight(self.args)
+        self.assertEqual(exit_code, 1)
+        mock_dispatch.assert_not_called()
+        self.assertIn("refusing tend mode", err.getvalue())
+        title = mock_notifier.return_value.notify.call_args.args[0]
+        self.assertIn("agent backend not ready", title)
+        self.assertIs(mock_notifier.return_value.notify.call_args.args[2], Level.ERROR)
+
+    @patch("gardener.cli.check_backend_ready")
+    def test_preflight_checks_tend_mode(self, mock_ready):
+        with redirect_stderr(io.StringIO()), patch("gardener.cli._dispatch_tend") as mock_dispatch:
+            mock_dispatch.side_effect = lambda a: TendResult(exit_code=0, ok=True, result_text="")
+            cmd_overnight(self.args)
+        self.assertIs(mock_ready.call_args.args[0], Mode.TEND)

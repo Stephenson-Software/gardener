@@ -638,3 +638,259 @@ class TestAuthFailureRetry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Agent backends. These run a real stub agent (a tiny Python script, never
+# `claude`) against a real throwaway git repo, so the stdin/env/stdout
+# contract and the report-mode mutation check are exercised end to end.
+# ---------------------------------------------------------------------------
+
+import os
+import sys
+import tempfile
+import textwrap
+
+from gardener import dispatch
+from gardener.dispatch import (
+    Backend,
+    BackendConfig,
+    check_backend_ready,
+    load_backend_config,
+    run_agent,
+    run_command_agent,
+)
+
+_NO_SETTINGS_FILE = Path("/nonexistent/gardener-test/notify.env")
+
+
+class TestLoadBackendConfig(unittest.TestCase):
+    def test_unset_means_claude_code(self):
+        config = load_backend_config(env={}, config_path=_NO_SETTINGS_FILE)
+        self.assertIs(config.backend, Backend.CLAUDE_CODE)
+
+    def test_command_backend_from_env(self):
+        config = load_backend_config(
+            env={
+                dispatch.BACKEND_ENV: "command",
+                dispatch.COMMAND_ENV: "orket-agent --profile 'big model'",
+                dispatch.ALLOW_UNSCOPED_ENV: "1",
+            },
+            config_path=_NO_SETTINGS_FILE,
+        )
+        self.assertIs(config.backend, Backend.COMMAND)
+        self.assertEqual(config.command, ("orket-agent", "--profile", "big model"))
+        self.assertTrue(config.allow_unscoped)
+
+    def test_falls_back_to_notify_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notify.env"
+            path.write_text("GARDENER_AGENT_BACKEND=command\nGARDENER_AGENT_COMMAND=agent\n")
+            config = load_backend_config(env={}, config_path=path)
+        self.assertIs(config.backend, Backend.COMMAND)
+        self.assertEqual(config.command, ("agent",))
+        self.assertFalse(config.allow_unscoped)
+
+    def test_env_wins_over_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notify.env"
+            path.write_text("GARDENER_AGENT_BACKEND=command\nGARDENER_AGENT_COMMAND=agent\n")
+            config = load_backend_config(env={dispatch.BACKEND_ENV: "claude-code"}, config_path=path)
+        self.assertIs(config.backend, Backend.CLAUDE_CODE)
+
+    def test_unknown_backend_raises_instead_of_falling_back(self):
+        with self.assertRaises(DispatchError):
+            load_backend_config(env={dispatch.BACKEND_ENV: "claud"}, config_path=_NO_SETTINGS_FILE)
+
+    def test_command_backend_without_command_raises(self):
+        with self.assertRaises(DispatchError):
+            load_backend_config(env={dispatch.BACKEND_ENV: "command"}, config_path=_NO_SETTINGS_FILE)
+
+
+class TestRunAgentRouting(unittest.TestCase):
+    @patch("gardener.dispatch.run_claude")
+    def test_claude_code_backend_delegates_to_run_claude_unchanged(self, mock_run_claude):
+        spec = tend_mode_spec(True)
+        run_agent(
+            Mode.TEND, "p", Path("/tmp"), model="m", timeout=7, mode_spec=spec,
+            backend_config=BackendConfig(),
+        )
+        mock_run_claude.assert_called_once_with(
+            Mode.TEND, "p", Path("/tmp"), add_dirs=None, model="m", timeout=7, mode_spec=spec
+        )
+
+    @patch("gardener.dispatch.run_command_agent")
+    @patch("gardener.dispatch.run_claude")
+    def test_command_backend_never_touches_claude(self, mock_run_claude, mock_command):
+        config = BackendConfig(backend=Backend.COMMAND, command=("agent",))
+        run_agent(Mode.REPORT, "p", Path("/tmp"), backend_config=config)
+        mock_run_claude.assert_not_called()
+        mock_command.assert_called_once()
+
+
+def _stub_agent(tmp: Path, body: str) -> tuple[str, ...]:
+    script = tmp / "stub_agent.py"
+    script.write_text(textwrap.dedent(body))
+    return (sys.executable, str(script))
+
+
+def _git_repo(tmp: Path) -> Path:
+    repo = tmp / "repo"
+    repo.mkdir()
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+    ):
+        subprocess.run(argv, cwd=repo, check=True)
+    return repo
+
+
+_ECHO_AGENT = """
+    import json, os, sys
+    prompt = sys.stdin.read()
+    print(json.dumps({
+        "result": "saw: " + prompt,
+        "is_error": False,
+        "session_id": "orket-run-1",
+        "total_cost_usd": 0,
+        "permission_denials": [],
+        "spec": json.loads(os.environ["GARDENER_AGENT_SPEC"]),
+        "mode": os.environ["GARDENER_AGENT_MODE"],
+        "model": os.environ.get("GARDENER_AGENT_MODEL"),
+        "cwd": os.getcwd(),
+    }))
+"""
+
+
+class TestRunCommandAgent(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = _git_repo(self.tmp)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _config(self, body: str, allow_unscoped: bool = False) -> BackendConfig:
+        return BackendConfig(
+            backend=Backend.COMMAND, command=_stub_agent(self.tmp, body), allow_unscoped=allow_unscoped
+        )
+
+    def test_report_run_gets_prompt_on_stdin_and_spec_in_env(self):
+        result = run_command_agent(
+            Mode.REPORT, "audit this", self.repo, self._config(_ECHO_AGENT),
+            add_dirs=[Path("/conv")], model="qwen",
+        )
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual(result.result_text, "saw: audit this")
+        self.assertEqual(result.session_id, "orket-run-1")
+        envelope = json.loads(result.raw_stdout)
+        self.assertEqual(envelope["mode"], "report")
+        self.assertEqual(envelope["model"], "qwen")
+        self.assertEqual(Path(envelope["cwd"]).resolve(), self.repo.resolve())
+        self.assertEqual(envelope["spec"]["tools"], ["Read", "Grep", "Glob"])
+        self.assertEqual(envelope["spec"]["permission_mode"], "plan")
+        self.assertEqual(envelope["spec"]["add_dirs"], ["/conv"])
+        self.assertFalse(envelope["spec"]["merge_allowed"])
+
+    def test_plain_text_stdout_is_the_result(self):
+        body = "import sys; sys.stdin.read(); print('no gaps found')"
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.result_text, "no gaps found")
+
+    def test_nonzero_exit_is_a_failed_run_not_an_exception(self):
+        body = "import sys; sys.stdin.read(); print('model unavailable', file=sys.stderr); sys.exit(3)"
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.exit_code, 3)
+        self.assertIn("model unavailable", result.stderr)
+        self.assertFalse(result.blocked)
+
+    def test_report_run_that_modifies_the_clone_fails(self):
+        body = "import sys; sys.stdin.read(); open('touched.txt', 'w').write('x'); print('done')"
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertTrue(result.is_error)
+        self.assertIn("modified the target clone", result.stderr)
+
+    def test_report_run_that_commits_fails(self):
+        body = """
+            import subprocess, sys
+            sys.stdin.read()
+            subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "sneaky"], check=True)
+            print("done")
+        """
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertIn("modified the target clone", result.stderr)
+
+    def test_write_modes_refused_without_unscoped_opt_in(self):
+        for mode, spec in (
+            (Mode.IMPLEMENT, None),
+            (Mode.FILE_ISSUE, None),
+            (Mode.CREATE_DEV_LOOP, None),
+            (Mode.TEND, tend_mode_spec(False)),
+        ):
+            with self.subTest(mode=mode):
+                with self.assertRaises(DispatchError) as cm:
+                    run_command_agent(mode, "p", self.repo, self._config(_ECHO_AGENT), mode_spec=spec)
+                self.assertIn(dispatch.ALLOW_UNSCOPED_ENV, str(cm.exception))
+
+    def test_tend_with_opt_in_hands_over_merge_eligibility(self):
+        config = self._config(_ECHO_AGENT, allow_unscoped=True)
+        for eligible in (False, True):
+            with self.subTest(eligible=eligible):
+                result = run_command_agent(
+                    Mode.TEND, "p", self.repo, config, mode_spec=tend_mode_spec(eligible)
+                )
+                self.assertTrue(result.ok, result.stderr)
+                spec = json.loads(result.raw_stdout)["spec"]
+                self.assertEqual(spec["merge_allowed"], eligible)
+                self.assertEqual(MERGE_ALLOWED_TOOL in spec["allowed_tools"], eligible)
+
+    def test_bypass_permissions_unreachable_on_command_backend_too(self):
+        bad = ModeSpec(tools=("Read",), permission_mode=FORBIDDEN_PERMISSION_MODE)
+        config = self._config(_ECHO_AGENT, allow_unscoped=True)
+        with self.assertRaises(DispatchError):
+            run_command_agent(Mode.TEND, "p", self.repo, config, mode_spec=bad)
+
+    def test_missing_command_raises(self):
+        config = BackendConfig(backend=Backend.COMMAND, command=("/nonexistent/agent",))
+        with self.assertRaises(DispatchError):
+            run_command_agent(Mode.REPORT, "p", self.repo, config)
+
+    def test_timeout_is_reported(self):
+        body = "import sys, time; sys.stdin.read(); time.sleep(30)"
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body), timeout=1)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.timed_out)
+
+    def test_usage_limit_wording_still_blocks_an_overnight_batch(self):
+        body = """
+            import json, sys
+            sys.stdin.read()
+            print(json.dumps({"result": "rate limit reached for local server", "is_error": True}))
+        """
+        result = run_command_agent(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertTrue(result.blocked)
+        self.assertFalse(result.auth_failed)
+
+
+class TestCheckBackendReady(unittest.TestCase):
+    def test_command_backend_report_needs_no_opt_in(self):
+        config = BackendConfig(backend=Backend.COMMAND, command=(sys.executable,))
+        check_backend_ready(Mode.REPORT, config)
+
+    def test_command_backend_tend_needs_opt_in(self):
+        config = BackendConfig(backend=Backend.COMMAND, command=(sys.executable,))
+        with self.assertRaises(DispatchError):
+            check_backend_ready(Mode.TEND, config)
+        check_backend_ready(Mode.TEND, BackendConfig(Backend.COMMAND, (sys.executable,), True))
+
+    @patch("gardener.dispatch.shutil.which", return_value=None)
+    def test_claude_code_backend_needs_claude(self, _which):
+        with self.assertRaises(DispatchError):
+            check_backend_ready(Mode.TEND, BackendConfig())

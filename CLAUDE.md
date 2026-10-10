@@ -111,6 +111,13 @@ imagined failure modes.
   from `cli.py` directly instead of adding it to a `ModeSpec`, don't —
   that's exactly the "bolted on after" shape the safety model is designed
   to avoid.
+- **The agent backend is chosen in `dispatch.py` too.** `cli.py` calls
+  `run_agent`, never `run_claude` or a backend command directly. On the
+  `command` backend (`docs/BACKENDS.md`) gardener can only hand the
+  `ModeSpec` over as `GARDENER_AGENT_SPEC`, so its fallback posture is
+  load-bearing: report runs are failed if the clone changed, and every
+  other mode is refused without `GARDENER_AGENT_ALLOW_UNSCOPED`. Don't
+  relax either to make a new backend "just work".
 - **`bypassPermissions` (or any equivalent) must never be reachable**, for
   any mode, under any flag combination. `_build_invocation` has a runtime
   check that raises `DispatchError` if it's ever configured — this is
@@ -322,6 +329,7 @@ the commit.
 | `docs/OVERNIGHT.md` | Matches what `garden.py`/`overnight.py`/`cli.py`'s `cmd_overnight` actually do (default `--hours`, budget/headroom rule, resume-cursor file path) and each documented per-device wiring recipe's exact invocation (`devsrv`, `bin/run-overnight.sh` + Task Scheduler, cron/systemd) is current for the device it describes — still states the "no true always-on daemon guarantee on any device this has been run on" caveat plainly, not oversold |
 | `docs/DASHBOARD.md` | The plant/data mapping table still matches what `dashboard.py`'s `plantSvg` actually draws, and `build_garden_rows`' row shape still feeds it — the whole point of that view is that nothing in it is invented, so a visual tweak that stops matching the table is a doc bug. Its "When the page stops being live" table also still lists exactly the reason strings `refresh` passes to `markStale`, and its "Latest session" section still states the same window `state.session_stats()`/`SESSION_GAP_SECONDS`/`MAX_SESSION_SPAN_SECONDS` actually compute — the panel's whole point is that it names its window instead of implying one. Its "Overnight progress" table still names the right source for each of the three bars (`overnight.read_attempted`/`read_cursor`, `parse_overnight_start`/`log_started_at`, `parse_batch_progress`) and the `overnight_cycle`/`overnight_run` payload keys it lists still exist under those names in `build_status`. Its "Live log panel" table still describes what `renderLog` renders at each of 0/1/2+ live logs, and the `log_tails` key it names is still keyed by exactly the strings `build_status` puts in `active_logs` — the page looks a tail up by the same string it puts in the picker's option value, so the two drifting apart blanks the panel |
 | `docs/SAFETY.md` | The three-layer tool-scoping model, the `AskUserQuestion`/`Agent`/`ScheduleWakeup` headless findings, and the merge allow-list mechanics still match `dispatch.py`'s actual `MODE_SPECS`/`tend_mode_spec()` |
+| `docs/BACKENDS.md` | The settings table matches `dispatch.py`'s `BACKEND_ENV`/`COMMAND_ENV`/`ALLOW_UNSCOPED_ENV`, the contract's environment variables and JSON keys match `run_command_agent`/`_spec_payload`, the safety section matches what `run_command_agent`/`check_backend_ready` actually enforce, and `examples/backends/ollama_report_agent.py` still follows that contract |
 | `docs/ALERTING.md` | The `Notifier`/`DiscordNotifier`/`NullNotifier`/`CompositeNotifier` shape and `_notify_run`'s severity mapping still match `notify.py`/`cli.py` |
 | `docs/TESTING.md` | The per-module test-coverage description still matches what each `tests/test_*.py` file actually asserts |
 | `docs/ARCHITECTURE.md` | The module tree lists every file in `gardener/` (including `repo_lock.py`) with an accurate one-line description |
