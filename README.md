@@ -65,6 +65,12 @@ it*. See [Usage](#usage) below for the full command set.
   exact command to fix each, and repairs nothing itself. Exits `1` on any
   error, so it works as a gate before the nightly run. See
   [`gardener doctor`](docs/USAGE.md#gardener-doctor--pre-flight-check-on-gardeners-own-state).
+- **Agent harnesses**: Claude Code (`claude -p`) is the default agent.
+  `GARDENER_HARNESS=command` hands the same jobs to any program you
+  name instead, such as a local-model runtime like Orket on hardware that
+  can serve a capable model. Report mode works out of the box; write modes
+  need an explicit opt-in, because gardener can't enforce its tool scoping
+  on a program it doesn't control. See [docs/HARNESSES.md](docs/HARNESSES.md).
 - **`gardener update`**: fast-forwards gardener's own checkout to `origin`
   — `gardener overnight` does this automatically before each run (opt out
   with `--no-self-update`), so a box running it unattended stays current
@@ -249,7 +255,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-r
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
 gardener ps [-a] [-q]
 gardener stop <session>... | --all [-t SECONDS]
 gardener kill <session>... | --all [-s SIGNAL]
@@ -307,7 +313,10 @@ trusting a change to the dispatch layer.
 gardener never invokes `claude` with `bypassPermissions` or any equivalent
 auto-approve-everything mode, for any mode, under any flag combination —
 enforced in `dispatch.py`, which raises rather than silently proceeding if
-it's ever reached. See **[docs/SAFETY.md](docs/SAFETY.md)** for the full
+it's ever reached. On the `command` harness that check still runs, report
+runs are checked afterward for changes to the clone, and write modes are
+refused unless you opt in — see **[docs/HARNESSES.md](docs/HARNESSES.md#safety)**.
+See **[docs/SAFETY.md](docs/SAFETY.md)** for the full
 three-layer tool-scoping model, how headless `tend` dispatch handles the
 "ask the user before merging" problem with nobody there to ask, and the
 merge allow-list mechanics. See **[SECURITY.md](SECURITY.md)** to report a

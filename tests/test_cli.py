@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
+    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
     selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -83,6 +83,7 @@ CONVENTIONS_URL = "https://example.invalid/conventions.git"
 #: Set by `setUpModule` so a test that forgets to patch the notifier
 #: cannot reach a real Discord webhook. See that function's docstring.
 _notifier_fence = None
+_harness_preflight_patch = None
 
 
 def setUpModule():
@@ -125,13 +126,30 @@ def setUpModule():
     os.environ.pop(hub.URL_ENV, None)
     os.environ["GARDENER_STATE_DIR"] = _notifier_fence.name
     os.environ[usage.ENV_ENABLED] = "false"
+    # The agent harness is resolved from the same env/notify.env settings:
+    # an operator's own GARDENER_HARNESS_* must not change which harness these
+    # tests think they're driving. `cmd_overnight`'s harness pre-flight also
+    # looks for a real `claude` on PATH, which CI doesn't have; it is
+    # patched module-wide here and exercised directly in TestOvernightHarnessPreflight.
+    for name in (
+        dispatch.HARNESS_ENV, dispatch.COMMAND_ENV, dispatch.ALLOW_UNSCOPED_ENV,
+        dispatch.CLAUDE_BIN_ENV, dispatch.MODEL_ENV, dispatch.ALIGN_TIMEOUT_ENV,
+        dispatch.TEND_TIMEOUT_ENV, dispatch.CREATE_DEV_LOOP_TIMEOUT_ENV,
+    ):
+        os.environ.pop(name, None)
+    global _harness_preflight_patch
+    _harness_preflight_patch = patch("gardener.cli.check_harness_ready")
+    _harness_preflight_patch.start()
 
 
 def tearDownModule():
-    global _notifier_fence
+    global _notifier_fence, _harness_preflight_patch
     if _notifier_fence is not None:
         _notifier_fence.cleanup()
         _notifier_fence = None
+    if _harness_preflight_patch is not None:
+        _harness_preflight_patch.stop()
+        _harness_preflight_patch = None
     os.environ.pop(usage.ENV_ENABLED, None)
 
 
@@ -229,7 +247,9 @@ class TestTendArgParsing(unittest.TestCase):
     def test_tend_defaults(self):
         args = self.parser.parse_args(["tend", "--repo", "owner/name"])
         self.assertFalse(args.allow_merge)
-        self.assertEqual(args.timeout, TEND_DEFAULT_TIMEOUT_SECONDS)
+        # Unset on purpose: resolved at dispatch from GARDENER_TEND_TIMEOUT,
+        # falling back to TEND_DEFAULT_TIMEOUT_SECONDS (see TestTimeoutSettings).
+        self.assertIsNone(args.timeout)
         self.assertFalse(args.no_refresh_target)
 
     def test_tend_allow_merge_flag(self):
@@ -1302,7 +1322,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertIn("GARDENER_CONVENTIONS_URL", stderr.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1327,7 +1347,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.INFO)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1354,7 +1374,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.WARNING)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1381,7 +1401,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertEqual(level, Level.WARNING)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -1429,7 +1449,7 @@ class TestCmdAlign(unittest.TestCase):
         self.assertIn("mutually exclusive", err.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
     def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
         self, mock_lock, mock_run_claude, mock_default_notifier
@@ -1477,7 +1497,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         )
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1504,7 +1524,7 @@ class TestCmdTendNotifications(unittest.TestCase):
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli.state.record_run", side_effect=RuntimeError("sqlite is locked"))
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1530,7 +1550,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         mock_notifier.notify.assert_called_once()
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1563,7 +1583,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("gardener: done in 100ms", stderr.getvalue())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr")
@@ -1597,7 +1617,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertIn("gardener found an existing OPEN pull request", kwargs["prompt"])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1664,7 +1684,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(level, Level.ERROR)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1690,7 +1710,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         mock_run_claude.assert_called_once()
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", side_effect=[False, True])
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1736,7 +1756,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(bootstrap[0].outcome, state.CREATED_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.step6_unreachable", return_value=True)
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", side_effect=[False, True])
     @patch("gardener.cli.current_branch", return_value="main")
@@ -1786,7 +1806,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         self.assertEqual(bootstrap[0].outcome, state.CREATED_INCOMPLETE_OUTCOME)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -1827,7 +1847,7 @@ class TestCmdTendNotifications(unittest.TestCase):
         )
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.repo_lock.repo_lock", side_effect=repo_lock.RepoLockedError("owner/name"))
     def test_repo_already_locked_skips_the_dispatch_without_recording_or_alerting(
@@ -2004,7 +2024,7 @@ class TestDenialsArePrintedBeforeTheNoteThatCitesThem(unittest.TestCase):
         self.assertIn("denials=2", stderr_text)
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.clone_or_refresh_target_repo")
     @patch("gardener.cli.conventions.ensure_conventions")
@@ -2028,7 +2048,7 @@ class TestDenialsArePrintedBeforeTheNoteThatCitesThem(unittest.TestCase):
         self._assert_denials_precede_the_note(stderr.getvalue(), "Claude")
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2089,7 +2109,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         return dashboard.parse_in_progress(stderr.getvalue().splitlines())
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2144,7 +2164,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         self.assertEqual(self._in_progress(stderr), [])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=False)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -2183,7 +2203,7 @@ class TestDispatchTendProgressMarkers(unittest.TestCase):
         self.assertEqual(self._in_progress(stderr), [])
 
     @patch("gardener.cli.notify.default_notifier")
-    @patch("gardener.cli.run_claude")
+    @patch("gardener.cli.run_agent")
     @patch("gardener.cli.dev_loop.has_dev_loop_skill", return_value=True)
     @patch("gardener.cli.current_branch", return_value="main")
     @patch("gardener.cli.find_orphaned_pr", return_value=None)
@@ -3948,3 +3968,151 @@ class TestSessionCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOvernightHarnessPreflight(unittest.TestCase):
+    """A harness that can't dispatch `tend` aborts the batch once, up front,
+    instead of failing every garden repo one by one. The module-wide fence
+    patches `check_harness_ready`; these tests replace that patch with the
+    behavior under test."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.garden_file.write_text(json.dumps(["o/a", "o/b"]))
+        self.args = argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=tmp / "cursor.json", state_db=tmp / "state.sqlite3",
+            concurrency=1, strategy="round-robin", random_seed=None, self_update=False,
+        )
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.check_harness_ready", side_effect=dispatch.DispatchError("refusing tend mode"))
+    def test_unready_harness_aborts_before_any_dispatch(self, _ready, mock_notifier, mock_dispatch):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            exit_code = cmd_overnight(self.args)
+        self.assertEqual(exit_code, 1)
+        mock_dispatch.assert_not_called()
+        self.assertIn("refusing tend mode", err.getvalue())
+        title = mock_notifier.return_value.notify.call_args.args[0]
+        self.assertIn("agent harness not ready", title)
+        self.assertIs(mock_notifier.return_value.notify.call_args.args[2], Level.ERROR)
+
+    @patch("gardener.cli.check_harness_ready")
+    def test_preflight_checks_tend_mode(self, mock_ready):
+        with redirect_stderr(io.StringIO()), patch("gardener.cli._dispatch_tend") as mock_dispatch:
+            mock_dispatch.side_effect = lambda a: TendResult(exit_code=0, ok=True, result_text="")
+            cmd_overnight(self.args)
+        self.assertIs(mock_ready.call_args.args[0], Mode.TEND)
+
+
+class TestTimeoutSettings(unittest.TestCase):
+    """`--timeout` wins, then the GARDENER_*_TIMEOUT setting, then the
+    built-in constant — for align, tend, and overnight's per-repo tend."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _ok(self):
+        return DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: ok", raw_stdout="{}", stderr="", exit_code=0,
+            duration_ms=1, cost_usd=0, session_id="s", permission_denials=[], is_error=False,
+        )
+
+    def _align(self, timeout):
+        args = argparse.Namespace(
+            repo="owner/name", implement=False, file_issue=False, model=None, timeout=timeout,
+            no_refresh_conventions=False, no_refresh_target=False,
+            conventions_repo=CONVENTIONS_URL, state_db=self.tmp / "state.sqlite3",
+        )
+        with patch("gardener.cli.conventions.ensure_conventions",
+                   return_value=SimpleNamespace(path=self.tmp)), \
+             patch("gardener.cli.clone_or_refresh_target_repo", return_value=self.tmp), \
+             patch("gardener.cli.current_branch", return_value="main"), \
+             patch("gardener.cli.notify.default_notifier"), \
+             patch("gardener.cli.run_agent", return_value=self._ok()) as mock_run, \
+             redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            cmd_align(args)
+        return mock_run.call_args.kwargs["timeout"]
+
+    def test_align_uses_the_constant_when_nothing_is_set(self):
+        self.assertEqual(self._align(None), dispatch.DEFAULT_TIMEOUT_SECONDS)
+
+    def test_align_uses_the_setting_when_no_flag(self):
+        with patch.dict(os.environ, {dispatch.ALIGN_TIMEOUT_ENV: "321"}):
+            self.assertEqual(self._align(None), 321)
+
+    def test_align_flag_wins_over_the_setting(self):
+        with patch.dict(os.environ, {dispatch.ALIGN_TIMEOUT_ENV: "321"}):
+            self.assertEqual(self._align(42), 42)
+
+    def test_align_bad_setting_is_a_setup_error_before_dispatch(self):
+        with patch.dict(os.environ, {dispatch.ALIGN_TIMEOUT_ENV: "soon"}), \
+             patch("gardener.cli.run_agent") as mock_run, redirect_stderr(io.StringIO()):
+            args = argparse.Namespace(
+                repo="owner/name", implement=False, file_issue=False, model=None, timeout=None,
+                no_refresh_conventions=False, no_refresh_target=False,
+                conventions_repo=CONVENTIONS_URL, state_db=self.tmp / "state.sqlite3",
+            )
+            self.assertEqual(cmd_align(args), 2)
+        mock_run.assert_not_called()
+
+    def _overnight_timeouts(self, timeout=None):
+        garden_file = self.tmp / "garden.json"
+        garden_file.write_text(json.dumps(["o/a"]))
+        args = argparse.Namespace(
+            hours=8.0, model=None, garden_file=garden_file, cursor_file=self.tmp / "cursor.json",
+            state_db=self.tmp / "state.sqlite3", concurrency=1, strategy="round-robin",
+            random_seed=None, self_update=False, timeout=timeout,
+        )
+        seen = []
+
+        def fake(tend_args):
+            seen.append(tend_args.timeout)
+            return TendResult(exit_code=0, ok=True, result_text="")
+
+        with patch("gardener.cli._dispatch_tend", side_effect=fake), \
+             patch("gardener.cli.notify.default_notifier"), redirect_stderr(io.StringIO()):
+            cmd_overnight(args)
+        return seen
+
+    def test_overnight_passes_the_tend_setting_to_each_repo(self):
+        with patch.dict(os.environ, {dispatch.TEND_TIMEOUT_ENV: "4321"}):
+            self.assertEqual(self._overnight_timeouts(), [4321])
+
+    def test_overnight_flag_wins_over_the_setting(self):
+        with patch.dict(os.environ, {dispatch.TEND_TIMEOUT_ENV: "4321"}):
+            self.assertEqual(self._overnight_timeouts(timeout=77), [77])
+
+    def test_overnight_default_is_the_constant(self):
+        self.assertEqual(self._overnight_timeouts(), [TEND_DEFAULT_TIMEOUT_SECONDS])
+
+    def test_overnight_headroom_uses_the_configured_tend_timeout(self):
+        # The first repo is always attempted; whether a second fits in a
+        # 30-minute budget depends on the configured per-repo timeout.
+        for setting, expected_calls in (("600", 2), (str(TEND_DEFAULT_TIMEOUT_SECONDS), 1)):
+            with self.subTest(setting=setting):
+                garden_file = self.tmp / f"garden-{setting}.json"
+                garden_file.write_text(json.dumps(["o/a", "o/b"]))
+                args = argparse.Namespace(
+                    hours=0.5, model=None, garden_file=garden_file,
+                    cursor_file=self.tmp / f"cursor-{setting}.json",
+                    state_db=self.tmp / "state.sqlite3", concurrency=1, strategy="round-robin",
+                    random_seed=None, self_update=False, timeout=None,
+                )
+                with patch.dict(os.environ, {dispatch.TEND_TIMEOUT_ENV: setting}), \
+                     patch("gardener.cli._dispatch_tend",
+                           return_value=TendResult(exit_code=0, ok=True, result_text="")) as mock_tend, \
+                     patch("gardener.cli.notify.default_notifier"), redirect_stderr(io.StringIO()):
+                    cmd_overnight(args)
+                self.assertEqual(mock_tend.call_count, expected_calls)

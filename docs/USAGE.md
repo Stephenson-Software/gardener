@@ -5,7 +5,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
 gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
 gardener tail-transcript <path> [-f | --follow]
@@ -329,12 +329,38 @@ for anyone who'd rather trigger it by hand than wait for the next
 `overnight` run. `--check` fetches and reports whether an update is
 available (and, if so, the old/new commit) without applying it.
 
+## Agent harnesses
+
+Every dispatch goes to Claude Code unless `GARDENER_HARNESS=command` is set
+(environment or `notify.env`), in which case `align`, `tend` and
+`overnight` run `GARDENER_HARNESS_COMMAND` instead. Report mode needs
+nothing more; any other mode must also be listed in
+`GARDENER_HARNESS_ALLOW_UNSCOPED` (or that set to `1`), and `overnight`
+refuses to start without `tend` in it.
+
+Settings that apply on either harness, each overridden by its flag where
+one exists:
+
+- `GARDENER_HARNESS_MODEL`: default model (`--model` wins).
+- `GARDENER_ALIGN_TIMEOUT`, `GARDENER_TEND_TIMEOUT`,
+  `GARDENER_CREATE_DEV_LOOP_TIMEOUT`: per-mode timeouts in seconds
+  (`--timeout` on `align`, `tend` and `overnight` wins).
+- `GARDENER_CLAUDE_BIN`: the Claude Code executable, when it isn't
+  `claude` on `PATH`.
+
+See [HARNESSES.md](HARNESSES.md) for the command contract, the safety
+differences, and the Ollama and Orket recipes.
+
 ## Other flags
 
-- `--model <name>` — override the model `claude` uses (`align`, `tend`, and
-  `overnight`, which threads it through to every `tend` dispatch in the
-  batch).
-- `--timeout <seconds>` — how long to wait for the dispatched run.
+- `--model <name>` — override the model the agent harness uses (`align`,
+  `tend`, and `overnight`, which threads it through to every `tend`
+  dispatch in the batch). Defaults to `GARDENER_HARNESS_MODEL`, else the
+  harness's own default.
+- `--timeout <seconds>` — how long to wait for the dispatched run
+  (`align`, `tend`, and `overnight`, where it applies to each `tend` and
+  sets the budget headroom). Without it, `GARDENER_ALIGN_TIMEOUT` /
+  `GARDENER_TEND_TIMEOUT` apply, then the defaults below.
   `align`'s default is 1800s / 30 min (reading and analyzing a real repo
   against ~10 convention docs is not fast). `tend`'s default is 2700s / 45
   min — it runs a full triage/implement/test/PR/self-audit cycle in one
@@ -344,7 +370,8 @@ available (and, if so, the old/new commit) without applying it.
   overnight multi-repo batch; see `dispatch.py`'s
   `TEND_DEFAULT_TIMEOUT_SECONDS` for the full reasoning. The internal
   `create-dev-loop` dispatch `tend` runs when a repo has no skill yet has
-  its own fixed 900s/15min ceiling, not exposed as a flag.
+  its own 900s/15min ceiling, set with `GARDENER_CREATE_DEV_LOOP_TIMEOUT`
+  rather than a flag.
 - `--limit <n>` (`status` only) — how many most-recent runs to show,
   newest first. Defaults to `20`; pass a larger number to page further
   back through the run history, or combine with `--repo` to scope the

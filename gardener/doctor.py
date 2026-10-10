@@ -161,9 +161,38 @@ def canonical_repo_name(
     return name if isinstance(name, str) and name else None
 
 
-def check_required_clis(which_fn: Callable[[str], Optional[str]] = shutil.which) -> list[Finding]:
+def check_required_clis(
+    which_fn: Callable[[str], Optional[str]] = shutil.which,
+    env: Optional[dict] = None,
+    config_path: Optional[Path] = None,
+) -> list[Finding]:
+    """`git`/`gh` always; the agent binary is whichever the configured
+    harness dispatches (`dispatch.load_harness_config`) — `claude` by
+    default, the `GARDENER_HARNESS_COMMAND` program on the `command`
+    harness, where requiring `claude` would be a false ERROR."""
+    from gardener import dispatch
+
+    required = dict(REQUIRED_CLIS)
     findings = []
-    for name, why in REQUIRED_CLIS.items():
+    try:
+        config = dispatch.load_harness_config(env=env, config_path=config_path)
+    except dispatch.DispatchError as e:
+        findings.append(
+            Finding(
+                "cli",
+                Severity.ERROR,
+                f"agent harness misconfigured: {e}",
+                fix=f"fix {dispatch.HARNESS_ENV}/{dispatch.COMMAND_ENV} (env or notify.env)",
+            )
+        )
+        config = None
+    if config is not None:
+        why = required.pop("claude")
+        if config.harness is dispatch.Harness.COMMAND:
+            required[config.command[0]] = f"every dispatch ({dispatch.COMMAND_ENV})"
+        else:
+            required[config.claude_bin] = why
+    for name, why in required.items():
         if which_fn(name):
             findings.append(Finding("cli", Severity.OK, f"{name} found on PATH"))
         else:

@@ -16,9 +16,11 @@ gardener/
     cli.py          — argparse CLI (align, tend, allowlist, garden, overnight,
                        status, tail-transcript, dashboard, update), prompt
                        building, orchestration
-    dispatch.py      — the safety-gated subprocess wrapper around `claude -p`
-                       (Mode/ModeSpec definitions and tend_mode_spec() for
-                       every mode, including tend's per-invocation merge gate)
+    dispatch.py      — the safety-gated subprocess wrapper around the agent:
+                       `claude -p` by default (Mode/ModeSpec definitions and
+                       tend_mode_spec() for every mode, including tend's
+                       per-invocation merge gate), or a configured `command`
+                       harness via run_agent (see docs/HARNESSES.md)
     dev_loop.py      — resolves/derives a target repo's <slug>-dev-loop skill,
                        builds the create-dev-loop and tend prompts (including
                        the headless-safety preamble)
@@ -103,6 +105,8 @@ gardener/
                        merge_allowlist, garden, overnight, conventions,
                        repo_lock, notify, transcript, run_log, sessions,
                        dashboard, live, selfupdate, usage, trace_client)
+  examples/harnesses/ — reference `command` agent harnesses (see
+                       docs/HARNESSES.md); not imported by gardener
 ```
 
 ## Relationship to a conventions repo

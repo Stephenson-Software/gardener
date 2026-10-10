@@ -526,6 +526,31 @@ a real `claude` process —
 see [Manual/end-to-end verification](#manualend-to-end-verification) for
 that.
 
+The agent-harness tests at the end of `tests/test_dispatch.py`
+(`TestLoadHarnessConfig`, `TestRunAgentRouting`, `TestRunCommandAgent`,
+`TestCheckHarnessReady`) cover `GARDENER_HARNESS_*` resolution (env before
+`notify.env`, an unknown harness raising instead of falling back to
+Claude), `run_agent` routing the default harness to `run_claude`
+unchanged, and the `command` contract end to end. That last group runs a
+real stub agent (a few lines of Python written to a tmp dir, never
+`claude`) in a real throwaway git repo: the prompt arrives on stdin, the
+mode and spec in the environment, plain-text and JSON stdout are both
+parsed, a report run that edits or commits in the clone is failed, every
+write mode is refused without `GARDENER_HARNESS_ALLOW_UNSCOPED` (and the
+opt-in is per mode), a harness's own `"blocked": true` stops a batch, `tend`'s
+`merge_allowed` follows `tend_mode_spec()`, `bypassPermissions` is refused
+on this harness too, and a usage-limit message still sets `blocked`.
+`tests/test_doctor.py` asserts the CLI check requires the configured
+command instead of `claude` on that harness, and `tests/test_cli.py`'s
+`TestOvernightHarnessPreflight` asserts an unready harness aborts
+`overnight` with one alert before any repo is dispatched.
+`TestLoadHarnessConfig` also covers the settings that replace former
+constants (`GARDENER_CLAUDE_BIN`, `GARDENER_HARNESS_MODEL`, the three
+`GARDENER_*_TIMEOUT`s), including that nothing set means exactly the old
+constants, and `tests/test_cli.py`'s `TestTimeoutSettings` asserts the
+`--timeout` flag, then setting, then constant order for `align` and for
+`overnight`'s per-repo `tend` and budget headroom.
+
 ## Manual/end-to-end verification
 
 Because the whole point of this tool is dispatching a real Claude Code
@@ -541,6 +566,18 @@ have access to and confirm three things:
 3. `gh repo view <owner/repo> --json pushedAt` is unchanged from before the
    run, and `gh pr list` / `gh issue list` show nothing new — report mode
    must not have touched the real repo on GitHub either.
+
+For a change to the `command` harness, run the same three checks with
+`GARDENER_HARNESS=command` and a real agent command (the bundled
+`examples/harnesses/ollama_report_agent.py` against a local Ollama model is
+enough), with `GARDENER_STATE_DIR`/`GARDENER_CACHE_DIR` pointed at a
+scratch directory so the run doesn't land in your real history or alerts.
+Then confirm `gardener tend` and `gardener overnight` refuse with the
+`GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
+
+The record of the real runs behind a release lives in `docs/verification/`.
+[0.3.0](verification/0.3.0.md) covers the harness layer, both the Claude
+Code regression check and the `command` harness.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.

@@ -36,6 +36,14 @@ nothing-allowed when its config file is missing) — is documented in
 **[docs/SAFETY.md](docs/SAFETY.md)**. Read it before running `tend` or
 `overnight` against anything you haven't reviewed.
 
+On the `command` agent harness (`GARDENER_HARNESS=command`), the
+tool scoping above is handed to the configured command as
+`GARDENER_HARNESS_SPEC` rather than enforced by gardener. Report runs are
+checked afterward for changes to the clone; every write mode is refused
+unless it is listed in `GARDENER_HARNESS_ALLOW_UNSCOPED`, which makes enforcing that
+spec the command's responsibility. See
+**[docs/HARNESSES.md](docs/HARNESSES.md#safety)**.
+
 A repository crafted to manipulate a dispatched run (e.g. planted
 instructions in `CLAUDE.md` aimed at the agent rather than at humans) is
 the same class of risk as running any AI coding agent against untrusted

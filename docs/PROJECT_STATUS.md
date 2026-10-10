@@ -1,5 +1,20 @@
 # Project Status
 
+**0.3.0 (2026-10-10):** the agent-harness layer
+([HARNESSES.md](HARNESSES.md)) was verified with real runs before
+release. The default Claude Code path was checked three ways:
+- an unconfigured report `align`, with the clone and GitHub confirmed
+  untouched;
+- an `overnight` → `tend` with merge disabled, which ended in
+  `DECISION NEEDED:` with no PR opened or merged;
+- an `align` driven entirely by the new `GARDENER_CLAUDE_BIN` /
+  `GARDENER_HARNESS_MODEL` settings.
+
+The `command` harness ran report mode end to end against a local Ollama
+model, and its write modes refused without opt-in. The full record,
+including what was not verified, is in
+[verification/0.3.0.md](verification/0.3.0.md).
+
 Working end to end: built, unit-tested, and verified with one real
 report-only run against `dmccoystephenson/create-dev-loop` (29 gaps found,
 target repo confirmed untouched afterward — see
