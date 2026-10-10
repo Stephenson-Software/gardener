@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from gardener import cli
 from gardener.conventions import (
+    CONVENTIONS_SUBDIR_ENV,
     CONVENTIONS_URL_ENV,
     REQUIRED_DOCS,
     ConventionsError,
@@ -24,6 +25,7 @@ from gardener.conventions import (
     _origin_url,
     default_cache_dir,
     ensure_conventions,
+    resolve_subdir,
     resolve_url,
 )
 
@@ -193,6 +195,67 @@ class TestEnsureConventions(unittest.TestCase):
             with self.assertRaises(ConventionsError):
                 ensure_conventions(cache_dir=self.cache_dir)
         mock_run_git.assert_not_called()
+
+
+def _write_layout(root: Path) -> None:
+    for doc in REQUIRED_DOCS:
+        (root / doc).parent.mkdir(parents=True, exist_ok=True)
+        (root / doc).write_text(f"# {doc}\n")
+
+
+class TestConventionsSubdir(unittest.TestCase):
+    """`GARDENER_CONVENTIONS_SUBDIR` roots the conventions at a compact
+    variant inside the same repo. The subdir must carry the full required
+    layout itself, and must stay inside the checkout."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.cache_dir = Path(self._tmpdir.name) / "conventions"
+        _write_layout(self.cache_dir)
+        _write_layout(self.cache_dir / "compact")
+        (self.cache_dir / ".git").mkdir()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    @patch("gardener.conventions._origin_url", return_value=FAKE_URL)
+    def test_subdir_becomes_the_conventions_root(self, _origin):
+        source = ensure_conventions(cache_dir=self.cache_dir, refresh=False, url=FAKE_URL, subdir="compact")
+        self.assertEqual(source.path, self.cache_dir / "compact")
+        self.assertEqual(source.url, FAKE_URL)
+        self.assertEqual(source.checklist_path(), self.cache_dir / "compact" / "ALIGNMENT_CHECKLIST.md")
+
+    @patch("gardener.conventions._origin_url", return_value=FAKE_URL)
+    def test_empty_subdir_is_the_repo_root_as_before(self, _origin):
+        source = ensure_conventions(cache_dir=self.cache_dir, refresh=False, url=FAKE_URL, subdir="")
+        self.assertEqual(source.path, self.cache_dir)
+
+    @patch("gardener.conventions._origin_url", return_value=FAKE_URL)
+    def test_subdir_must_carry_the_full_required_layout(self, _origin):
+        (self.cache_dir / "partial").mkdir()
+        (self.cache_dir / "partial" / "README.md").write_text("# partial\n")
+        with self.assertRaises(ConventionsError) as cm:
+            ensure_conventions(cache_dir=self.cache_dir, refresh=False, url=FAKE_URL, subdir="partial")
+        self.assertIn("ALIGNMENT_PROMPT.md", str(cm.exception))
+
+    def test_subdir_must_stay_inside_the_checkout(self):
+        source = ConventionsSource(path=self.cache_dir, url=FAKE_URL)
+        for bad in ("..", "../elsewhere", "/etc", "compact/../..", "."):
+            with self.subTest(subdir=bad):
+                with self.assertRaises(ConventionsError):
+                    source.within(bad)
+
+    def test_missing_subdir_is_an_error_not_a_fallback_to_the_root(self):
+        with self.assertRaises(ConventionsError) as cm:
+            ConventionsSource(path=self.cache_dir, url=FAKE_URL).within("no-such-dir")
+        self.assertIn("does not exist", str(cm.exception))
+
+    def test_resolve_subdir_prefers_the_flag_then_the_environment(self):
+        with patch.dict("os.environ", {CONVENTIONS_SUBDIR_ENV: "from-env"}):
+            self.assertEqual(resolve_subdir("from-flag"), "from-flag")
+            self.assertEqual(resolve_subdir(None), "from-env")
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(resolve_subdir(None), "")
 
 
 class TestCacheDirIsHonouredEverywhere(unittest.TestCase):

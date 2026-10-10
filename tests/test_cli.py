@@ -135,6 +135,7 @@ def setUpModule():
         dispatch.HARNESS_ENV, dispatch.COMMAND_ENV, dispatch.ALLOW_UNSCOPED_ENV,
         dispatch.CLAUDE_BIN_ENV, dispatch.MODEL_ENV, dispatch.ALIGN_TIMEOUT_ENV,
         dispatch.TEND_TIMEOUT_ENV, dispatch.CREATE_DEV_LOOP_TIMEOUT_ENV,
+        "GARDENER_CONVENTIONS_SUBDIR",
     ):
         os.environ.pop(name, None)
     global _harness_preflight_patch
@@ -1306,6 +1307,49 @@ class TestCmdAlign(unittest.TestCase):
             timeout=1800, no_refresh_conventions=False, no_refresh_target=False,
             conventions_repo=conventions_repo, state_db=self.state_db,
         )
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_agent")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_conventions_subdir_reaches_the_checkout_prompt_and_harness(
+        self, mock_conv, mock_clone, mock_branch, mock_run_agent, mock_default_notifier
+    ):
+        compact = Path(self._tmpdir.name) / "conventions" / "compact"
+        mock_conv.return_value = SimpleNamespace(path=compact)
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_agent.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 gaps", raw_stdout="{}", stderr="", exit_code=0,
+            duration_ms=1, cost_usd=0, session_id="s", permission_denials=[], is_error=False,
+        )
+        args = self._args()
+        args.conventions_subdir = "compact"
+        with redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cmd_align(args), 0)
+        self.assertEqual(mock_conv.call_args.kwargs["subdir"], "compact")
+        kwargs = mock_run_agent.call_args.kwargs
+        self.assertEqual(kwargs["add_dirs"], [compact])
+        self.assertIn(f"{compact}/ALIGNMENT_CHECKLIST.md", kwargs["prompt"])
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_agent")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_conventions_subdir_falls_back_to_the_environment(
+        self, mock_conv, mock_clone, mock_branch, mock_run_agent, mock_default_notifier
+    ):
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        mock_run_agent.return_value = DispatchResult(
+            ok=True, result_text="GARDENER_SUMMARY: 0 gaps", raw_stdout="{}", stderr="", exit_code=0,
+            duration_ms=1, cost_usd=0, session_id="s", permission_denials=[], is_error=False,
+        )
+        with patch.dict(os.environ, {"GARDENER_CONVENTIONS_SUBDIR": "compact"}), \
+             redirect_stderr(io.StringIO()), patch("sys.stdout", new=io.StringIO()):
+            cmd_align(self._args())
+        self.assertEqual(mock_conv.call_args.kwargs["subdir"], "compact")
 
     @patch("gardener.cli.conventions.ensure_conventions")
     def test_unconfigured_conventions_repo_exits_before_dispatching(self, mock_conv):
