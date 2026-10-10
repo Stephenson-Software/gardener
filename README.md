@@ -148,6 +148,25 @@ re-points and refreshes that cache even under `--no-refresh-conventions`,
 since reusing the previous repo's checkout would produce a wrong answer
 rather than a stale one. gardener never commits or pushes into this cache.
 
+#### Compact conventions
+
+Some agent harnesses hand the model every file in the conventions
+directory, within a size budget. Orket's governed harness does this, with a
+64 KiB document budget (see [docs/HARNESSES.md](docs/HARNESSES.md)). A full
+rubric can exceed that. A conventions repo can then also carry a compact
+variant in a subdirectory: the same twelve files, with shorter content.
+Point `align` at it:
+
+```bash
+export GARDENER_CONVENTIONS_SUBDIR=compact   # or: gardener align --conventions-subdir compact
+```
+
+gardener treats that subdirectory as the conventions root, for the
+required-file check, the prompt's reading list, and the directory the agent
+may read. What goes in the compact variant is the conventions repo's
+decision, not gardener's. An unset or empty value means the repo root, as
+before.
+
 `$GARDENER_CACHE_DIR` overrides the cache root — gardener's whole cache,
 not just the conventions checkout. Setting it to `/somewhere/else` moves
 both `conventions/` above and the target-repo clones at
@@ -251,7 +270,7 @@ Details: https://danielstephenson.dev/usage-reporting
 ## Usage
 
 ```
-gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-repo <git-url>]
+gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-repo <git-url>] [--conventions-subdir <path>]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>

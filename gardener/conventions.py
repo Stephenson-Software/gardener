@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CONVENTIONS_URL_ENV = "GARDENER_CONVENTIONS_URL"
+# A subdirectory of the conventions repo to use as the conventions root
+# instead of the repo root (see `ConventionsSource.within`). Empty means the
+# repo root, exactly as before this existed.
+CONVENTIONS_SUBDIR_ENV = "GARDENER_CONVENTIONS_SUBDIR"
 
 # The layout contract a conventions repo must satisfy. Every entry except
 # `README.md` is also on the reading list `prompts/align_repo.md.tmpl`
@@ -95,6 +99,13 @@ def resolve_url(explicit: str | None = None) -> str:
     return url
 
 
+def resolve_subdir(explicit: str | None = None) -> str:
+    """The configured conventions subdirectory: an explicit
+    `--conventions-subdir` wins, then `$GARDENER_CONVENTIONS_SUBDIR`. Empty
+    (the default) means the conventions repo root."""
+    return (explicit if explicit is not None else os.environ.get(CONVENTIONS_SUBDIR_ENV, "")).strip()
+
+
 def default_cache_dir() -> Path:
     override = os.environ.get("GARDENER_CACHE_DIR")
     if override:
@@ -112,6 +123,38 @@ class ConventionsSource:
 
     def alignment_prompt_path(self) -> Path:
         return self.path / "ALIGNMENT_PROMPT.md"
+
+    def within(self, subdir: str) -> "ConventionsSource":
+        """The same conventions repo, rooted at `subdir` instead.
+
+        For a conventions repo that carries a compact variant of its rubric
+        (the same `REQUIRED_DOCS` layout with shorter docs) alongside the full
+        one. A harness that hands the model every file under its conventions
+        directory, such as Orket's governed Gardener harness with its
+        document budget, can then be pointed at the compact variant without
+        gardener deciding what goes in it. Which docs are short enough is the
+        conventions repo's call, not gardener's (see CLAUDE.md, "What belongs
+        here vs. elsewhere").
+
+        `subdir` must be a relative path that stays inside the repo; an empty
+        `subdir` returns this source unchanged.
+        """
+        if not subdir:
+            return self
+        relative = Path(subdir)
+        root = self.path.resolve()
+        target = (self.path / relative).resolve()
+        if relative.is_absolute() or not target.is_relative_to(root) or target == root:
+            raise ConventionsError(
+                f"Conventions subdirectory {subdir!r} must be a relative path inside the "
+                f"conventions repo ({CONVENTIONS_SUBDIR_ENV} / --conventions-subdir)."
+            )
+        if not target.is_dir():
+            raise ConventionsError(
+                f"Conventions subdirectory {subdir!r} does not exist in "
+                f"{self.url or 'the configured conventions repo'}."
+            )
+        return ConventionsSource(path=self.path / relative, url=self.url)
 
     def verify_complete(self) -> None:
         missing = [d for d in REQUIRED_DOCS if not (self.path / d).is_file()]
@@ -163,7 +206,7 @@ def _origin_url(cache_dir: Path) -> str | None:
 
 
 def ensure_conventions(
-    cache_dir: Path | None = None, refresh: bool = True, url: str | None = None
+    cache_dir: Path | None = None, refresh: bool = True, url: str | None = None, subdir: str = ""
 ) -> ConventionsSource:
     """Clone the configured conventions repo into the local cache if absent,
     or fetch + hard-reset to origin's default branch if present and `refresh`
@@ -195,6 +238,6 @@ def ensure_conventions(
             _run_git(["fetch", "--depth", "1", "origin"], cwd=cache_dir)
             _run_git(["reset", "--hard", "origin/HEAD"], cwd=cache_dir)
 
-    source = ConventionsSource(path=cache_dir, url=resolved)
+    source = ConventionsSource(path=cache_dir, url=resolved).within(subdir)
     source.verify_complete()
     return source

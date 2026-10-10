@@ -604,7 +604,8 @@ def cmd_align(args: argparse.Namespace) -> int:
     try:
         with repo_lock.repo_lock(args.repo):
             conv = conventions.ensure_conventions(
-                refresh=not args.no_refresh_conventions, url=conventions_url
+                refresh=not args.no_refresh_conventions, url=conventions_url,
+                subdir=conventions.resolve_subdir(getattr(args, "conventions_subdir", None)),
             )
             print(f"gardener: conventions checked out at {conv.path}", file=sys.stderr)
 
@@ -1946,6 +1947,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--conventions-repo", default=None, metavar="GIT_URL",
         help="Git URL of the conventions repo to audit against "
              f"(default: ${conventions.CONVENTIONS_URL_ENV}; required, no built-in default)",
+    )
+    align.add_argument(
+        "--conventions-subdir", default=None, metavar="PATH",
+        help="Subdirectory of the conventions repo to use as its root, with the same required "
+             f"layout (default: ${conventions.CONVENTIONS_SUBDIR_ENV}, else the repo root). "
+             "For a compact rubric a budgeted harness can take whole; see docs/HARNESSES.md.",
     )
     align.add_argument(
         "--no-refresh-conventions", action="store_true",

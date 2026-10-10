@@ -1,7 +1,7 @@
 # Usage
 
 ```
-gardener align --repo <owner/repo> [--implement] [--file-issue]
+gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-subdir <path>]
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
@@ -392,6 +392,13 @@ differences, and the Ollama and Orket recipes.
   built-in default; with neither set, `align` exits 2 with setup
   instructions rather than dispatching. See
   [Conventions repo](../README.md#conventions-repo) for the required layout.
+- `--conventions-subdir <path>` (`align` only) — use a subdirectory of the
+  conventions repo as its root, overriding `$GARDENER_CONVENTIONS_SUBDIR`
+  (default: the repo root). The subdirectory must have the full required
+  layout itself and stay inside the checkout; otherwise `align` stops before
+  dispatching. The prompt, the required-doc check and the directory the
+  agent may read all use it. See
+  [Compact conventions](../README.md#compact-conventions).
 - `--no-refresh-conventions` (`align` only) / `--no-refresh-target`
   (`align` and `tend`) — reuse whatever is already cached instead of
   fetching latest first. One exception: if the cached conventions checkout

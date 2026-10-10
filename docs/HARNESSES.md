@@ -190,7 +190,9 @@ ORKET_GARDENER_PROVIDER_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp, the def
 It reads only committed Git content. **Both the target clone and the
 conventions repo must be clean.** It also includes every tracked file of each
 extra directory, within a 64 KiB document budget, so a large conventions
-repo is refused before the model runs. Its own README has the full limits.
+repo is refused before the model runs. Point `align` at a compact variant
+of the rubric with `GARDENER_CONVENTIONS_SUBDIR` (see the README's "Compact
+conventions"). Its own README has the full limits.
 
 #### `gardener-orket-extension` (headless)
 
