@@ -179,6 +179,25 @@ class Overnight(IntegrationCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(box._records(), [], "a repo was dispatched despite the unready harness")
 
+    def test_a_run_that_finishes_a_cycle_continues_into_the_next(self):
+        """0.4.4: with one repo left in the cycle, a random-order run used
+        to tend that one repo and stop, leaving most of its budget unused
+        (2026-10-11: one repo in 7 minutes of an 8-hour budget)."""
+        box = self.garden()
+        cursor = box.state / "overnight_cursor.json"
+        cursor.write_text(json.dumps({"attempted": [box.repo]}) + "\n")
+        r = box.cli("overnight", "--hours", "0.2", "--timeout", "120", "--concurrency", "1",
+                    "--strategy", "random", "--no-self-update")
+        self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+        tended = [run["repo"] for run in box.runs() if run["mode"] == "tend"]
+        self.assertEqual(tended, [SECOND_REPO, box.repo], "the leftover first, then the next cycle")
+        self.assertIn("1 left before the next cycle begins", r.stderr)
+        self.assertIn("continuing into the next cycle", r.stderr)
+        # The finished cycle's history is dropped; the next cycle has begun
+        # with the one repo this run reached past the boundary.
+        self.assertEqual(json.loads(cursor.read_text())["attempted"], [box.repo])
+        self.assertEqual(box.write_gh_calls(), [])
+
     def test_ctrl_c_mid_batch_kills_every_agent(self):
         """The 0.4.1 regression: agents run on worker threads in their own
         sessions, so the terminal's Ctrl-C reached neither them nor their

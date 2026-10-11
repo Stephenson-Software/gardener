@@ -224,8 +224,9 @@ record what you actually observed before changing the docstring's claims.
   logic the same way — including `order_by_issue_count` (pure sort over an
   already-fetched count mapping), `random_order` (injectable
   `random.Random`, never the module's global functions), and
-  `resume_order`/`next_attempted` (the name-keyed cursor's cycle-completion
-  and reset logic) — none of these invoke `claude`, `git`, or `gh` either.
+  `resume_order`/`continue_into_next_cycle`/`next_attempted` (the
+  name-keyed cursor's cycle-completion, carry-on-into-the-next-cycle and
+  reset logic) — none of these invoke `claude`, `git`, or `gh` either.
   `test_run_log.py` covers the stderr tee (both destinations written,
   only whole lines written so concurrent `overnight` threads never glue
   lines together, an unfinished last line still flushed, stderr restored

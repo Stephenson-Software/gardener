@@ -112,7 +112,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from gardener import notify, state
 
@@ -364,7 +364,33 @@ def resume_order(full_order: list[str], attempted: list[str]) -> tuple[list[str]
     return full_order, True
 
 
-def next_attempted(attempted_before: list[str], cycle_reset: bool, newly_attempted: list[str]) -> list[str]:
+def continue_into_next_cycle(order: list[str], full_order: list[str], cycle_reset: bool) -> list[str]:
+    """This run's candidates once the current cycle's leftovers run out:
+    `order` (`resume_order`'s output) followed by every other repo in
+    `full_order`, which starts the next cycle in this run's own strategy
+    order.
+
+    Without it a run that began near the end of a cycle tended only the few
+    repos the cycle had left and then stopped, with most of its budget
+    unused: 19 repos in 24 minutes of an 8-hour budget on 2026-10-10, one
+    repo in 7 minutes on 2026-10-11. The repos in `order` are not repeated,
+    so no repo is tended twice in one run; they come round again in the
+    next cycle like every other repo. A run that already starts a fresh
+    cycle (`cycle_reset`) gets `order` unchanged — it is the whole garden.
+    `next_attempted` (given `carried=order`) is what records where the
+    cycle boundary fell."""
+    if cycle_reset:
+        return list(order)
+    carried = set(order)
+    return [*order, *(repo for repo in full_order if repo not in carried)]
+
+
+def next_attempted(
+    attempted_before: list[str],
+    cycle_reset: bool,
+    newly_attempted: list[str],
+    carried: Sequence[str] = (),
+) -> list[str]:
     """The `attempted` list to persist (`write_attempted`) after a run under
     `issue-count`/`random`: `attempted_before` (this cycle's attempted names
     prior to this run) plus `newly_attempted` (the repos this run actually
@@ -373,11 +399,33 @@ def next_attempted(attempted_before: list[str], cycle_reset: bool, newly_attempt
     the just-completed cycle's history is no longer relevant and this run's
     own attempts start the next cycle's history instead. Deduplicates while
     preserving order, defensively, though the two lists are not expected to
-    overlap in normal operation."""
-    base = [] if cycle_reset else attempted_before
+    overlap in normal operation.
+
+    `carried` is the current cycle's leftovers this run started with (the
+    `order` passed to `continue_into_next_cycle`). Once every one of them
+    has had a real attempt *and* the run has gone on into the next cycle,
+    that cycle's history is complete and is dropped the same way
+    `cycle_reset` drops it: the persisted list becomes just the repos this
+    run attempted past the boundary. If any leftover did not get a real
+    attempt (a held lock, say), the current cycle stays open so that repo is
+    still owed, and the next-cycle repos this run reached are not counted
+    towards the next cycle — they come round again in it."""
+    newly = list(newly_attempted)
+    carried_set = set(carried)
+    crossed = (
+        not cycle_reset
+        and bool(carried_set)
+        and carried_set <= set(newly)
+        and any(name not in carried_set for name in newly)
+    )
+    if crossed:
+        base: list[str] = []
+        newly = [name for name in newly if name not in carried_set]
+    else:
+        base = [] if cycle_reset else attempted_before
     seen: set[str] = set()
     result: list[str] = []
-    for name in (*base, *newly_attempted):
+    for name in (*base, *newly):
         if name not in seen:
             seen.add(name)
             result.append(name)

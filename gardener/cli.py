@@ -1262,6 +1262,9 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     start_index: Optional[int] = None
     attempted_before: list[str] = []
     cycle_reset = False
+    # The current cycle's leftovers this run starts with, under issue-count/
+    # random; the rest of `order` after them begins the next cycle.
+    carried: list[str] = []
     if strategy is overnight.Strategy.ROUND_ROBIN:
         start_index = overnight.read_cursor(path=cursor_path) % len(garden_list)
         order = overnight.repos_to_attempt(garden_list, start_index)
@@ -1283,13 +1286,17 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             full_order = overnight.random_order(garden_list, rng=rng)
         attempted_before = overnight.read_attempted(path=cursor_path)
         order, cycle_reset = overnight.resume_order(full_order, attempted_before)
+        if not cycle_reset:
+            carried = order
+            order = overnight.continue_into_next_cycle(carried, full_order, cycle_reset)
         print(
             f"gardener: overnight starting — {len(garden_list)} repo(s) in garden, "
             f"strategy={strategy.value}, budget={args.hours}h, "
             + (
                 "starting a fresh cycle (every repo already attempted last cycle)"
                 if cycle_reset
-                else f"{len(attempted_before)} repo(s) already attempted this cycle"
+                else f"{len(attempted_before)} repo(s) already attempted this cycle, "
+                f"{len(carried)} left before the next cycle begins"
             ),
             file=sys.stderr,
         )
@@ -1364,7 +1371,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                     outcome.repo for outcome in outcomes if not (outcome.blocked or outcome.locked)
                 ]
                 overnight.write_attempted(
-                    overnight.next_attempted(attempted_before, cycle_reset, newly_attempted),
+                    overnight.next_attempted(attempted_before, cycle_reset, newly_attempted, carried),
                     path=cursor_path,
                 )
         except OSError as e:
@@ -1374,6 +1381,7 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
+    announced_next_cycle = False
     for repo_batch in overnight.batch_repos(order, concurrency):
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
@@ -1392,6 +1400,13 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             )
             break
 
+        if carried and not announced_next_cycle and any(repo not in carried for repo in repo_batch):
+            announced_next_cycle = True
+            print(
+                "gardener: overnight: the current cycle's remaining repo(s) have been "
+                "dispatched — continuing into the next cycle",
+                file=sys.stderr,
+            )
         progress = (
             f"{attempted + 1}/{len(order)}" if len(repo_batch) == 1
             else f"{attempted + 1}-{attempted + len(repo_batch)}/{len(order)}"

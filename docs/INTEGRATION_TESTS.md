@@ -68,7 +68,10 @@ The rest of a dispatch's life, still with stand-in agents and no network:
   - with `--concurrency 2`, every garden repo is tended, and no log line is
     glued to another;
   - an unready harness aborts before any dispatch;
-  - Ctrl-C mid-batch kills every agent.
+  - Ctrl-C mid-batch kills every agent;
+  - a `random` run that starts with one repo left in its cycle tends it,
+    then carries on into the next cycle, and the cursor records the new
+    cycle.
 - **Cloning and refreshing:** a second `align` refreshes the clone the
   first one made.
 
