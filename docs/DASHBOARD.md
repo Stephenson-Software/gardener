@@ -104,8 +104,14 @@ default strategy an API consumer read `0` all night and would reasonably take
 it for "cycle just started". It is now `overnight_cycle`
 (`garden_size`/`attempted`/`next_index`/`strategy`) alongside
 `overnight_run` (`budget_hours`/`started_at`/`elapsed_seconds`/
-`remaining_seconds`/`strategy`/`garden_size_at_start`/`log`), and
-`PAYLOAD_SCHEMA` was bumped with the rename. The two garden sizes are named
+`remaining_seconds`/`finished`/`strategy`/`garden_size_at_start`/`log`), and
+`PAYLOAD_SCHEMA` was bumped with the rename. Once the run has ended (its
+`overnight done`/`aborting` line is in the log, or the log has gone quiet
+past the active-log window), `finished` is true, `elapsed_seconds` stops at
+the log's last write and `remaining_seconds` is null, and the page says
+"finished in 7m". Before 0.4.7 a 7-minute run read "12h elapsed · budget
+spent" for the rest of the day. The live view's time bar follows the same
+rule. The two garden sizes are named
 apart on purpose: `overnight_cycle.garden_size` is the garden as it is now,
 `overnight_run.garden_size_at_start` is what the running invocation saw when
 it began, and a repo added mid-run makes them legitimately disagree.

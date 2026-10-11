@@ -394,6 +394,17 @@ class TestBuildLive(unittest.TestCase):
         self.assertEqual(d["limit"]["live_hit"]["repo"], "o/z")
         self.assertEqual(d["alerts"][0]["level"], "error")
 
+    def test_a_finished_run_is_timed_to_its_last_write_not_to_now(self):
+        """A 7-minute run read "8h 00m in" for the rest of the day."""
+        self._write_log(extra=["gardener: overnight done — 1 repo(s) attempted in 7.4m — 0 PR(s) opened"])
+        (self.base / "sessions").mkdir()  # registry exists, nothing running
+        finished_at = self.started + timedelta(minutes=7)
+        os.utime(self.log, (finished_at.timestamp(), finished_at.timestamp()))
+        later = live.build_live(state_dir=self.base, now=self.now + timedelta(hours=11),
+                                cache=live.TranscriptCache())["run"]
+        self.assertFalse(later["alive"])
+        self.assertAlmostEqual(later["elapsed_seconds"], 7 * 60, delta=2)
+
     def test_a_log_without_a_live_session_reads_as_stopped(self):
         self._write_log()
         (self.base / "sessions").mkdir()  # registry exists, nothing running

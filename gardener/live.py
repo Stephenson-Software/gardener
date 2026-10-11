@@ -680,7 +680,10 @@ def build_live(
                 (now - mtime).total_seconds() < dashboard.ACTIVE_LOG_WINDOW_SECONDS
             )
         budget_hours = start["budget_hours"] if start else None
-        elapsed = (now - began).total_seconds() if began else None
+        # A run that is over is timed to its log's last write, not to now
+        # (it read "8h 00m in" all day after a 7-minute run).
+        stop = now if alive or mtime is None else mtime
+        elapsed = max(0.0, (stop - began).total_seconds()) if began else None
         ends_at = began + timedelta(hours=budget_hours) if began and budget_hours else None
         batch_progress = dashboard.parse_batch_progress(lines)
         batch, batch_lines = current_batch_lines(lines)

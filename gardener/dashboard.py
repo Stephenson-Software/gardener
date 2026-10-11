@@ -566,7 +566,18 @@ def progress_from_logs(
                 "log": str(path),
             }
             began = log_started_at(path)
-            elapsed = max(0.0, time.time() - began) if began is not None else None
+            # A run that has ended (its `overnight done`/`aborting` line is
+            # written, or its log has gone quiet past the active window) is
+            # timed to its last write, not to now: otherwise a 7-minute run
+            # read "12h elapsed · budget spent" for the rest of the day.
+            try:
+                last_write = path.stat().st_mtime
+            except OSError:
+                last_write = None
+            ended = _run_has_ended(lines_by_log.get(path) or [], last_write)
+            stop = last_write if ended and last_write is not None else time.time()
+            elapsed = max(0.0, stop - began) if began is not None else None
+            overnight_run["finished"] = ended
             overnight_run["started_at"] = (
                 datetime.fromtimestamp(began).isoformat() if began is not None else None
             )
@@ -576,11 +587,25 @@ def progress_from_logs(
             overnight_run["elapsed_seconds"] = None if elapsed is None else round(elapsed)
             overnight_run["remaining_seconds"] = (
                 round(max(0.0, started["budget_hours"] * 3600 - elapsed))
-                if elapsed is not None
+                if elapsed is not None and not ended
                 else None
             )
             break
     return in_progress, batch, overnight_run
+
+
+RUN_ENDED_RE = re.compile(r"^gardener: overnight (?:done|aborting) — ")
+
+
+def _run_has_ended(lines: list[str], last_write: Optional[float], now: Optional[float] = None) -> bool:
+    """Whether the overnight run behind a log is over: its closing line is
+    in `lines` (the log's tail), or the log has not been written for longer
+    than `ACTIVE_LOG_WINDOW_SECONDS` (a run killed before it could say so)."""
+    if any(RUN_ENDED_RE.match(line) for line in lines):
+        return True
+    if last_write is None:
+        return False
+    return (now if now is not None else time.time()) - last_write > ACTIVE_LOG_WINDOW_SECONDS
 
 
 PAYLOAD_SCHEMA = 4
@@ -2538,7 +2563,9 @@ function budgetHtml(run) {
   if (!run) return "";
   const budgetMs = run.budget_hours * 3600 * 1000;
   const parts = [`budget ${fmtDur(budgetMs)}`];
-  if (run.elapsed_seconds != null) {
+  if (run.elapsed_seconds != null && run.finished) {
+    parts.push(`finished in ${fmtDur(run.elapsed_seconds * 1000)}`);
+  } else if (run.elapsed_seconds != null) {
     parts.push(`${fmtDur(run.elapsed_seconds * 1000)} elapsed`);
     parts.push(run.remaining_seconds ? `${fmtDur(run.remaining_seconds * 1000)} left` : "budget spent");
   }

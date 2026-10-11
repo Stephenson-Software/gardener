@@ -679,6 +679,63 @@ class TestBuildStatus(unittest.TestCase):
         self.assertAlmostEqual(run["elapsed_seconds"], 3600, delta=60)
         self.assertAlmostEqual(run["remaining_seconds"], 5 * 3600, delta=60)
 
+    def test_a_finished_run_is_timed_to_its_last_write_not_to_now(self):
+        """A 7-minute run used to read "12h elapsed · budget spent" for the
+        rest of the day."""
+        import os
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        started = datetime.fromtimestamp(time.time() - 12 * 3600)
+        log_path = logs_dir / run_log.log_file_name("overnight", started)
+        log_path.write_text(
+            "gardener: overnight starting — 184 repo(s) in garden, "
+            "strategy=random, budget=8.0h, 183 repo(s) already attempted this cycle\n"
+            "gardener: overnight done — 1 repo(s) attempted in 7.4m — 1 PR(s) opened, 0 merged\n"
+        )
+        finished = started.timestamp() + 7 * 60
+        os.utime(log_path, (finished, finished))
+
+        run = dashboard.build_status(state_dir=self.state_dir)["overnight_run"]
+        self.assertTrue(run["finished"])
+        self.assertAlmostEqual(run["elapsed_seconds"], 7 * 60, delta=2)
+        self.assertIsNone(run["remaining_seconds"])
+
+    def test_a_killed_run_is_finished_once_its_log_goes_quiet(self):
+        import os
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        started = datetime.fromtimestamp(time.time() - 5 * 3600)
+        log_path = logs_dir / run_log.log_file_name("overnight", started)
+        log_path.write_text(
+            "gardener: overnight starting — 3 repo(s) in garden, "
+            "strategy=round-robin, budget=8.0h, resuming at index 0 (owner/a)\n"
+        )
+        last = started.timestamp() + 3600
+        os.utime(log_path, (last, last))
+
+        run = dashboard.build_status(state_dir=self.state_dir)["overnight_run"]
+        self.assertTrue(run["finished"])
+        self.assertAlmostEqual(run["elapsed_seconds"], 3600, delta=2)
+
+    def test_a_running_overnight_is_not_finished(self):
+        import time
+
+        logs_dir = self.state_dir / "logs"
+        logs_dir.mkdir()
+        started = datetime.fromtimestamp(time.time() - 600)
+        log_path = logs_dir / run_log.log_file_name("overnight", started)
+        log_path.write_text(
+            "gardener: overnight starting — 3 repo(s) in garden, "
+            "strategy=round-robin, budget=1.0h, resuming at index 0 (owner/a)\n"
+        )
+        run = dashboard.build_status(state_dir=self.state_dir)["overnight_run"]
+        self.assertFalse(run["finished"])
+        self.assertAlmostEqual(run["elapsed_seconds"], 600, delta=60)
+
     def test_elapsed_past_the_budget_clamps_at_zero_remaining(self):
         import time
 
