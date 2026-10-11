@@ -274,6 +274,9 @@ record what you actually observed before changing the docstring's claims.
     `permission_denials` is empty or only contains attempts that were
     correctly out of scope, and confirm the run did not hang — it should
     return well inside `TEND_DEFAULT_TIMEOUT_SECONDS`.
+  - The live tier `integration/test_live_merge_and_overnight.py` automates
+    the `tend --allow-merge` and concurrent `overnight` checks below against
+    throwaway repositories (`docs/INTEGRATION_TESTS.md`); prefer it.
   - `tend --allow-merge`: only run this against a repo you've deliberately
     added to the merge allow-list yourself as part of the test
     (`gardener allowlist add`), and only if you're confident merging

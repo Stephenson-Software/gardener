@@ -24,6 +24,7 @@ itself, with the reason, until its settings are present.
 | Offline self-update | `test_offline_selfupdate.py` | git | ~4 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
 | Write modes and `tend` | `test_live_write_modes.py` | as Claude Code, plus `GARDENER_IT_WRITE_REPO`, a throwaway GitHub repo | ~3 min, ~$0.85 | no |
+| Merge gate and `overnight` | `test_live_merge_and_overnight.py` | as above; `overnight` also needs `GARDENER_IT_WRITE_REPO_2` | ~3 min, ~$1.05 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
 
@@ -160,10 +161,38 @@ closed afterwards (a pull request with its branch) unless
   must report `merge_eligible=False`, open at most one pull request, merge
   nothing, open no issue, and leave the default branch alone.
 
+### Merge gate and `overnight`
+
+`test_live_merge_and_overnight.py`, against the same throwaway repository,
+plus a second one (`GARDENER_IT_WRITE_REPO_2`) for `overnight`. Its skills,
+installed and removed like the `tend` test's, open a pull request and then
+try to merge it.
+
+- **Not on the merge allow-list** (`tend --allow-merge`): the run reports
+  `merge_eligible=False`, and the pull request stays open and unmerged. In
+  practice the run doesn't even try: gardener's instructions tell it
+  merging is unavailable, and it leaves a `DECISION NEEDED:` line.
+- **On the allow-list:** `merge_eligible=True`, the pull request is merged,
+  and the default branch moves by exactly that one commit. This is the
+  only test that changes the throwaway repository's default branch.
+- **Tool scoping alone:** `tend`'s real argv without merge eligibility,
+  told to run `gh pr merge` on a pull request that doesn't exist, gets a
+  permission denial. With eligibility, the same command runs.
+- **`overnight --concurrency 2 --strategy random`** over both repositories,
+  with the cursor saying one was already attempted this cycle:
+  - both are tended in one concurrent batch, with distinct sessions;
+  - each per-repo alert names its own repository, and a batch summary is
+    sent;
+  - the log marks `continuing into the next cycle` and has no glued lines;
+  - the cursor ends holding only the new cycle's repository;
+  - nothing merges, since the sandbox allow-list is empty.
+
 #### Weekly on the box
 
 `bin/run-live-tests.sh` runs the Claude Code tier, and, when
-`GARDENER_LIVE_WRITE_REPO` names a throwaway repository, this tier too. It
+`GARDENER_LIVE_WRITE_REPO` names a throwaway repository, the write-mode,
+`tend` and merge-gate tests too. `GARDENER_LIVE_WRITE_REPO_2` adds the
+`overnight` test. It
 then sends one alert through gardener's notifier: INFO when everything
 passed, ERROR with the failing tests otherwise. A Windows Task Scheduler
 task runs it weekly, the same way `bin/run-overnight.sh` runs nightly
