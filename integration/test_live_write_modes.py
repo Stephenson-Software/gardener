@@ -20,12 +20,20 @@ What each run must and must not do:
   public. An earlier prompt asked for the docs "by URL", and a private
   repo's name reached public pull requests and issues.
 
+`tend` (no `--allow-merge`) runs that repository's dev-loop skill. The test
+installs a small, deterministic one as
+`~/.claude/commands/<slug>-dev-loop.md` (`claude` reads skills from the
+real HOME, which holds its login), refuses to run if a skill of that name
+already exists, and removes it afterwards. The run must open at most one
+pull request, merge nothing, and leave the default branch alone.
+
 What a run opened is closed afterwards (a pull request with its branch),
 unless `GARDENER_IT_KEEP=1`.
 """
 import json
 import subprocess
 import unittest
+from pathlib import Path
 
 from integration.support import IntegrationCase, Sandbox, env_setting, live_conventions_url
 
@@ -127,6 +135,62 @@ class LiveWriteModes(IntegrationCase):
         self.assertConventionsNotNamed(issue["title"], issue["body"])
         print(f"\n[file-issue] {issue['url']}: {issue['title']}; "
               f"cost ${r.run['cost_usd']}, {r.seconds:.0f} s")
+
+
+TEND_SKILL = """# /{slug}
+
+A stand-in dev loop for gardener's live `tend` test. Do exactly this, then stop:
+
+1. Create a branch named `feature/dev-loop-cycle-<UTC timestamp, digits only>`
+   from the default branch.
+2. Append one line to `CHANGELOG.md` (create it with a `# Changelog` heading
+   if it is missing): `- <today's date, YYYY-MM-DD>: dev-loop cycle run by gardener tend`.
+3. Commit with the message `Record a dev-loop cycle in the changelog`.
+4. Push the branch and open one pull request for it, in passive voice, ending
+   with a line saying it was drafted during a Gardener session.
+5. Do not merge it, do not push to the default branch, and do not open an issue.
+"""
+
+
+@unittest.skipUnless(ENABLED and WRITE_REPO,
+                     "set GARDENER_IT_CLAUDE=1 and GARDENER_IT_WRITE_REPO=<a throwaway owner/repo> "
+                     "to run the (paid, GitHub-writing) tend test")
+class LiveTend(LiveWriteModes):
+    def install_skill(self) -> None:
+        from gardener import dev_loop
+
+        slug = f"{dev_loop.slugify_repo_name(WRITE_REPO)}-dev-loop"
+        path = Path.home() / ".claude" / "commands" / f"{slug}.md"
+        if path.exists() or path.is_symlink():
+            self.skipTest(f"{path} already exists; not overwriting a real skill")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(TEND_SKILL.format(slug=slug))
+        self.addCleanup(path.unlink, True)
+
+    def test_tend_without_allow_merge_opens_at_most_one_unmerged_pull_request(self):
+        self.install_skill()
+        box = self.box()
+        before = self.snapshot()
+        r = box.cli("tend", "--repo", WRITE_REPO, timeout=1800)
+        after = self.snapshot()
+        new_prs = sorted(after["prs"] - before["prs"])
+        for number in new_prs:
+            self.close_later("pr", number)
+        self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+        run = box.runs()[-1]
+        self.assertEqual(run["mode"], "tend")
+        self.assertIn("merge_eligible=False", r.stderr)
+        self.assertLessEqual(len(new_prs), 1, f"tend opened {new_prs}")
+        for number in new_prs:
+            pr = gh_json("pr", "view", str(number), "--repo", WRITE_REPO, "--json", "state,mergedAt,url")
+            self.assertIsNone(pr["mergedAt"], "tend merged without --allow-merge")
+            print(f"\n[tend] {pr['url']}; cost ${run['cost_usd']}")
+        self.assertEqual(after["sha"], before["sha"], "the default branch moved")
+        self.assertEqual(after["issues"] - before["issues"], set(), "tend opened an issue")
+
+    # The write-mode tests are inherited only to share helpers.
+    test_implement_opens_one_unmerged_pull_request = None
+    test_file_issue_opens_one_issue_and_changes_nothing = None
 
 
 if __name__ == "__main__":
