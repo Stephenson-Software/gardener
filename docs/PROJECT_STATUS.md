@@ -1,5 +1,14 @@
 # Project Status
 
+**0.4.5 (2026-10-11):** `align --implement` and `--file-issue` no longer
+name the conventions repo in what they post. The `--implement` prompt asked
+for the conventions docs to be cited "by URL", and neither prompt said to
+keep the repo out of pull requests and issues, which may be public while
+the conventions repo is private. Both write modes were also run for real
+for the first time, and are now a live integration tier.
+
+Record: [verification/0.4.5.md](verification/0.4.5.md).
+
 **0.4.4 (2026-10-11):** an `overnight` run under `random` or `issue-count`
 that starts near the end of a cycle now carries on into the next cycle
 instead of stopping once the cycle's leftovers are done. Before, about one
@@ -68,9 +77,11 @@ Working end to end: built, unit-tested, and verified with one real
 report-only run against `dmccoystephenson/create-dev-loop` (29 gaps found,
 target repo confirmed untouched afterward — see
 [Manual/end-to-end verification](TESTING.md#manualend-to-end-verification)).
-`--implement` and `--file-issue` are implemented and unit-tested at the
-argv-construction level but have not yet been run for real against a live
-repo — only report-only mode has been exercised end to end so far.
+`--implement` and `--file-issue` were first run for real on 2026-10-11,
+against a private throwaway repo, and are now a live integration tier
+(`integration/test_live_write_modes.py`; record:
+[verification/0.4.5.md](verification/0.4.5.md)). Each opened exactly one
+pull request or issue, never merged, and left the default branch alone.
 
 `tend` (no `--allow-merge`) has also been run for real, end to end,
 against `dmccoystephenson/example-repo` (2026-07-18): no
