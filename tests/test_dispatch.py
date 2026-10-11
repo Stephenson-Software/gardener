@@ -647,6 +647,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 import os
+import signal
 import time
 import sys
 import tempfile
@@ -884,6 +885,128 @@ class TestClaudeTimeoutKillsProcessTree(unittest.TestCase):
         while time.monotonic() < deadline and _pid_alive(grandchild):
             time.sleep(0.1)
         self.assertFalse(_pid_alive(grandchild), "claude's child outlived the timeout")
+
+
+_GUARD_DRIVER = """
+import concurrent.futures, signal, sys
+sys.path.insert(0, {root!r})
+from gardener import dispatch
+
+if {ignore_hup!r}:
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+agent = [sys.executable, {agent!r}]
+with dispatch.agent_signal_guard():
+    # Like `overnight --concurrency 2`: agents on worker threads, the main
+    # thread blocked waiting for them.
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(dispatch._run_in_process_group, agent + [str(i)], timeout=600)
+                   for i in range(2)]
+        for future in futures:
+            future.result()
+"""
+
+_GUARD_AGENT = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+open({pid_dir!r} + "/child-" + sys.argv[1], "w").write(str(child.pid))
+time.sleep(600)
+"""
+
+
+class TestAgentSignalGuard(unittest.TestCase):
+    """A signal that stops gardener must take its running agents down too:
+    each agent runs in its own session, so neither a terminal's Ctrl-C nor
+    a SIGTERM to gardener alone reaches it, and an `overnight` worker thread
+    never sees the main thread's KeyboardInterrupt. Real processes, never
+    `claude`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        for f in self.tmp.glob("child-*"):
+            try:
+                os.kill(int(f.read_text()), 9)
+            except (ProcessLookupError, ValueError):
+                pass
+        self._tmp.cleanup()
+
+    def _start(self, ignore_hup=False):
+        agent = self.tmp / "agent.py"
+        agent.write_text(_GUARD_AGENT.format(pid_dir=str(self.tmp)))
+        driver = self.tmp / "driver.py"
+        root = str(Path(dispatch.__file__).resolve().parents[1])
+        driver.write_text(_GUARD_DRIVER.format(root=root, agent=str(agent), ignore_hup=ignore_hup))
+        proc = subprocess.Popen([sys.executable, str(driver)], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(list(self.tmp.glob("child-*"))) < 2:
+            time.sleep(0.1)
+        children = [int(f.read_text()) for f in sorted(self.tmp.glob("child-*"))]
+        self.assertEqual(len(children), 2, "agents never started")
+        return proc, children
+
+    def _assert_dead(self, pids):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and any(_pid_alive(p) for p in pids):
+            time.sleep(0.1)
+        self.assertFalse(any(_pid_alive(p) for p in pids), "an agent's child outlived gardener")
+
+    def test_sigterm_kills_agents_on_worker_threads(self):
+        proc, children = self._start()
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=20), -signal.SIGTERM)
+        self._assert_dead(children)
+
+    def test_sigint_kills_agents_then_interrupts(self):
+        proc, children = self._start()
+        proc.send_signal(signal.SIGINT)
+        self.assertNotEqual(proc.wait(timeout=20), 0)
+        self._assert_dead(children)
+
+    def test_sighup_kills_agents(self):
+        proc, children = self._start()
+        proc.send_signal(signal.SIGHUP)
+        self.assertEqual(proc.wait(timeout=20), -signal.SIGHUP)
+        self._assert_dead(children)
+
+    def test_an_ignored_signal_stays_ignored(self):
+        """Under `nohup`, SIGHUP is ignored; the guard must not turn it into
+        a kill of every agent."""
+        proc, children = self._start(ignore_hup=True)
+        proc.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        self.assertIsNone(proc.poll(), "an ignored SIGHUP stopped gardener")
+        self.assertTrue(all(_pid_alive(p) for p in children), "an ignored SIGHUP killed an agent")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+        self._assert_dead(children)
+
+    def test_previous_handlers_are_restored(self):
+        before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        with dispatch.agent_signal_guard():
+            self.assertIsNot(signal.getsignal(signal.SIGTERM), before[signal.SIGTERM])
+        self.assertEqual({s: signal.getsignal(s) for s in before}, before)
+
+    def test_off_the_main_thread_it_does_nothing(self):
+        import threading
+
+        before = signal.getsignal(signal.SIGTERM)
+        seen = []
+
+        def worker():
+            with dispatch.agent_signal_guard():
+                seen.append(signal.getsignal(signal.SIGTERM))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        self.assertEqual(seen, [before])
+
+    def test_finished_agents_are_not_tracked(self):
+        dispatch._run_in_process_group([sys.executable, "-c", "pass"], timeout=30)
+        self.assertEqual(dispatch.kill_active_agents(), 0)
 
 
 class TestRunCommandAgent(unittest.TestCase):

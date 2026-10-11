@@ -47,6 +47,8 @@ process boundary:
   no `bypassPermissions` or `--dangerously-skip-permissions` in any mode.
 - **Timeouts kill the whole tree:** on both harnesses, a child the agent
   started dies with it when gardener's timeout fires.
+- **Signals reach the agent:** a SIGTERM or Ctrl-C to `gardener align`
+  kills the running agent too, though it runs in its own session.
 
 ### Claude Code
 

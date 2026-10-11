@@ -280,6 +280,18 @@ class Sandbox:
             pushed_at_before=before, pushed_at_after=after, sandbox=self,
         )
 
+    def start_align(self, *args: str, conventions_url: str | None = None) -> subprocess.Popen:
+        """`align` started in the background, for tests that signal gardener
+        mid-run. The caller waits on and reaps the process."""
+        argv = [sys.executable, "-m", "gardener", "align", "--repo", self.repo,
+                "--conventions-repo", conventions_url or self.conventions(), *args]
+        if self.offline:
+            argv.append("--no-refresh-target")
+            if not self.clone_path().exists():
+                self.seed_target()
+        return subprocess.Popen(argv, cwd=str(self.root), env=self.env(), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def _records(self) -> list[dict]:
         return [json.loads(p.read_text()) for p in sorted(self.records.glob("*.json"))]
 

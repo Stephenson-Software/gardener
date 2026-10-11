@@ -102,6 +102,30 @@ class CommandHarnessContract(IntegrationCase):
             time.sleep(0.1)
         self.assertFalse(pid_alive(child), "the harness's child outlived gardener's timeout")
 
+    def test_signals_to_gardener_kill_the_agent(self):
+        """The agent runs in its own session, so a Ctrl-C at the terminal or
+        a SIGTERM to gardener alone never reaches it directly; gardener must
+        take it down on the way out."""
+        import signal
+
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                box = Sandbox(self)
+                box.stub_harness("sleep")
+                proc = box.start_align()
+                pid_file = box.records / "sleep-child.pid"
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and not pid_file.exists():
+                    time.sleep(0.1)
+                self.assertTrue(pid_file.exists(), "the agent never started")
+                child = int(pid_file.read_text())
+                proc.send_signal(signum)
+                self.assertNotEqual(proc.wait(timeout=30), 0)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and pid_alive(child):
+                    time.sleep(0.1)
+                self.assertFalse(pid_alive(child), f"the agent outlived {signum.name} to gardener")
+
     def test_missing_command_setting_is_a_setup_error(self):
         self.box.settings["GARDENER_HARNESS"] = "command"
         r = self.box.align()

@@ -1,5 +1,14 @@
 # Project Status
 
+**0.4.2 (2026-10-11):** stopping gardener with a signal (Ctrl-C, or SIGTERM
+or SIGHUP to gardener alone) now kills its running agents too. 0.4.1 started
+running each agent in its own session, which those signals don't reach; on
+`overnight --concurrency` worker threads, even Ctrl-C left the agents
+running. A signal gardener was started ignoring (SIGHUP under `nohup`) stays
+ignored.
+
+Record: [verification/0.4.2.md](verification/0.4.2.md).
+
 **0.4.1 (2026-10-11):** two timeout and failure-reporting fixes, both found
 by the new integration suite (`integration/`,
 [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md)):
