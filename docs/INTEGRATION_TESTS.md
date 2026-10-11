@@ -171,6 +171,10 @@ checkouts skip these:
   `E_AGENT_CHILD_DISCONNECTED` (Orket#7). This needs
   `GARDENER_IT_ORKET_LARGE_ENV`.
 
+**Orket 0.8.5+:** a delivery refused because the target changed during the
+run still names the retained run (`session_id`) and gives the exact `orket
+agent inspect` command, and that inspection works.
+
 ## Shared settings
 
 | Setting | Meaning |

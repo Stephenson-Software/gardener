@@ -616,6 +616,8 @@ Code regression check and the `command` harness.
 first real runs and Orket 0.8.2 through gardener.
 [orket-0.8.4](verification/orket-0.8.4.md) rechecks Orket 0.8.4's fixes for
 the issues those runs filed.
+[orket-0.8.8](verification/orket-0.8.8.md) rechecks Orket 0.8.5–0.8.8, its
+answers to the field report.
 [integration-observability](verification/integration-observability.md)
 covers alerts, usage reporting, the dashboard, the hub and doctor end to end.
 
