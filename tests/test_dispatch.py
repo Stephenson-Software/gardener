@@ -1,6 +1,6 @@
 """dispatch.py's job is entirely about *what argv gets built* and *how the
 result is interpreted* — never actually invoke `claude` here, mock
-subprocess.run instead."""
+`_run_in_process_group` (the one call `claude` goes through) instead."""
 import json
 import subprocess
 import unittest
@@ -251,7 +251,7 @@ def _fake_completed(stdout_obj, returncode=0):
 
 class TestRunClaude(unittest.TestCase):
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_successful_run_parses_json_result(self, mock_run, _which):
         mock_run.return_value = _fake_completed({
             "result": "## Gap checklist\nGARDENER_SUMMARY: 2 gaps found",
@@ -268,7 +268,7 @@ class TestRunClaude(unittest.TestCase):
         self.assertEqual(result.permission_denials, [])
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_is_error_flag_makes_result_not_ok(self, mock_run, _which):
         mock_run.return_value = _fake_completed({
             "result": "something went wrong",
@@ -279,7 +279,7 @@ class TestRunClaude(unittest.TestCase):
         self.assertTrue(result.is_error)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_permission_denials_surfaced_in_result(self, mock_run, _which):
         mock_run.return_value = _fake_completed({
             "result": "done",
@@ -291,7 +291,7 @@ class TestRunClaude(unittest.TestCase):
         self.assertEqual(result.permission_denials[0]["tool_name"], "Bash")
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_unparseable_stdout_is_reported_as_not_ok(self, mock_run, _which):
         mock_run.return_value = subprocess.CompletedProcess(
             args=["claude"], returncode=0, stdout="not json", stderr=""
@@ -300,7 +300,7 @@ class TestRunClaude(unittest.TestCase):
         self.assertFalse(result.ok)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
+    @patch("gardener.dispatch._run_in_process_group", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
     def test_timeout_is_reported_not_raised(self, _mock_run, _which):
         result = run_claude(Mode.REPORT, "prompt", Path("/tmp"), timeout=5)
         self.assertFalse(result.ok)
@@ -312,12 +312,12 @@ class TestRunClaude(unittest.TestCase):
             run_claude(Mode.REPORT, "prompt", Path("/tmp"))
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     @patch("gardener.dispatch.start_transcript_watcher")
-    def test_starts_transcript_watcher_with_the_dispatch_cwd_before_subprocess_run(
+    def test_starts_transcript_watcher_with_the_dispatch_cwd_before_the_dispatch_call(
         self, mock_watcher, mock_run, _which
     ):
-        # The watcher must be started before subprocess.run blocks, with the
+        # The watcher must be started before the dispatch call blocks, with the
         # same cwd the dispatch itself uses — see transcript.py and
         # dispatch.py's "Live transcript visibility" docstring section. This
         # never touches a real filesystem or thread: start_transcript_watcher
@@ -331,7 +331,7 @@ class TestRunClaude(unittest.TestCase):
         self.assertIn("after", kwargs)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
+    @patch("gardener.dispatch._run_in_process_group", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
     @patch("gardener.dispatch.start_transcript_watcher")
     def test_transcript_watcher_still_started_even_on_timeout(self, mock_watcher, _mock_run, _which):
         # The watcher is started unconditionally before the blocking call —
@@ -496,7 +496,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         )
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_usage_limit_is_flagged_blocked_but_never_retried(self, mock_run, _which):
         """A usage window resets at a wall-clock hour that is routinely
         hours out, so the in-process backoff cannot outlast it — retrying
@@ -513,7 +513,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertFalse(result.auth_failed)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_auth_failure_is_also_flagged_blocked(self, mock_run, _which):
         mock_run.return_value = self._auth_failure()
         result = run_claude(
@@ -523,7 +523,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertTrue(result.blocked)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_an_ordinary_failure_is_not_blocked(self, mock_run, _which):
         mock_run.return_value = _fake_completed(
             {"result": "tests failed: 3 assertions", "is_error": True}, returncode=1,
@@ -535,7 +535,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertFalse(result.blocked)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_auth_failure_is_flagged_on_the_result(self, mock_run, _which):
         mock_run.return_value = self._auth_failure()
         result = run_claude(
@@ -546,7 +546,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertFalse(result.ok)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_retries_until_backoff_is_exhausted_then_gives_up(self, mock_run, _which):
         mock_run.return_value = self._auth_failure()
         result = run_claude(
@@ -559,7 +559,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertTrue(result.auth_failed)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_stops_retrying_as_soon_as_auth_recovers(self, mock_run, _which):
         mock_run.side_effect = [
             self._auth_failure(),
@@ -576,7 +576,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertFalse(result.auth_failed)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_ordinary_failure_is_never_retried(self, mock_run, _which):
         # The important half of the policy: a tend cycle that genuinely
         # failed has already mutated its branch, so a blind second run is
@@ -593,7 +593,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertFalse(result.auth_failed)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
+    @patch("gardener.dispatch._run_in_process_group", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5))
     def test_timeout_is_not_treated_as_an_auth_failure(self, mock_run, _which):
         result = run_claude(
             Mode.REPORT, "prompt", Path("/tmp"), timeout=5,
@@ -604,7 +604,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 1)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_successful_run_quoting_an_auth_string_is_not_an_auth_failure(self, mock_run, _which):
         # A repo whose own code or docs mention these strings must not have
         # its successful tend reclassified — hence the `not ok` guard.
@@ -621,7 +621,7 @@ class TestAuthFailureRetry(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 1)
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
-    @patch("gardener.dispatch.subprocess.run")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_auth_failure_detected_without_a_json_envelope(self, mock_run, _which):
         # claude dying before it emits any JSON — the message is only on
         # stderr in that case, which is still an auth failure.
@@ -851,6 +851,39 @@ def _pid_alive(pid: int) -> bool:
             return f.read().split(") ", 1)[1][0] != "Z"
     except (FileNotFoundError, ProcessLookupError, IndexError):
         return False
+
+
+class TestClaudeTimeoutKillsProcessTree(unittest.TestCase):
+    """gardener#187: a timed-out `claude` dispatch must take what `claude`
+    started (a tend's builds and test runs) down with it. A fake `claude`
+    script stands in for the real one; nothing here invokes `claude`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @patch("gardener.dispatch.start_transcript_watcher")
+    def test_timeout_kills_claudes_children(self, _watcher):
+        pid_file = self.tmp / "grandchild.pid"
+        fake = self.tmp / "fake-claude"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(600)\n"
+        )
+        fake.chmod(0o755)
+        result = run_claude(Mode.REPORT, "prompt", self.tmp, timeout=3, claude_bin=str(fake))
+        self.assertTrue(result.timed_out)
+        grandchild = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _pid_alive(grandchild):
+            time.sleep(0.1)
+        self.assertFalse(_pid_alive(grandchild), "claude's child outlived the timeout")
 
 
 class TestRunCommandAgent(unittest.TestCase):

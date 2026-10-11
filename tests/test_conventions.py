@@ -1,7 +1,7 @@
 """conventions.py backs `gardener align`'s entire conventions checkout/
 validation step but had zero test coverage (issue #8). `_run_git`/
 `ensure_conventions` are mocked at the subprocess boundary the same way
-test_dispatch.py mocks `gardener.dispatch.subprocess.run` — no real git
+test_dispatch.py mocks `gardener.dispatch._run_in_process_group` — no real git
 process is ever invoked here.
 
 Every test that reaches `ensure_conventions` passes an explicit `url=`, so

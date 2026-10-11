@@ -27,7 +27,8 @@ on `sys.path`, and `gardener/` is a flat package at the repo root — so it
 discovers and runs the same tests. CI keeps the prefixed form.
 
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
-`subprocess.run` and never actually invokes `claude`. It covers both halves
+`_run_in_process_group` (the one call `claude` goes through) and never
+actually invokes `claude`. It covers both halves
 of the `bypassPermissions` posture, which are separate things: that no
 entry in `MODE_SPECS` configures a forbidden or unrecognized permission
 mode (the *table*), and that `_build_invocation` actually raises
@@ -538,7 +539,9 @@ mode and spec in the environment, plain-text and JSON stdout are both
 parsed, a report run that edits or commits in the clone is failed with a
 `failure_reason` naming why (and an ordinary failure has none), a timeout
 kills the agent's whole process tree rather than orphaning its children
-(`_run_in_process_group`; the test checks a grandchild's pid), every
+(`_run_in_process_group`; the test checks a grandchild's pid, and
+`TestClaudeTimeoutKillsProcessTree` checks the same through a fake `claude`
+script, since `claude` goes through that helper too), every
 write mode is refused without `GARDENER_HARNESS_ALLOW_UNSCOPED` (and the
 opt-in is per mode), a harness's own `"blocked": true` stops a batch, `tend`'s
 `merge_allowed` follows `tend_mode_spec()`, `bypassPermissions` is refused
@@ -595,6 +598,7 @@ Then confirm `gardener tend` and `gardener overnight` refuse with the
 `GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
 
 The record of the real runs behind a release lives in `docs/verification/`.
+[0.4.1](verification/0.4.1.md) covers the timeout process-tree fix on both harnesses;
 [0.4.0](verification/0.4.0.md) covers the conventions subdirectory;
 [0.3.0](verification/0.3.0.md) covers the harness layer, both the Claude
 Code regression check and the `command` harness.

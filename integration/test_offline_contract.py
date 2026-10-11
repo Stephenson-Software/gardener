@@ -230,6 +230,20 @@ class ClaudeCodeHarnessArgv(IntegrationCase):
         self.assertEqual(r.run["outcome"], "report")
         self.assertEqual(r.run["cost_usd"], 0.01)
 
+    def test_timeout_kills_claudes_children(self):
+        box = Sandbox(self)
+        box.settings["GARDENER_CLAUDE_BIN"] = box.fake_claude()
+        box.settings["GARDENER_ALIGN_TIMEOUT"] = "3"
+        box.extra_env["GARDENER_IT_CLAUDE_BEHAVIOUR"] = "sleep"
+        r = box.align(timeout=120)
+        self.assertEqual(r.code, 1, r.describe())
+        self.assertIn("timed out after 3s", r.stderr)
+        child = int((box.records / "sleep-child.pid").read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and pid_alive(child):
+            time.sleep(0.1)
+        self.assertFalse(pid_alive(child), "claude's child outlived gardener's timeout (gardener#187)")
+
     def test_no_mode_ever_requests_bypass(self):
         for flag in ("--implement", "--file-issue"):
             with self.subTest(flag=flag):

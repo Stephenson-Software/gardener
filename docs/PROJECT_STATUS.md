@@ -1,5 +1,15 @@
 # Project Status
 
+**0.4.1 (2026-10-11):** two timeout and failure-reporting fixes, both found
+by the new integration suite (`integration/`,
+[INTEGRATION_TESTS.md](INTEGRATION_TESTS.md)):
+- a timed-out dispatch now kills the agent's whole process tree, on both
+  harnesses, instead of leaving what it started running (gardener#187);
+- a command-harness report run that changed the clone now says why it
+  failed, instead of recording the agent's own success summary.
+
+Record: [verification/0.4.1.md](verification/0.4.1.md).
+
 **0.4.0 (2026-10-10):** `GARDENER_CONVENTIONS_SUBDIR` / `align
 --conventions-subdir` roots `align` at a compact rubric inside the
 conventions repo, for harnesses with a document budget. It was verified

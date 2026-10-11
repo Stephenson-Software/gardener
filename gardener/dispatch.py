@@ -283,9 +283,11 @@ refrain.
 
 ## Live transcript visibility
 
-`run_claude` below still dispatches via one blocking `subprocess.run` call,
-exactly as described above — that mechanism (timeout, kill-on-timeout,
-`--output-format json` capture/parsing) is untouched. The one addition is a
+`run_claude` below still dispatches via one blocking call, exactly as
+described above — that mechanism (timeout, kill-on-timeout,
+`--output-format json` capture/parsing) is untouched, except that since
+0.4.1 the call is `_run_in_process_group`, so kill-on-timeout reaches the
+processes `claude` started too (gardener#187). The one addition is a
 background daemon thread, started right before that blocking call, which
 polls briefly for the session's own live JSONL transcript file (which
 Claude Code writes for every `-p` session regardless) and prints its path
@@ -812,6 +814,44 @@ def run_claude(
     return result  # unreachable; the loop always returns
 
 
+def _run_in_process_group(argv, *, input=None, cwd=None, env=None, timeout=None, **_ignored):
+    """`subprocess.run(..., capture_output=True, text=True)` for a harness
+    command, except that on a timeout the command's whole process group is
+    killed, not just the command itself.
+
+    A harness is usually a wrapper that starts its real agent as a child
+    (Orket's Gardener wrapper starts `orket agent run`, which holds the model
+    server). `subprocess.run` kills only the direct child on a timeout, so
+    the agent kept running, orphaned, after gardener had given up on it.
+    Found by the integration suite's timeout test. `claude` itself goes
+    through here too (gardener#187): a `tend` run's builds and test runs
+    are its children. Starting the command in
+    its own session gives the tree one group id to signal. POSIX only, like
+    the rest of gardener (`sessions.py` already needs `fcntl`)."""
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=cwd, env=env, text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+    except BaseException:
+        # gardener itself is being stopped (Ctrl-C, `gardener stop`): don't
+        # leave the agent running in its own session behind us.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 def _run_claude_once(
     mode: Mode,
     prompt: str,
@@ -847,13 +887,10 @@ def _run_claude_once(
 
     start = time.monotonic()
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        # In its own process group, so a timeout also kills what `claude`
+        # started (a tend's builds and test runs), not just `claude` itself
+        # (gardener#187; see `_run_in_process_group`).
+        proc = _run_in_process_group(argv, cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired as e:
         duration_ms = int((time.monotonic() - start) * 1000)
         return DispatchResult(
@@ -1180,42 +1217,6 @@ def _tree_snapshot(cwd: Path, run_fn) -> str:
         except (OSError, subprocess.TimeoutExpired) as e:
             parts.append(f"error: {e}")
     return "\n".join(parts)
-
-
-def _run_in_process_group(argv, *, input=None, cwd=None, env=None, timeout=None, **_ignored):
-    """`subprocess.run(..., capture_output=True, text=True)` for a harness
-    command, except that on a timeout the command's whole process group is
-    killed, not just the command itself.
-
-    A harness is usually a wrapper that starts its real agent as a child
-    (Orket's Gardener wrapper starts `orket agent run`, which holds the model
-    server). `subprocess.run` kills only the direct child on a timeout, so
-    the agent kept running, orphaned, after gardener had given up on it.
-    Found by the integration suite's timeout test. Starting the command in
-    its own session gives the tree one group id to signal. POSIX only, like
-    the rest of gardener (`sessions.py` already needs `fcntl`)."""
-    proc = subprocess.Popen(
-        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=cwd, env=env, text=True, start_new_session=True,
-    )
-    try:
-        stdout, stderr = proc.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = proc.communicate()
-        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
-    except BaseException:
-        # gardener itself is being stopped (Ctrl-C, `gardener stop`): don't
-        # leave the agent running in its own session behind us.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        raise
-    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def run_command_harness(
