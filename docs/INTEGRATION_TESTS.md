@@ -23,7 +23,7 @@ itself, with the reason, until its settings are present.
 | Offline observability | `test_offline_observability.py` | git | ~7 s, free | yes |
 | Offline self-update | `test_offline_selfupdate.py` | git | ~4 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
-| Write modes | `test_live_write_modes.py` | as Claude Code, plus `GARDENER_IT_WRITE_REPO`, a throwaway GitHub repo | ~2.5 min, ~$0.60 | no |
+| Write modes and `tend` | `test_live_write_modes.py` | as Claude Code, plus `GARDENER_IT_WRITE_REPO`, a throwaway GitHub repo | ~3 min, ~$0.85 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
 
@@ -151,6 +151,31 @@ closed afterwards (a pull request with its branch) unless
   unchanged.
 - Neither puts the conventions repo's URL or name in a title, body, branch
   name or commit message.
+- `tend` (no `--allow-merge`) runs the repository's dev-loop skill. The
+  test installs a small, deterministic one: add a dated line to
+  `CHANGELOG.md` on a new branch and open a pull request. It goes in the
+  real `~/.claude/commands/<slug>-dev-loop.md`, because `claude` reads
+  skills from the HOME that holds its login. The test refuses to overwrite
+  an existing skill of that name and removes its own afterwards. The run
+  must report `merge_eligible=False`, open at most one pull request, merge
+  nothing, open no issue, and leave the default branch alone.
+
+#### Weekly on the box
+
+`bin/run-live-tests.sh` runs the Claude Code tier, and, when
+`GARDENER_LIVE_WRITE_REPO` names a throwaway repository, this tier too. It
+then sends one alert through gardener's notifier: INFO when everything
+passed, ERROR with the failing tests otherwise. A Windows Task Scheduler
+task runs it weekly, the same way `bin/run-overnight.sh` runs nightly
+(see [OVERNIGHT.md](OVERNIGHT.md#wsl2--windows-task-scheduler)):
+
+```
+wsl.exe -d <distro> -u <user> -- bash -lc "GARDENER_LIVE_WRITE_REPO=<owner/throwaway> /path/to/gardener/bin/run-live-tests.sh"
+```
+
+Logs go to `~/.local/state/gardener/logs/live-tests/`, outside the
+directory the dashboard reads, and the last 12 are kept. A run costs about
+$1.
 
 ### Any command harness
 
