@@ -245,6 +245,15 @@ record what you actually observed before changing the docstring's claims.
   re-confirm against a real dispatch the same way before updating these),
   the polling loop (`time_fn`/`sleep_fn` always injected, never a real
   sleep), and the pretty-printer's line parsing (synthetic JSONL fixtures).
+- **Integration:** `PYTHONPATH=. python3 -m unittest discover -s integration -t . -v`
+  runs the real `gardener align` CLI as a subprocess in an isolated
+  sandbox (`integration/support.py`). The offline tier uses stand-in agents
+  and a fake `gh`, and runs in CI. The live tiers (Claude Code, any
+  `command` harness, Orket) skip themselves unless configured. Unlike
+  `tests/`, a live tier really invokes `claude` or a model; that is its
+  purpose. Keep it out of `tests/`. Every sandbox must still drop ambient
+  `GARDENER_*` settings and the Discord webhook, and turn usage reporting
+  off. See `docs/INTEGRATION_TESTS.md`.
 - **Manual (required for anything touching `dispatch.py`, `dev_loop.py`, or
   a prompt template/preamble):** run a real dispatch against a low-stakes
   repo you have access to and confirm the target repo was not mutated
@@ -332,6 +341,7 @@ the commit.
 | `docs/HARNESSES.md` | The settings table matches `dispatch.py`'s `*_ENV` setting names and the defaults they fall back to, the contract's environment variables and JSON keys match `run_command_harness`/`_spec_payload`, the safety section matches what `run_command_harness`/`check_harness_ready` actually enforce, and `examples/harnesses/ollama_report_agent.py` still follows that contract |
 | `docs/ALERTING.md` | The `Notifier`/`DiscordNotifier`/`NullNotifier`/`CompositeNotifier` shape and `_notify_run`'s severity mapping still match `notify.py`/`cli.py` |
 | `docs/TESTING.md` | The per-module test-coverage description still matches what each `tests/test_*.py` file actually asserts |
+| `docs/INTEGRATION_TESTS.md` | Its tier table and per-tier lists match what each `integration/test_*.py` asserts and skips on, its settings tables match the `GARDENER_IT_*` names those files and `integration/support.py` read, and its isolation section matches what `Sandbox.env()` actually scrubs |
 | `docs/ARCHITECTURE.md` | The module tree lists every file in `gardener/` (including `repo_lock.py`) with an accurate one-line description |
 | `run_log.py` module docstring | The logs-dir path it writes to still matches the one `dashboard.py` reads from, and the `.log` filename suffix still matches `find_active_log`/`find_active_logs`' glob — `tests/test_run_log.py` guards both, so treat a failure there as the docs being wrong, not the test |
 | `dashboard.py` module docstring | The progress lines `parse_in_progress` treats as start/terminal markers are still exactly what `cli.py`'s `_dispatch_tend` prints (`tests/test_cli.py`'s `TestDispatchTendProgressMarkers` runs the real function's stderr back through the real parser, so treat a failure there as the writing and reading halves having drifted) |

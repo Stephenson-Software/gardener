@@ -302,6 +302,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -692,6 +693,12 @@ class DispatchResult:
     # unreachable GitHub (see `is_device_global_failure`). This is what
     # `cmd_overnight` aborts a batch and withholds the resume cursor on.
     blocked: bool = False
+    # Why gardener itself failed a run the agent reported as successful,
+    # e.g. a command-harness report run that changed the clone. Empty when
+    # the agent's own result explains the outcome. `cmd_align` records and
+    # prints this instead of the agent's summary, which would otherwise
+    # describe a success.
+    failure_reason: str = ""
 
 
 def _check_permission_mode(spec: ModeSpec) -> None:
@@ -1175,6 +1182,42 @@ def _tree_snapshot(cwd: Path, run_fn) -> str:
     return "\n".join(parts)
 
 
+def _run_in_process_group(argv, *, input=None, cwd=None, env=None, timeout=None, **_ignored):
+    """`subprocess.run(..., capture_output=True, text=True)` for a harness
+    command, except that on a timeout the command's whole process group is
+    killed, not just the command itself.
+
+    A harness is usually a wrapper that starts its real agent as a child
+    (Orket's Gardener wrapper starts `orket agent run`, which holds the model
+    server). `subprocess.run` kills only the direct child on a timeout, so
+    the agent kept running, orphaned, after gardener had given up on it.
+    Found by the integration suite's timeout test. Starting the command in
+    its own session gives the tree one group id to signal. POSIX only, like
+    the rest of gardener (`sessions.py` already needs `fcntl`)."""
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=cwd, env=env, text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+    except BaseException:
+        # gardener itself is being stopped (Ctrl-C, `gardener stop`): don't
+        # leave the agent running in its own session behind us.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 def run_command_harness(
     mode: Mode,
     prompt: str,
@@ -1184,7 +1227,7 @@ def run_command_harness(
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     mode_spec: Optional[ModeSpec] = None,
-    run_fn=subprocess.run,
+    run_fn=_run_in_process_group,
 ) -> DispatchResult:
     """Run one dispatch through an operator-configured command (Orket, or
     any other agent runtime). The contract — prompt on stdin, mode and spec
@@ -1267,12 +1310,14 @@ def run_command_harness(
         declared_blocked = False
 
     ok = proc.returncode == 0 and not is_error
+    failure_reason = ""
     if before is not None and _tree_snapshot(cwd, run_fn) != before:
         # The structural ceiling `--tools Read,Grep,Glob` gives report mode
         # on Claude Code doesn't exist here, so it is checked after the fact
         # instead: a report run that changed the clone is a failed run.
         ok, is_error = False, True
-        stderr += "\nreport-mode dispatch modified the target clone (HEAD or working tree changed)"
+        failure_reason = "report-mode dispatch modified the target clone (HEAD or working tree changed)"
+        stderr += f"\n{failure_reason}"
 
     return DispatchResult(
         ok=ok,
@@ -1286,6 +1331,7 @@ def run_command_harness(
         permission_denials=denials,
         is_error=is_error,
         blocked=(not ok) and (declared_blocked or is_device_global_failure(result_text, stderr)),
+        failure_reason=failure_reason,
     )
 
 

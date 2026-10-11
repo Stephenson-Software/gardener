@@ -19,3 +19,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Run tests
         run: PYTHONPATH=. python3 -m unittest discover -s tests -v
+      - name: Run integration tests (offline tier; live tiers skip themselves)
+        run: PYTHONPATH=. python3 -m unittest discover -s integration -t . -v

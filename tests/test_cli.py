@@ -1351,6 +1351,33 @@ class TestCmdAlign(unittest.TestCase):
             cmd_align(self._args())
         self.assertEqual(mock_conv.call_args.kwargs["subdir"], "compact")
 
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.run_agent")
+    @patch("gardener.cli.current_branch", return_value="main")
+    @patch("gardener.cli.clone_or_refresh_target_repo")
+    @patch("gardener.cli.conventions.ensure_conventions")
+    def test_failure_reason_replaces_the_agents_success_summary(
+        self, mock_conv, mock_clone, mock_branch, mock_run_agent, mock_default_notifier
+    ):
+        """A run gardener failed itself (a command-harness report run that
+        changed the clone) must say why, not record the agent's own
+        summary of a run it believed succeeded. Found by the integration
+        suite: the reason was only in DispatchResult.stderr, which align
+        never prints."""
+        mock_conv.return_value = SimpleNamespace(path=Path(self._tmpdir.name))
+        mock_clone.return_value = Path(self._tmpdir.name)
+        reason = "report-mode dispatch modified the target clone (HEAD or working tree changed)"
+        mock_run_agent.return_value = DispatchResult(
+            ok=False, result_text="GARDENER_SUMMARY: 0 gaps", raw_stdout="{}", stderr=reason, exit_code=0,
+            duration_ms=1, cost_usd=0, session_id="s", permission_denials=[], is_error=True,
+            failure_reason=reason,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cmd_align(self._args()), 1)
+        self.assertIn(f"gardener: failed: {reason}", stderr.getvalue())
+        self.assertEqual(state.list_runs(db_path=self.state_db)[0].gap_summary, reason)
+
     @patch("gardener.cli.conventions.ensure_conventions")
     def test_unconfigured_conventions_repo_exits_before_dispatching(self, mock_conv):
         """An unconfigured conventions repo is a setup error, not a run
