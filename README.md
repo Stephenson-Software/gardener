@@ -327,6 +327,12 @@ invoke a real `claude`/`git`/`gh` process, or mutate a real repo. See
 covers and for the manual/end-to-end verification steps required before
 trusting a change to the dispatch layer.
 
+    PYTHONPATH=. python3 -m unittest discover -s integration -t . -v
+
+runs the real CLI end to end against stand-in agents, and optionally
+against real Claude Code, any `command` harness, or Orket. See
+**[docs/INTEGRATION_TESTS.md](docs/INTEGRATION_TESTS.md)**.
+
 ## Safety model
 
 gardener never invokes `claude` with `bypassPermissions` or any equivalent

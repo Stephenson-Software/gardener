@@ -1,0 +1,12 @@
+# Example rows for `python -m integration.matrix`. Copy and edit.
+#
+# Harness definitions: `harness NAME = COMMAND...` (claude is built in).
+# Use absolute paths: the command runs inside the target clone.
+harness orket = /path/to/orket-venv/bin/python /path/to/Orket/examples/gardener_harness/gardener_harness.py
+harness ollama = python3 /path/to/gardener/examples/harnesses/ollama_report_agent.py
+#
+# NAME  HARNESS  MODEL  CONVENTIONS  [SUBDIR]  [KEY=VALUE ...]
+# CONVENTIONS is `fixture` (integration/fixtures/conventions) or a Git URL.
+claude-baseline  claude  -            fixture
+ollama-3b        ollama  llama3.2:3b  fixture  -  OLLAMA_NUM_CTX=16384
+orket-3b         orket   llama3.2:3b  fixture  -  ORKET_GARDENER_PROVIDER=ollama ORKET_GARDENER_PROVIDER_BASE_URL=http://127.0.0.1:11434 ORKET_GARDENER_CATALOG=/path/to/extensions_catalog.json

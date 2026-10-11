@@ -189,10 +189,24 @@ ORKET_GARDENER_PROVIDER_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp, the def
 
 It reads only committed Git content. **Both the target clone and the
 conventions repo must be clean.** It also includes every tracked file of each
-extra directory, within a 64 KiB document budget, so a large conventions
-repo is refused before the model runs. Point `align` at a compact variant
-of the rubric with `GARDENER_CONVENTIONS_SUBDIR` (see the README's "Compact
-conventions"). Its own README has the full limits.
+extra directory. With its default limits (16 KiB per file, 64 KiB in all,
+8,192 input tokens), a large conventions repo is refused before the model
+runs, not truncated. Either point `align` at a compact variant of the rubric
+with `GARDENER_CONVENTIONS_SUBDIR` (see the README's "Compact conventions"),
+or, since Orket 0.8.2, raise the limits. That takes both the submission
+settings (`ORKET_GARDENER_MAX_INPUT_TOKENS`, `_MAX_FILE_BYTES`,
+`_MAX_SNAPSHOT_BYTES`) and the host profile's context budget (an operator
+copy of the profile registry via `ORKET_LOCAL_PROMPT_PROFILE_REGISTRY_PATH`).
+Its own README has the details.
+
+For Ollama, set `ORKET_GARDENER_PROVIDER=ollama` and the native base URL
+(no `/v1`). Since 0.8.2 Orket sends an explicit `num_ctx` (input plus output
+budget) with truncation disabled, so a server-wide `OLLAMA_CONTEXT_LENGTH`
+is no longer needed. That needs Ollama 0.24.0 or later.
+
+The [integration suite](INTEGRATION_TESTS.md#orket) has an Orket tier.
+It checks the refusals listed above, and that a delivered report is
+governed and replayable.
 
 #### `gardener-orket-extension` (headless)
 

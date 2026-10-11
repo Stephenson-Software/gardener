@@ -647,6 +647,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 import os
+import time
 import sys
 import tempfile
 import textwrap
@@ -842,6 +843,16 @@ _ECHO_AGENT = """
 """
 
 
+def _pid_alive(pid: int) -> bool:
+    """True while `pid` exists and is not a zombie (a killed child of an
+    exited parent is reaped by init, but may briefly linger as a zombie)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().split(") ", 1)[1][0] != "Z"
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return False
+
+
 class TestRunCommandAgent(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -874,6 +885,27 @@ class TestRunCommandAgent(unittest.TestCase):
         self.assertEqual(envelope["spec"]["add_dirs"], ["/conv"])
         self.assertFalse(envelope["spec"]["merge_allowed"])
 
+    def test_timeout_kills_the_agents_whole_process_tree(self):
+        """A harness that starts its real agent as a child must not leave
+        that child running after a timeout (the integration suite found
+        orphaned agents: subprocess.run only killed the direct child)."""
+        pid_file = self.tmp / "grandchild.pid"
+        body = f"""
+            import subprocess, sys, time
+            sys.stdin.read()
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+            open({str(pid_file)!r}, "w").write(str(child.pid))
+            time.sleep(600)
+        """
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body), timeout=3)
+        self.assertTrue(result.timed_out)
+        self.assertFalse(result.ok)
+        grandchild = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _pid_alive(grandchild):
+            time.sleep(0.1)
+        self.assertFalse(_pid_alive(grandchild), "the agent's child outlived the timeout")
+
     def test_plain_text_stdout_is_the_result(self):
         body = "import sys; sys.stdin.read(); print('no gaps found')"
         result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
@@ -894,6 +926,13 @@ class TestRunCommandAgent(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.is_error)
         self.assertIn("modified the target clone", result.stderr)
+        self.assertIn("modified the target clone", result.failure_reason)
+
+    def test_ordinary_failure_has_no_failure_reason(self):
+        body = "import sys; sys.stdin.read(); sys.exit(3)"
+        result = run_command_harness(Mode.REPORT, "p", self.repo, self._config(body))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "")
 
     def test_report_run_that_commits_fails(self):
         body = """

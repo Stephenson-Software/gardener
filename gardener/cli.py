@@ -649,7 +649,10 @@ def cmd_align(args: argparse.Namespace) -> int:
         return 1
 
     outcome = "error" if not result.ok else mode.value
-    gap_summary = extract_gap_summary(result.result_text) if result.result_text else (result.stderr or "no output")
+    if result.failure_reason:
+        gap_summary = result.failure_reason
+    else:
+        gap_summary = extract_gap_summary(result.result_text) if result.result_text else (result.stderr or "no output")
 
     completed_run = state.Run(
         repo=args.repo,
@@ -672,6 +675,8 @@ def cmd_align(args: argparse.Namespace) -> int:
         f"denials={len(result.permission_denials)}, ok={result.ok}",
         file=sys.stderr,
     )
+    if result.failure_reason:
+        print(f"gardener: failed: {result.failure_reason}", file=sys.stderr)
     if result.permission_denials:
         _print_denials(result.permission_denials, "Claude")
     if result.timed_out:
