@@ -89,7 +89,7 @@ def command(behaviour: str) -> int:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         record_dir = os.environ.get("GARDENER_IT_RECORD_DIR")
         if record_dir:
-            Path(record_dir, "sleep-child.pid").write_text(str(child.pid))
+            Path(record_dir, f"sleep-child-{os.getpid()}.pid").write_text(str(child.pid))
         time.sleep(600)
     else:
         print(f"unknown stub behaviour: {behaviour}", file=sys.stderr)
@@ -105,7 +105,7 @@ def claude(args: list[str]) -> int:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         if record_dir:
             Path(record_dir).mkdir(parents=True, exist_ok=True)
-            Path(record_dir, "sleep-child.pid").write_text(str(child.pid))
+            Path(record_dir, f"sleep-child-{os.getpid()}.pid").write_text(str(child.pid))
         time.sleep(600)
     if record_dir:
         Path(record_dir).mkdir(parents=True, exist_ok=True)

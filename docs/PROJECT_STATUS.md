@@ -1,5 +1,16 @@
 # Project Status
 
+**0.4.3 (2026-10-11):** three fixes found by extending the integration
+suite to `tend`, `overnight` and session control:
+- `gardener kill` reported a session that was in the middle of exiting as
+  "still running" (exit 1), and `stop`/`kill` counted a zombie as alive;
+- concurrent `overnight` dispatches glued run-log lines together mid-line,
+  which the dashboard reads line by line;
+- the integration suite now covers `tend`, `overnight` and `ps`/`stop`/
+  `kill` offline, through a local stand-in for GitHub.
+
+Record: [verification/0.4.3.md](verification/0.4.3.md).
+
 **0.4.2 (2026-10-11):** stopping gardener with a signal (Ctrl-C, or SIGTERM
 or SIGHUP to gardener alone) now kills its running agents too. 0.4.1 started
 running each agent in its own session, which those signals don't reach; on

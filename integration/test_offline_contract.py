@@ -17,7 +17,7 @@ import sys
 import time
 import unittest
 
-from integration.support import STUB_AGENT, IntegrationCase, Sandbox, pid_alive
+from integration.support import STUB_AGENT, IntegrationCase, Sandbox, wait_dead
 
 
 class CommandHarnessContract(IntegrationCase):
@@ -96,11 +96,9 @@ class CommandHarnessContract(IntegrationCase):
         self.assertIn("timed out after 3s", r.stderr)
         self.assertLess(r.seconds, 60)
         # The harness's own child must die with it, not run on orphaned.
-        child = int((self.box.records / "sleep-child.pid").read_text())
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and pid_alive(child):
-            time.sleep(0.1)
-        self.assertFalse(pid_alive(child), "the harness's child outlived gardener's timeout")
+        children = self.box.sleeping_agents(1, wait=5)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(wait_dead(children), [], "the harness's child outlived gardener's timeout")
 
     def test_signals_to_gardener_kill_the_agent(self):
         """The agent runs in its own session, so a Ctrl-C at the terminal or
@@ -113,18 +111,11 @@ class CommandHarnessContract(IntegrationCase):
                 box = Sandbox(self)
                 box.stub_harness("sleep")
                 proc = box.start_align()
-                pid_file = box.records / "sleep-child.pid"
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline and not pid_file.exists():
-                    time.sleep(0.1)
-                self.assertTrue(pid_file.exists(), "the agent never started")
-                child = int(pid_file.read_text())
+                children = box.sleeping_agents(1)
+                self.assertEqual(len(children), 1, "the agent never started")
                 proc.send_signal(signum)
                 self.assertNotEqual(proc.wait(timeout=30), 0)
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and pid_alive(child):
-                    time.sleep(0.1)
-                self.assertFalse(pid_alive(child), f"the agent outlived {signum.name} to gardener")
+                self.assertEqual(wait_dead(children), [], f"the agent outlived {signum.name} to gardener")
 
     def test_missing_command_setting_is_a_setup_error(self):
         self.box.settings["GARDENER_HARNESS"] = "command"
@@ -262,11 +253,9 @@ class ClaudeCodeHarnessArgv(IntegrationCase):
         r = box.align(timeout=120)
         self.assertEqual(r.code, 1, r.describe())
         self.assertIn("timed out after 3s", r.stderr)
-        child = int((box.records / "sleep-child.pid").read_text())
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and pid_alive(child):
-            time.sleep(0.1)
-        self.assertFalse(pid_alive(child), "claude's child outlived gardener's timeout (gardener#187)")
+        children = box.sleeping_agents(1, wait=5)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(wait_dead(children), [], "claude's child outlived gardener's timeout (gardener#187)")
 
     def test_no_mode_ever_requests_bypass(self):
         for flag in ("--implement", "--file-issue"):

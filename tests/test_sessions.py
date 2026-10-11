@@ -325,6 +325,82 @@ class TestStop(unittest.TestCase):
         self.assertFalse(result.escalated)
 
 
+class TestKillSettle(unittest.TestCase):
+    def _session(self):
+        return TestStop._session(self)
+
+    def test_kill_mode_waits_briefly_for_the_session_to_exit(self):
+        clock = _Clock()
+        calls = []
+
+        def alive(pid):
+            calls.append(pid)
+            return len(calls) < 3  # dies after a moment, as a real process does
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_proc(root, 100, 1)
+            result = sessions.stop(
+                self._session(), escalate=False, proc_root=root,
+                kill_fn=lambda pid, sig: None, alive_fn=alive,
+                sleep_fn=clock.sleep, monotonic_fn=clock.monotonic,
+            )
+        self.assertTrue(result.stopped)
+        self.assertFalse(result.escalated)
+        self.assertGreater(clock.now, 0.0)
+
+    def test_kill_mode_never_escalates_and_gives_up_after_the_settle_time(self):
+        clock = _Clock()
+        sent = []
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_proc(root, 100, 1)
+            result = sessions.stop(
+                self._session(), sig=signal.SIGINT, escalate=False, proc_root=root,
+                kill_fn=lambda pid, sig: sent.append(sig), alive_fn=lambda pid: True,
+                sleep_fn=clock.sleep, monotonic_fn=clock.monotonic,
+            )
+        self.assertFalse(result.stopped)
+        self.assertNotIn(signal.SIGKILL, sent)
+        self.assertGreaterEqual(clock.now, sessions.KILL_SETTLE_SECONDS)
+        self.assertLess(clock.now, sessions.KILL_SETTLE_SECONDS + 1)
+
+
+class TestPidAlive(unittest.TestCase):
+    def test_a_zombie_is_not_alive(self):
+        """A child that has exited but not been reaped is a zombie: os.kill
+        still succeeds on it, but it is not running."""
+        import subprocess
+        import sys
+        import time
+
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with open(f"/proc/{child.pid}/stat") as f:
+                    if f.read().rpartition(")")[2].split()[0] == "Z":
+                        break
+                time.sleep(0.05)
+            os.kill(child.pid, 0)  # still "exists" to the kernel
+            self.assertFalse(sessions.pid_alive(child.pid))
+        finally:
+            child.wait()
+        self.assertFalse(sessions.pid_alive(child.pid))
+
+    def test_a_running_process_is_alive(self):
+        self.assertTrue(sessions.pid_alive(os.getpid()))
+
+    def test_state_is_read_after_a_command_name_with_parentheses(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / str(os.getpid())).mkdir()
+            (root / str(os.getpid()) / "stat").write_text(f"{os.getpid()} (odd ) name) Z 1 1 1")
+            self.assertFalse(sessions.pid_alive(os.getpid(), proc_root=root))
+            (root / str(os.getpid()) / "stat").write_text(f"{os.getpid()} (odd ) name) S 1 1 1")
+            self.assertTrue(sessions.pid_alive(os.getpid(), proc_root=root))
+
+
 class TestFormatAge(unittest.TestCase):
     def test_shapes(self):
         self.assertEqual(sessions.format_age(None), "-")

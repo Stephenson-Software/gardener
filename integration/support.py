@@ -40,7 +40,10 @@ FIXTURES = HERE / "fixtures"
 RECORDER = HERE / "recorder.py"
 STUB_AGENT = HERE / "stub_agent.py"
 OFFLINE_REPO = "it-fixture/multiply"
-READ_ONLY_GH_CALLS = ("auth token", "auth status")
+# gh calls that only read. `claude` itself makes the first two at startup;
+# gardener makes the rest. Anything else in the offline tier is a failure.
+READ_ONLY_GH_CALLS = ("auth token", "auth status", "repo view", "repo clone", "pr list", "issue list")
+FAKE_GH = HERE / "fake_gh.py"
 
 # Ambient settings that would leak the operator's real configuration into a
 # test run. Every GARDENER_* variable is dropped as well.
@@ -105,6 +108,16 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def wait_dead(pids: list[int], wait: float = 10) -> list[int]:
+    """The pids still alive after up to `wait` seconds."""
+    import time
+
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline and any(pid_alive(p) for p in pids):
+        time.sleep(0.1)
+    return [p for p in pids if pid_alive(p)]
+
+
 def pushed_at(repo: str) -> str:
     proc = subprocess.run(["gh", "repo", "view", repo, "--json", "pushedAt", "-q", ".pushedAt"],
                           capture_output=True, text=True, timeout=60)
@@ -145,9 +158,17 @@ class AlignResult:
 class Sandbox:
     """One isolated gardener installation for one test."""
 
-    def __init__(self, test: unittest.TestCase | None, repo: str | None = None, root: Path | None = None):
+    def __init__(self, test: unittest.TestCase | None, repo: str | None = None, root: Path | None = None,
+                 local_github: bool = False, fake_home: bool = False):
         """`test` registers cleanup of the sandbox (unless GARDENER_IT_KEEP
-        is set); the matrix runner passes None and its own kept `root`."""
+        is set); the matrix runner passes None and its own kept `root`.
+
+        `local_github` makes the fake `gh` serve clones and refreshes from
+        local bare repositories (`add_remote`), so the paths that clone or
+        refresh a target, which `tend` and `overnight` always do, run
+        offline too. `fake_home` points HOME into the sandbox, for commands
+        that read or write under it (`tend` looks for dev-loop skills in
+        `~/.claude/commands`)."""
         if root is not None:
             root.mkdir(parents=True, exist_ok=False)
             self.root = root
@@ -165,21 +186,41 @@ class Sandbox:
         self.offline = repo is None
         self.settings: dict[str, str] = {}
         self.extra_env: dict[str, str] = {}
+        self.remotes = self.root / "remotes" if local_github else None
+        self.home = self.root / "home" if fake_home else None
+        if self.home is not None:
+            self.home.mkdir()
         if self.offline:
             self._install_fake_gh()
 
     # -- fixtures -------------------------------------------------------
 
     def _install_fake_gh(self) -> None:
-        log = self.root / "gh-calls.log"
         script = self.bin / "gh"
-        script.write_text(
-            "#!/bin/sh\n"
-            f"echo \"$*\" >> {shlex.quote(str(log))}\n"
-            "echo 'gh is not available in the offline integration tier' >&2\n"
-            "exit 1\n"
-        )
+        script.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_GH))} \"$@\"\n")
         script.chmod(0o755)
+
+    def add_remote(self, repo: str | None = None, source: Path | None = FIXTURES / "target",
+                   files: dict[str, str] | None = None) -> Path:
+        """A local bare repository the fake `gh` serves as `repo` on GitHub."""
+        assert self.remotes is not None, "add_remote needs Sandbox(local_github=True)"
+        repo = repo or self.repo
+        work = make_repo(self.root / "remote-src" / repo, source=source, files=files)
+        bare = self.remotes / f"{repo}.git"
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        git(self.root, "clone", "-q", "--bare", str(work), str(bare))
+        return bare
+
+    def install_dev_loop_skill(self, repo: str | None = None) -> Path:
+        """What `tend` checks for before dispatching a repo's dev loop, under
+        the sandbox's HOME."""
+        assert self.home is not None, "install_dev_loop_skill needs Sandbox(fake_home=True)"
+        name = (repo or self.repo).split("/", 1)[1].lower()
+        slug = "".join(c if c.isalnum() else "-" for c in name).strip("-") + "-dev-loop"
+        command = self.home / ".claude" / "commands" / f"{slug}.md"
+        command.parent.mkdir(parents=True, exist_ok=True)
+        command.write_text(f"# /{slug}\n\nA stand-in dev-loop skill for the integration suite.\n")
+        return command
 
     def gh_calls(self) -> list[str]:
         log = self.root / "gh-calls.log"
@@ -201,6 +242,9 @@ class Sandbox:
         `compact/` for the subdirectory tests. Returns a file:// URL."""
         source = source or FIXTURES / "conventions"
         path = self.root / "conventions-src"
+        if (path / ".git").is_dir():
+            # Built once per sandbox, so a test can run gardener repeatedly.
+            return path.as_uri()
         files = {}
         if compact_copy:
             for f in source.rglob("*"):
@@ -242,6 +286,11 @@ class Sandbox:
         })
         if self.offline:
             env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+            env["GARDENER_IT_GH_LOG"] = str(self.root / "gh-calls.log")
+        if self.remotes is not None:
+            env["GARDENER_IT_GH_REMOTES"] = str(self.remotes)
+        if self.home is not None:
+            env["HOME"] = str(self.home)
         env.update(self.settings)
         env.update(self.extra_env)
         return env
@@ -251,10 +300,7 @@ class Sandbox:
 
         argv = [sys.executable, "-m", "gardener", "align", "--repo", self.repo,
                 "--conventions-repo", conventions_url or self.conventions(), *args]
-        if self.offline:
-            argv.append("--no-refresh-target")
-            if not self.clone_path().exists():
-                self.seed_target()
+        self._prepare_target(argv)
         clone = self.clone_path()
         head_before = git(clone, "rev-parse", "HEAD", check=False).stdout.strip() if clone.exists() else ""
         before = "" if self.offline else pushed_at(self.repo)
@@ -285,12 +331,55 @@ class Sandbox:
         mid-run. The caller waits on and reaps the process."""
         argv = [sys.executable, "-m", "gardener", "align", "--repo", self.repo,
                 "--conventions-repo", conventions_url or self.conventions(), *args]
-        if self.offline:
+        self._prepare_target(argv)
+        return subprocess.Popen(argv, cwd=str(self.root), env=self.env(), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _prepare_target(self, argv: list[str]) -> None:
+        if self.remotes is not None:
+            if not (self.remotes / f"{self.repo}.git").exists():
+                self.add_remote()
+        elif self.offline:
             argv.append("--no-refresh-target")
             if not self.clone_path().exists():
                 self.seed_target()
-        return subprocess.Popen(argv, cwd=str(self.root), env=self.env(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def cli(self, *args: str, timeout: float = 600) -> subprocess.CompletedProcess:
+        """Any gardener command, run to completion in this sandbox."""
+        return subprocess.run([sys.executable, "-m", "gardener", *args], cwd=str(self.root), env=self.env(),
+                              capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+
+    def start_cli(self, *args: str) -> subprocess.Popen:
+        """Any gardener command, started in the background. The caller waits
+        on and reaps it."""
+        return subprocess.Popen([sys.executable, "-m", "gardener", *args], cwd=str(self.root), env=self.env(),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True)
+
+    def runs(self) -> list[dict]:
+        db = self.state / "gardener.sqlite3"
+        if not db.exists():
+            return []
+        with sqlite3.connect(db) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id")]
+
+    def sleeping_agents(self, count: int = 1, wait: float = 60) -> list[int]:
+        """Pids of the children the `sleep` stand-in agents started, waiting
+        up to `wait` seconds for `count` of them."""
+        import time
+
+        deadline = time.monotonic() + wait
+        while True:
+            pids = [int(p.read_text()) for p in sorted(self.records.glob("sleep-child-*.pid"))
+                    if p.read_text().strip()]
+            if len(pids) >= count or time.monotonic() > deadline:
+                return pids
+            time.sleep(0.1)
+
+    def write_gh_calls(self) -> list[str]:
+        """gh calls that were not read-only."""
+        return [c for c in self.gh_calls() if not c.startswith(READ_ONLY_GH_CALLS)]
 
     def _records(self) -> list[dict]:
         return [json.loads(p.read_text()) for p in sorted(self.records.glob("*.json"))]

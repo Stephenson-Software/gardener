@@ -465,7 +465,10 @@ id/prefix/target resolution (including the ambiguous and no-match errors,
 asserted to name the candidates and point at `gardener ps` rather than just
 failing), `descendants()` against a synthetic `/proc` tree written into a
 tmp dir, and `stop()`'s signal-then-escalate sequence with `os.kill`,
-liveness, and the clock all injected so nothing real is ever signalled;
+liveness, and the clock all injected so nothing real is ever signalled.
+`TestKillSettle` covers `kill`'s short wait for the session to exit, and
+`TestPidAlive` covers a real zombie child: `os.kill` still succeeds on it,
+but `pid_alive` reads it as gone;
 `tests/test_cli.py`'s session-command tests likewise drive `cmd_ps`/
 `cmd_stop`/`cmd_kill` against a real sessions directory with
 `sessions.stop` itself patched out; `tests/test_doctor.py` covers every
@@ -602,6 +605,7 @@ Then confirm `gardener tend` and `gardener overnight` refuse with the
 `GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
 
 The record of the real runs behind a release lives in `docs/verification/`.
+[0.4.3](verification/0.4.3.md) covers session control and whole-line run logs;
 [0.4.2](verification/0.4.2.md) covers signals reaching running agents;
 [0.4.1](verification/0.4.1.md) covers the timeout process-tree fix on both harnesses;
 [0.4.0](verification/0.4.0.md) covers the conventions subdirectory;

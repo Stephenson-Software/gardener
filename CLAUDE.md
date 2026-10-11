@@ -227,8 +227,10 @@ record what you actually observed before changing the docstring's claims.
   `resume_order`/`next_attempted` (the name-keyed cursor's cycle-completion
   and reset logic) — none of these invoke `claude`, `git`, or `gh` either.
   `test_run_log.py` covers the stderr tee (both destinations written,
-  stderr restored even on a `BaseException`, unopenable log degrading to a
-  warning rather than failing the run), log pruning, and — most
+  only whole lines written so concurrent `overnight` threads never glue
+  lines together, an unfinished last line still flushed, stderr restored
+  even on a `BaseException`, unopenable log degrading to a warning rather
+  than failing the run), log pruning, and — most
   importantly — the round trip: real `cli.py` progress lines written
   through the tee and read back out by `dashboard.parse_in_progress`/
   `parse_batch_progress`, so the writing and reading halves can't drift
@@ -246,7 +248,8 @@ record what you actually observed before changing the docstring's claims.
   the polling loop (`time_fn`/`sleep_fn` always injected, never a real
   sleep), and the pretty-printer's line parsing (synthetic JSONL fixtures).
 - **Integration:** `PYTHONPATH=. python3 -m unittest discover -s integration -t . -v`
-  runs the real `gardener align` CLI as a subprocess in an isolated
+  runs the real `gardener` CLI (`align`, `tend`, `overnight`, `ps`/`stop`/
+  `kill`) as a subprocess in an isolated
   sandbox (`integration/support.py`). The offline tier uses stand-in agents
   and a fake `gh`, and runs in CI. The live tiers (Claude Code, any
   `command` harness, Orket) skip themselves unless configured. Unlike
