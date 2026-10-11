@@ -197,7 +197,9 @@ or, since Orket 0.8.2, raise the limits. That takes both the submission
 settings (`ORKET_GARDENER_MAX_INPUT_TOKENS`, `_MAX_FILE_BYTES`,
 `_MAX_SNAPSHOT_BYTES`) and the host profile's context budget (an operator
 copy of the profile registry via `ORKET_LOCAL_PROMPT_PROFILE_REGISTRY_PATH`).
-Its own README has the details.
+Its own README has the details. Since Orket 0.8.7 that README is a full
+installation and upgrade guide for gardener. It gives 30,000 input plus 2,048
+output tokens with a 32,768-token profile as a starting point for Ollama.
 
 For Ollama, set `ORKET_GARDENER_PROVIDER=ollama` and the native base URL
 (no `/v1`). Since 0.8.2 Orket sends an explicit `num_ctx` (input plus output
@@ -248,10 +250,11 @@ On one machine (Ollama `llama3.2:3b`, 2 GB GPU), with gardener 0.3.0:
   Ollama's default 4096-token context truncated the prompt. Its llama.cpp
   default was not tested.
 
-So both paths are wired end to end and fail safely. On Orket 0.8.2 and 0.8.4,
-`qwen2.5:7b` on the same machine delivered a mostly correct report through
-Orket's harness ([orket-0.8.2](verification/orket-0.8.2.md),
-[orket-0.8.4](verification/orket-0.8.4.md)). `llama3.2:3b` has not delivered
+So both paths are wired end to end and fail safely. On Orket 0.8.2, 0.8.4 and
+0.8.8, `qwen2.5:7b` on the same machine delivered a mostly correct report
+through Orket's harness ([orket-0.8.2](verification/orket-0.8.2.md),
+[orket-0.8.4](verification/orket-0.8.4.md),
+[orket-0.8.8](verification/orket-0.8.8.md)). `llama3.2:3b` has not delivered
 a useful one through either path. Details for the extension are in its
 `docs/verification.md`.
 

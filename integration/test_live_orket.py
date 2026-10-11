@@ -70,6 +70,7 @@ def orket_version() -> tuple:
 
 
 AT_LEAST_084 = CONFIGURED and orket_version() >= (0, 8, 4)
+AT_LEAST_085 = CONFIGURED and orket_version() >= (0, 8, 5)
 
 
 @unittest.skipUnless(CONFIGURED, REASON)
@@ -285,6 +286,12 @@ class Inference(OrketCase):
         self.assertTrue(r.envelope["is_error"], r.envelope)
         self.assertNotIn("verified delivery", r.stdout)
         self.assertNotPushed(r)
+        if AT_LEAST_085:
+            # Orket 0.8.5: a delivery refused after the run still names the
+            # retained run and the exact command to inspect it.
+            self.assertTrue(r.envelope["session_id"].startswith("orket:agent-run:"), r.envelope)
+            self.assertIn("orket agent inspect", r.envelope["result"])
+            self.inspect(box, r)
 
 
 if __name__ == "__main__":
