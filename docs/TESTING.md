@@ -620,6 +620,8 @@ the issues those runs filed.
 answers to the field report.
 [integration-observability](verification/integration-observability.md)
 covers alerts, usage reporting, the dashboard, the hub and doctor end to end.
+[integration-selfupdate](verification/integration-selfupdate.md) covers
+self-update through real git, end to end.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.
