@@ -307,7 +307,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -814,6 +816,72 @@ def run_claude(
     return result  # unreachable; the loop always returns
 
 
+# Process groups of the agents currently running, so a signal that stops
+# gardener can take them down too: each runs in its own session, which a
+# terminal's Ctrl-C or a SIGTERM to gardener alone never reaches.
+# `overnight --concurrency N` runs several at once on worker threads.
+_ACTIVE_AGENT_GROUPS: set = set()
+_ACTIVE_AGENT_GROUPS_LOCK = threading.Lock()
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def kill_active_agents() -> int:
+    """SIGKILL every agent process group gardener started and has not yet
+    reaped. Returns how many groups were signalled."""
+    with _ACTIVE_AGENT_GROUPS_LOCK:
+        groups = list(_ACTIVE_AGENT_GROUPS)
+    for pgid in groups:
+        _kill_group(pgid)
+    return len(groups)
+
+
+@contextmanager
+def agent_signal_guard():
+    """While a dispatching command runs, make SIGINT, SIGTERM and SIGHUP
+    kill every running agent's process group before gardener reacts to the
+    signal as it otherwise would (a KeyboardInterrupt for SIGINT, the
+    default termination for the others).
+
+    Running agents in their own sessions (`_run_in_process_group`) means the
+    terminal's Ctrl-C no longer reaches them, and a dispatch on an
+    `overnight` worker thread never sees the resulting KeyboardInterrupt.
+    Without this, stopping gardener that way left its agents running. A
+    signal gardener was started ignoring (SIGHUP under `nohup`) stays
+    ignored. Handlers can only be set from the main thread; anywhere else
+    this does nothing."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {}
+
+    def handler(signum, frame):
+        kill_active_agents()
+        prior = previous.get(signum)
+        if callable(prior):
+            prior(signum, frame)
+            return
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        prior = signal.getsignal(signum)
+        if prior == signal.SIG_IGN or prior is None:
+            continue
+        previous[signum] = prior
+        signal.signal(signum, handler)
+    try:
+        yield
+    finally:
+        for signum, prior in previous.items():
+            signal.signal(signum, prior)
+
+
 def _run_in_process_group(argv, *, input=None, cwd=None, env=None, timeout=None, **_ignored):
     """`subprocess.run(..., capture_output=True, text=True)` for a harness
     command, except that on a timeout the command's whole process group is
@@ -832,23 +900,22 @@ def _run_in_process_group(argv, *, input=None, cwd=None, env=None, timeout=None,
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         cwd=cwd, env=env, text=True, start_new_session=True,
     )
+    with _ACTIVE_AGENT_GROUPS_LOCK:
+        _ACTIVE_AGENT_GROUPS.add(proc.pid)
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_group(proc.pid)
         stdout, stderr = proc.communicate()
         raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
     except BaseException:
         # gardener itself is being stopped (Ctrl-C, `gardener stop`): don't
         # leave the agent running in its own session behind us.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_group(proc.pid)
         raise
+    finally:
+        with _ACTIVE_AGENT_GROUPS_LOCK:
+            _ACTIVE_AGENT_GROUPS.discard(proc.pid)
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 

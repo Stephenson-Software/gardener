@@ -458,6 +458,13 @@ most operators' fingers — but the resemblance is skin deep: a gardener
 session is a plain OS process, and nothing here isolates, namespaces, or
 restarts anything.
 
+Each agent a session dispatches runs in its own process group. Stopping the
+session these ways also kills its running agents:
+- `gardener stop`/`kill`;
+- Ctrl-C in its terminal;
+- SIGTERM or SIGHUP to the gardener process itself (a SIGHUP it was started
+  ignoring, as under `nohup`, stays ignored).
+
 ```
 gardener ps [-a|--all] [-q|--quiet]
 gardener stop <session>... | --all [-t|--time SECONDS]

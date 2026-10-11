@@ -541,7 +541,11 @@ parsed, a report run that edits or commits in the clone is failed with a
 kills the agent's whole process tree rather than orphaning its children
 (`_run_in_process_group`; the test checks a grandchild's pid, and
 `TestClaudeTimeoutKillsProcessTree` checks the same through a fake `claude`
-script, since `claude` goes through that helper too), every
+script, since `claude` goes through that helper too; `TestAgentSignalGuard`
+runs two agents on worker threads, as `overnight --concurrency 2` does, and
+checks that SIGTERM, SIGINT and SIGHUP to the driver kill both agents'
+children, that an ignored SIGHUP kills nothing, and that the guard restores
+the previous handlers and does nothing off the main thread), every
 write mode is refused without `GARDENER_HARNESS_ALLOW_UNSCOPED` (and the
 opt-in is per mode), a harness's own `"blocked": true` stops a batch, `tend`'s
 `merge_allowed` follows `tend_mode_spec()`, `bypassPermissions` is refused
@@ -598,6 +602,7 @@ Then confirm `gardener tend` and `gardener overnight` refuse with the
 `GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
 
 The record of the real runs behind a release lives in `docs/verification/`.
+[0.4.2](verification/0.4.2.md) covers signals reaching running agents;
 [0.4.1](verification/0.4.1.md) covers the timeout process-tree fix on both harnesses;
 [0.4.0](verification/0.4.0.md) covers the conventions subdirectory;
 [0.3.0](verification/0.3.0.md) covers the harness layer, both the Claude

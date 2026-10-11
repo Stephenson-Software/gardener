@@ -48,6 +48,7 @@ from gardener.dispatch import (
     looks_like_network_failure,
     looks_like_usage_limit,
     check_harness_ready,
+    agent_signal_guard,
     load_harness_config,
     run_agent,
     tend_mode_spec,
@@ -2297,5 +2298,5 @@ def _dispatch(args: argparse.Namespace) -> int:
                     f"`gardener stop {session.short_id}`)",
                     file=sys.stderr,
                 )
-            with heartbeat.running(session):
+            with heartbeat.running(session), agent_signal_guard():
                 return args.func(args)
