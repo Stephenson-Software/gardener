@@ -144,8 +144,8 @@ closed afterwards (a pull request with its branch) unless
 
 - `--implement` opens exactly one pull request from a new branch, with at
   least one changed file. It does not merge it, move the default branch or
-  open an issue. Its `Bash(gh pr *)` allow-pattern would permit `gh pr
-  merge`, so only the outcome can show the prompt held.
+  open an issue. Since 0.4.6 its tool scoping blocks `gh pr merge`; the
+  outcome check stays as a second line of defence.
 - `--file-issue` opens exactly one issue with a body. It opens no pull
   request, does not move the default branch, and leaves the clone
   unchanged.

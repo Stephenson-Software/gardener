@@ -151,7 +151,8 @@ MODE_INSTRUCTIONS = {
      instead of restating their rules in the PR body.
    - {CONVENTIONS_PRIVACY_REQUIREMENT}
    - {dev_loop.ATTRIBUTION_REQUIREMENT}
-   - Only `git *` and `gh pr *` commands are available to you; nothing
+   - Only `git *` and `gh pr create/edit/view/list/diff/checks` commands
+     are available to you; nothing
      else is pre-approved and there is no human available in this session
      to approve anything further. Do not merge the PR.""",
     Mode.FILE_ISSUE: f"""4. You are authorized to open exactly ONE GitHub issue in this repo
