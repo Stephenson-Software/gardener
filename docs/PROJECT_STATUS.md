@@ -1,5 +1,13 @@
 # Project Status
 
+**0.4.7 (2026-10-11):** the dashboard and live view time a finished
+overnight run to its end. After a short run they used to say "12h elapsed ·
+budget spent" and "8h 00m in" for the rest of the day; they now say
+"finished in 7m" and "7m in". Found by rendering both pages against the
+real run history.
+
+Record: [verification/0.4.7.md](verification/0.4.7.md).
+
 **0.4.6 (2026-10-11):** `align --implement` can no longer merge. Its
 `Bash(gh pr *)` allow-pattern also matched `gh pr merge`, leaving "Do not
 merge the PR" to the prompt alone. It now lists its `gh pr` verbs, as
