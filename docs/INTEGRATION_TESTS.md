@@ -20,6 +20,7 @@ itself, with the reason, until its settings are present.
 |---|---|---|---|---|
 | Offline contract | `test_offline_contract.py` | git | ~10 s, free | yes |
 | Offline lifecycle | `test_offline_lifecycle.py` | git | ~10 s, free | yes |
+| Offline observability | `test_offline_observability.py` | git | ~7 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
@@ -75,6 +76,31 @@ These use `Sandbox(local_github=True)`: the fake `gh` serves `repo view`,
 `repo clone`, `pr list` and `issue list` from local bare repositories, so
 the real clone-and-refresh path runs offline. Every test asserts that no
 other `gh` call was made.
+
+### Offline observability
+
+What happens around a run. Every service runs on 127.0.0.1, and nothing
+leaves the machine:
+
+- **Discord alerts:** a successful run sends one alert to a stub webhook,
+  naming the repo and the device, with a non-default User-Agent. A failed
+  run's alert is a different colour. With no webhook, nothing is sent and
+  nothing is printed.
+- **Usage reporting:** one `startup` event carrying the version reaches a
+  stub endpoint; the opt-out sends nothing.
+- **`gardener status`:** lists both a successful and a failed run.
+- **The dashboard:** `/api/status` serves the recorded run, and `/` and
+  `/live` load. It is not reachable on the machine's network address.
+- **The hub,** a real `gardener hub serve`:
+  - a device's run arrives under its token's device name;
+  - `status --all-devices` reads it back;
+  - an unknown token is refused;
+  - a run made while the hub is down is kept locally, delivered by
+    `gardener hub sync` once it is up, and not duplicated by a second sync.
+- **`gardener doctor --offline`:** clean on a fresh install. It flags an
+  untracked file in a cache clone without removing it.
+
+`support.StubServer` is the recording loopback server these use.
 
 ### Claude Code
 
