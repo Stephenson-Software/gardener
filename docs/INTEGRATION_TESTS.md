@@ -21,6 +21,7 @@ itself, with the reason, until its settings are present.
 | Offline contract | `test_offline_contract.py` | git | ~10 s, free | yes |
 | Offline lifecycle | `test_offline_lifecycle.py` | git | ~10 s, free | yes |
 | Offline observability | `test_offline_observability.py` | git | ~7 s, free | yes |
+| Offline self-update | `test_offline_selfupdate.py` | git | ~4 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
@@ -104,6 +105,28 @@ leaves the machine:
   untracked file in a cache clone without removing it.
 
 `support.StubServer` is the recording loopback server these use.
+
+### Offline self-update
+
+Each test builds a copy of this checkout's `gardener/` package as an older
+commit that tracks a local bare origin, then pushes a newer commit to that
+origin. The CLI runs from the copy, the way an editable install would, so
+`selfupdate` finds it through its own module file.
+
+- **`gardener update --check`** reports the update without applying it.
+- **`gardener update`** fast-forwards the copy. A new process then imports
+  the new version, and a second `update` reports it up to date. Untracked
+  files don't block it.
+- **Skips:** tracked local changes, a diverged branch, a detached HEAD, and
+  a branch with no upstream all leave HEAD where it was, and exit 0.
+- **An unreachable origin** is an error, exit 1.
+- **`overnight`:**
+  - the update is logged, sends no alert, and the run carries on;
+  - a skip sends one "self-update SKIPPED" alert, and the run still carries
+    on;
+  - `--no-self-update` leaves the copy alone.
+
+The origin is a local bare repository and the webhook a loopback stub.
 
 ### Claude Code
 
