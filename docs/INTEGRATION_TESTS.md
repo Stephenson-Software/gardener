@@ -107,6 +107,7 @@ For [Orket's governed harness](HARNESSES.md#orket). It needs:
 | `GARDENER_IT_ORKET_PROVIDER` | default `ollama` |
 | `GARDENER_IT_ORKET_BASE_URL` | default `http://127.0.0.1:11434` |
 | `GARDENER_IT_ORKET_DELIVER_ENV` | JSON object of extra settings for runs that reach the model, e.g. `{"ORKET_GARDENER_MAX_INPUT_TOKENS": "30000", "ORKET_LOCAL_PROMPT_PROFILE_REGISTRY_PATH": "/path/profiles.json"}` |
+| `GARDENER_IT_ORKET_LARGE_ENV` | JSON object of settings for the over-64-KiB input test (Orket 0.8.4+): a profile registry and input budget large enough for about 100 KB, e.g. `{"ORKET_LOCAL_PROMPT_PROFILE_REGISTRY_PATH": "/path/profiles-128k.json", "ORKET_GARDENER_MAX_INPUT_TOKENS": "129024", "ORKET_GARDENER_MAX_SNAPSHOT_BYTES": "131072"}`. Unset skips that test |
 | `GARDENER_IT_ORKET_INFERENCE=1` | also run the tests that call the model |
 
 **Refusals.** These must happen before any model call:
@@ -129,6 +130,17 @@ For [Orket's governed harness](HARNESSES.md#orket). It needs:
 A target edited while the model runs must be refused. Orket verifies
 delivery and source references, not findings, so report quality is not
 asserted.
+
+**Orket 0.8.4+.** Read from the checkout's `pyproject.toml`; older
+checkouts skip these:
+- a delivered report's summary starts with a real `GARDENER_SUMMARY:` line,
+  not a title or a template (Orket#9);
+- a timed-out run comes back with its run ID, and is closed as
+  `failed_terminal` with an ended, failed attempt and
+  `completion_unsatisfied` (Orket#8);
+- an input over 64 KiB reaches the model instead of failing with
+  `E_AGENT_CHILD_DISCONNECTED` (Orket#7). This needs
+  `GARDENER_IT_ORKET_LARGE_ENV`.
 
 ## Shared settings
 
