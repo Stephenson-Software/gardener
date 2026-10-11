@@ -269,6 +269,10 @@ class Sandbox:
         after = "" if self.offline else pushed_at(self.repo)
         porcelain = git(clone, "status", "--porcelain", check=False).stdout if clone.exists() else "<no clone>"
         head_after = git(clone, "rev-parse", "HEAD", check=False).stdout.strip() if clone.exists() else ""
+        if not head_before and clone.exists():
+            # A live target cloned during this run had no HEAD before it; the
+            # untouched state is then the upstream branch it was cloned from.
+            head_before = git(clone, "rev-parse", "@{upstream}", check=False).stdout.strip()
         return AlignResult(
             code=code, stdout=out, stderr=err, records=self._records(), run=self.last_run(),
             clone=clone, clone_porcelain=porcelain, clone_head_before=head_before,
