@@ -79,7 +79,7 @@ gardener's own commit history / README for the transcript):
    below entirely.
 
 3. **`--allowedTools`** pre-approves specific, narrow patterns (e.g.
-   `Bash(git *)`, `Bash(gh pr *)`) so *only* those specific commands run
+   `Bash(git *)`, `Bash(gh pr create *)`) so *only* those specific commands run
    without a human — everything else still needs one, and since there
    isn't one, everything else is auto-denied. This is what lets implement
    mode use git/gh at all without opening the door to arbitrary shell
@@ -147,13 +147,15 @@ CLI 2.1.214) against real `claude -p` invocations before being relied on:
    merge`.** Tested directly: with `--allowedTools "Bash(gh pr *)"`, `gh pr
    merge 999999 --squash` actually executed (and failed only because that
    PR number doesn't exist, not because it was denied — zero
-   `permission_denials`). `align --implement`'s existing `Bash(gh pr *)`
-   pattern therefore already relies on its prompt's "Do not merge the PR"
-   instruction alone, not a structural block — noted here because `tend`
-   mode deliberately does NOT repeat this: its Bash allow-list enumerates
-   specific `gh pr <verb> *` patterns (create/edit/view/list/diff/checks/
-   comment/close) and never a bare `Bash(gh pr *)`, so `Bash(gh pr merge *)`
-   can be added or withheld independently (see "Merge allow-list" below).
+   `permission_denials`). So no mode grants a bare `Bash(gh pr *)`. `tend`'s
+   Bash allow-list enumerates specific `gh pr <verb> *` patterns
+   (create/edit/view/list/diff/checks/comment/close), so `Bash(gh pr merge
+   *)` can be added or withheld independently (see "Merge allow-list"
+   below). `align --implement` did grant `Bash(gh pr *)` until 0.4.6,
+   leaving "Do not merge the PR" to its prompt alone; it now enumerates
+   `IMPLEMENT_PR_TOOLS` (create/edit/view/list/diff/checks). Confirmed live
+   on 2026-10-11: with that list, `gh pr merge` came back as a permission
+   denial and did not run.
 5. **`Agent` and `ScheduleWakeup` are present by default and were excluded
    the same way `AskUserQuestion` already is absent.** A dev-loop skill's
    review phase normally fans out a review subagent (`Agent`) and its
@@ -572,6 +574,19 @@ TEND_BASE_ALLOWED_TOOLS: tuple[str, ...] = (
 # See module docstring's "Merge allow-list" section and merge_allowlist.py.
 MERGE_ALLOWED_TOOL = "Bash(gh pr merge *)"
 
+# `align --implement` names its `gh pr` verbs for the same reason `tend`
+# does (module docstring point 4): a bare `Bash(gh pr *)` also matches
+# `gh pr merge`, which left "Do not merge the PR" to the prompt alone until
+# 0.4.6. These are the verbs its prompt actually needs.
+IMPLEMENT_PR_TOOLS = (
+    "Bash(gh pr create *)",
+    "Bash(gh pr edit *)",
+    "Bash(gh pr view *)",
+    "Bash(gh pr list *)",
+    "Bash(gh pr diff *)",
+    "Bash(gh pr checks *)",
+)
+
 MODE_SPECS: dict[Mode, ModeSpec] = {
     Mode.REPORT: ModeSpec(
         tools=("Read", "Grep", "Glob"),
@@ -580,7 +595,7 @@ MODE_SPECS: dict[Mode, ModeSpec] = {
     Mode.IMPLEMENT: ModeSpec(
         tools=("Read", "Grep", "Glob", "Edit", "Write", "Bash"),
         permission_mode="default",
-        allowed_tools=("Edit", "Write", "Bash(git *)", "Bash(gh pr *)"),
+        allowed_tools=("Edit", "Write", "Bash(git *)", *IMPLEMENT_PR_TOOLS),
     ),
     Mode.FILE_ISSUE: ModeSpec(
         # Deliberately no Edit/Write at all — file-issue mode has no

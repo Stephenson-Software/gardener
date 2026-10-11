@@ -195,10 +195,21 @@ class TestTendModeSpec(unittest.TestCase):
         self.assertIn(MERGE_ALLOWED_TOOL, spec.allowed_tools)
 
     def test_base_allowed_tools_never_include_bare_gh_pr_wildcard(self):
+        # (`align --implement` is held to the same rule; see
+        # test_implement_never_grants_gh_pr_merge.)
         # A bare "Bash(gh pr *)" would structurally re-permit merge via
         # pattern matching regardless of eligibility (confirmed live — see
         # dispatch.py's module docstring point 4) — tend must never use it.
         self.assertNotIn("Bash(gh pr *)", TEND_BASE_ALLOWED_TOOLS)
+
+    def test_implement_never_grants_gh_pr_merge(self):
+        # Until 0.4.6 `align --implement` granted a bare "Bash(gh pr *)",
+        # which matches `gh pr merge` (module docstring point 4).
+        allowed = MODE_SPECS[Mode.IMPLEMENT].allowed_tools
+        self.assertNotIn("Bash(gh pr *)", allowed)
+        self.assertNotIn(MERGE_ALLOWED_TOOL, allowed)
+        self.assertFalse([t for t in allowed if "merge" in t or t.endswith("gh pr *)")], allowed)
+        self.assertIn("Bash(gh pr create *)", allowed)
 
     def test_merge_pattern_never_leaks_into_base_list(self):
         self.assertNotIn(MERGE_ALLOWED_TOOL, TEND_BASE_ALLOWED_TOOLS)

@@ -1,5 +1,12 @@
 # Project Status
 
+**0.4.6 (2026-10-11):** `align --implement` can no longer merge. Its
+`Bash(gh pr *)` allow-pattern also matched `gh pr merge`, leaving "Do not
+merge the PR" to the prompt alone. It now lists its `gh pr` verbs, as
+`tend` does, and a live probe confirmed the merge is denied.
+
+Record: [verification/0.4.6.md](verification/0.4.6.md).
+
 **0.4.5 (2026-10-11):** `align --implement` and `--file-issue` no longer
 name the conventions repo in what they post. The `--implement` prompt asked
 for the conventions docs to be cited "by URL", and neither prompt said to

@@ -22,7 +22,8 @@ layers (see the full writeup in `dispatch.py`'s module docstring):
    was tried and rejected: it auto-approved a Bash call that was
    deliberately left unscoped, defeating the point.
 3. **`--allowedTools`** pre-approves narrow patterns (`Bash(git *)`,
-   `Bash(gh pr *)` for implement; `Bash(gh issue *)` only, no Edit/Write at
+   the `gh pr` verbs create/edit/view/list/diff/checks for implement, never
+   `gh pr merge`; `Bash(gh issue *)` only, no Edit/Write at
    all, for file-issue) so only those specific commands run without a
    human.
 
@@ -70,9 +71,10 @@ docstring; the short version:
   ToolSearch/ReportFindings among them. The dispatched prompt tells the
   run to perform any review step inline instead.
 - **`gh pr merge` is never reachable via a broad `Bash(gh pr *)` pattern**
-  in `tend` mode — confirmed live that such a pattern *does* let `gh pr
-  merge` execute (this is a real, pre-existing gap in `align --implement`'s
-  own `Bash(gh pr *)` allow-list, noted but out of scope to change here).
+  in any mode — confirmed live that such a pattern *does* let `gh pr merge`
+  execute. `align --implement` granted one until 0.4.6 and relied on its
+  prompt alone; it now lists its `gh pr` verbs, and a live probe confirmed
+  `gh pr merge` is denied.
   `tend` enumerates specific non-merge `gh pr` subcommands instead and adds
   `Bash(gh pr merge *)` only per the merge allow-list below.
 - **`gh pr review` and `gh api` are absent on purpose, so a dispatched run
