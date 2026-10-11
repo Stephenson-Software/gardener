@@ -1,5 +1,14 @@
 # Project Status
 
+**0.4.4 (2026-10-11):** an `overnight` run under `random` or `issue-count`
+that starts near the end of a cycle now carries on into the next cycle
+instead of stopping once the cycle's leftovers are done. Before, about one
+night in three ended early with most of its budget unused: 1 repo in 7
+minutes of an 8-hour budget on 2026-10-11, 19 repos in 24 minutes on
+2026-10-10, 1 repo in 9 minutes on 2026-10-07.
+
+Record: [verification/0.4.4.md](verification/0.4.4.md).
+
 **0.4.3 (2026-10-11):** three fixes found by extending the integration
 suite to `tend`, `overnight` and session control:
 - `gardener kill` reported a session that was in the middle of exiting as

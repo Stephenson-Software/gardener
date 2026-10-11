@@ -255,6 +255,39 @@ class TestNextAttempted(unittest.TestCase):
         self.assertEqual(result, ["a", "b"])
 
 
+    def test_carried_repos_all_done_and_next_cycle_started_drops_old_history(self):
+        result = overnight.next_attempted(["a", "b"], False, ["c", "d", "a"], carried=["c"])
+        self.assertEqual(result, ["d", "a"])
+
+    def test_carried_repos_done_but_next_cycle_not_started_keeps_the_cycle(self):
+        result = overnight.next_attempted(["a", "b"], False, ["c"], carried=["c"])
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_a_carried_repo_without_a_real_attempt_keeps_the_cycle_open(self):
+        # "d" was lock-skipped, so it is not in newly_attempted: the
+        # current cycle still owes it, and next-cycle work is not counted.
+        result = overnight.next_attempted(["a", "b"], False, ["c", "a"], carried=["c", "d"])
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_carried_is_ignored_on_a_cycle_reset(self):
+        result = overnight.next_attempted(["a", "b"], True, ["c"], carried=["c"])
+        self.assertEqual(result, ["c"])
+
+
+class TestContinueIntoNextCycle(unittest.TestCase):
+    def test_leftovers_first_then_the_rest_in_strategy_order(self):
+        order = overnight.continue_into_next_cycle(["d"], ["b", "d", "a", "c"], False)
+        self.assertEqual(order, ["d", "b", "a", "c"])
+
+    def test_no_repo_appears_twice(self):
+        order = overnight.continue_into_next_cycle(["b", "a"], ["a", "b", "c"], False)
+        self.assertEqual(order, ["b", "a", "c"])
+
+    def test_a_fresh_cycle_is_left_unchanged(self):
+        order = overnight.continue_into_next_cycle(["a", "b"], ["a", "b"], True)
+        self.assertEqual(order, ["a", "b"])
+
+
 class TestReposToAttempt(unittest.TestCase):
     def test_empty_garden_returns_empty(self):
         self.assertEqual(overnight.repos_to_attempt([], 0), [])

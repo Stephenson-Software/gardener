@@ -108,7 +108,17 @@ to my garden while I sleep" entry point:
    `resume_order`. Each run computes a fresh strategy-ordered list, then
    filters out whichever names are already in `attempted` — once every
    repo has been attempted at least once, the next run detects the cycle
-   is complete and starts a fresh one. `next_index` and `attempted` live in
+   is complete and starts a fresh one. **A run that finishes a cycle
+   carries on into the next one** (`continue_into_next_cycle`): its
+   candidates are the cycle's leftovers first, then every other repo in
+   this run's strategy order, with no repo repeated. Once every leftover
+   has had a real attempt and the run has moved past them, the cursor
+   drops the finished cycle and records only the repos attempted since
+   (`next_attempted`'s `carried`). If a leftover was skipped for a held
+   lock, the cycle stays open so that repo is still owed. The log marks the
+   boundary with `continuing into the next cycle`. Before 0.4.4 a run that
+   started with a few repos left tended only those and stopped: one repo
+   in 7 minutes of an 8-hour budget on 2026-10-11. `next_index` and `attempted` live in
    the *same* cursor file under different keys, so switching `--strategy`
    between runs never clobbers the other strategy's own progress — round-
    robin's index and issue-count/random's attempted-name list simply sit
