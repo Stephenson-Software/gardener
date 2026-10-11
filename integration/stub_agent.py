@@ -17,7 +17,9 @@ As a command harness, BEHAVIOUR picks what the agent does:
 
 As `claude` (via GARDENER_CLAUDE_BIN), it writes its argv and cwd to
 `$GARDENER_IT_RECORD_DIR/claude-*.json` and prints a successful
-Claude-Code-shaped envelope. Nothing here touches the network.
+Claude-Code-shaped envelope. With `GARDENER_IT_CLAUDE_BEHAVIOUR=sleep` it
+instead starts a child and sleeps, like a tend whose build outlives the
+timeout. Nothing here touches the network.
 """
 from __future__ import annotations
 
@@ -98,6 +100,13 @@ def command(behaviour: str) -> int:
 def claude(args: list[str]) -> int:
     prompt = sys.stdin.read() if not sys.stdin.isatty() else ""
     record_dir = os.environ.get("GARDENER_IT_RECORD_DIR")
+    if os.environ.get("GARDENER_IT_CLAUDE_BEHAVIOUR") == "sleep":
+        # Like a tend whose build outlives the timeout: a child, then sleep.
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        if record_dir:
+            Path(record_dir).mkdir(parents=True, exist_ok=True)
+            Path(record_dir, "sleep-child.pid").write_text(str(child.pid))
+        time.sleep(600)
     if record_dir:
         Path(record_dir).mkdir(parents=True, exist_ok=True)
         record = {"argv": args, "cwd": os.getcwd(), "stdin": prompt}

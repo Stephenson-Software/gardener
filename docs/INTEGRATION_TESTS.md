@@ -45,6 +45,8 @@ process boundary:
 - **Claude Code argv:** a fake `claude` records the real invocation:
   `--permission-mode plan` and `--tools Read,Grep,Glob` in report mode, and
   no `bypassPermissions` or `--dangerously-skip-permissions` in any mode.
+- **Timeouts kill the whole tree:** on both harnesses, a child the agent
+  started dies with it when gardener's timeout fires.
 
 ### Claude Code
 
