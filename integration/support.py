@@ -118,6 +118,80 @@ def wait_dead(pids: list[int], wait: float = 10) -> list[int]:
     return [p for p in pids if pid_alive(p)]
 
 
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class StubServer:
+    """A loopback HTTP server that records every request and answers 200
+    with `{}` (or `reply`). It stands in for an outside service, such as a
+    Discord webhook or the usage-reporting endpoint, so a test can assert
+    exactly what gardener sent without anything leaving the machine."""
+
+    def __init__(self, reply: bytes = b"{}", status: int = 200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.requests: list[dict] = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _record(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                server.requests.append({"method": self.command, "path": self.path,
+                                        "headers": dict(self.headers), "body": body})
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(reply)
+
+            do_POST = do_GET = do_PUT = _record
+
+            def log_message(self, *_args):
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_port}"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def json_bodies(self) -> list:
+        out = []
+        for r in self.requests:
+            try:
+                out.append(json.loads(r["body"] or b"null"))
+            except ValueError:
+                out.append(None)
+        return out
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+def wait_http(url: str, wait: float = 30, headers: dict | None = None) -> bool:
+    """Whether `url` answered (any HTTP status) within `wait` seconds."""
+    import time
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=2).close()
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except OSError:
+            time.sleep(0.2)
+    return False
+
+
 def pushed_at(repo: str) -> str:
     proc = subprocess.run(["gh", "repo", "view", repo, "--json", "pushedAt", "-q", ".pushedAt"],
                           capture_output=True, text=True, timeout=60)
