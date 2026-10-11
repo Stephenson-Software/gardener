@@ -3,7 +3,9 @@
 # run-overnight.sh, to run gardener's paid live integration tiers on the
 # real box: the Claude Code report tier and, when GARDENER_LIVE_WRITE_REPO
 # names a throwaway repository, the --implement / --file-issue / tend tier.
-# About $1 a run. See docs/INTEGRATION_TESTS.md.
+# About $1 a run. When GARDENER_LIVE_ORKET_ENV names a file of
+# GARDENER_IT_ORKET_* settings, the Orket tier runs too: free, but about 30
+# minutes of local model time. See docs/INTEGRATION_TESTS.md.
 #
 # The outcome goes to the configured Discord webhook (gardener's own
 # notifier): INFO when every test passed, ERROR otherwise, so drift in
@@ -25,6 +27,20 @@ export GARDENER_IT_CLAUDE=1
 if [ -n "${GARDENER_LIVE_WRITE_REPO:-}" ]; then
     export GARDENER_IT_WRITE_REPO="$GARDENER_LIVE_WRITE_REPO"
     MODULES+=(integration.test_live_write_modes)
+fi
+
+if [ -n "${GARDENER_LIVE_ORKET_ENV:-}" ]; then
+    # shellcheck source=/dev/null
+    . "$GARDENER_LIVE_ORKET_ENV"
+    MODULES+=(integration.test_live_orket)
+    # Ollama is started by hand on this box and doesn't survive a WSL
+    # restart; without it every Orket test fails as "provider unreachable".
+    OLLAMA_URL="${GARDENER_IT_ORKET_BASE_URL:-http://127.0.0.1:11434}"
+    if [ "${GARDENER_IT_ORKET_PROVIDER:-ollama}" = ollama ] && ! curl -sf -m 3 "$OLLAMA_URL/api/tags" >/dev/null; then
+        mkdir -p "$HOME/.ollama"
+        setsid nohup ollama serve >>"$HOME/.ollama/serve.log" 2>&1 </dev/null &
+        for _ in $(seq 1 60); do curl -sf -m 3 "$OLLAMA_URL/api/tags" >/dev/null && break; sleep 1; done
+    fi
 fi
 
 cd "$REPO_DIR" || exit 1
