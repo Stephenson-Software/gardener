@@ -598,6 +598,8 @@ The record of the real runs behind a release lives in `docs/verification/`.
 [0.4.0](verification/0.4.0.md) covers the conventions subdirectory;
 [0.3.0](verification/0.3.0.md) covers the harness layer, both the Claude
 Code regression check and the `command` harness.
+[orket-0.8.2](verification/orket-0.8.2.md) covers the integration suite's
+first real runs and Orket 0.8.2 through gardener.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.

@@ -149,4 +149,5 @@ non-zero if any row changed the clone or pushed.
 ## Recorded runs
 
 Results from real runs of this suite are in
-[`docs/verification/`](verification/), next to the release records.
+[`docs/verification/`](verification/), next to the release records. The
+first is [orket-0.8.2](verification/orket-0.8.2.md).
