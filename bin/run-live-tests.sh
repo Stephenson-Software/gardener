@@ -26,7 +26,9 @@ MODULES=(integration.test_live_claude_code)
 export GARDENER_IT_CLAUDE=1
 if [ -n "${GARDENER_LIVE_WRITE_REPO:-}" ]; then
     export GARDENER_IT_WRITE_REPO="$GARDENER_LIVE_WRITE_REPO"
-    MODULES+=(integration.test_live_write_modes)
+    # A second throwaway repository enables the concurrent overnight test.
+    [ -n "${GARDENER_LIVE_WRITE_REPO_2:-}" ] && export GARDENER_IT_WRITE_REPO_2="$GARDENER_LIVE_WRITE_REPO_2"
+    MODULES+=(integration.test_live_write_modes integration.test_live_merge_and_overnight)
 fi
 
 if [ -n "${GARDENER_LIVE_ORKET_ENV:-}" ]; then
@@ -63,7 +65,7 @@ ran = re.search(r"^Ran (\d+) tests? in ([\d.]+)s", text, re.M)
 result = re.search(r"^(OK.*|FAILED.*)$", text, re.M)
 failed = re.findall(r"^(?:FAIL|ERROR): (\S+)", text, re.M)
 summary = f"{ran.group(1) if ran else '?'} test(s), {result.group(1) if result else 'no result line'}"
-lines = re.findall(r"^\[(?:implement|file-issue|tend)\] .*$", text, re.M)
+lines = re.findall(r"^\[(?:implement|file-issue|tend|overnight|merge [^\]]+|scoping)\] .*$", text, re.M)
 message = "\n".join([summary, *("failed: " + name for name in failed), *lines, f"log: {log}"])
 level = notify.Level.INFO if status == 0 else notify.Level.ERROR
 title = "gardener live tests: passed" if status == 0 else "gardener live tests: FAILED"
