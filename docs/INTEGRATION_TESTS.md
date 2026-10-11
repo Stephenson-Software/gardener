@@ -177,6 +177,12 @@ Logs go to `~/.local/state/gardener/logs/live-tests/`, outside the
 directory the dashboard reads, and the last 12 are kept. A run costs about
 $1.
 
+With `GARDENER_LIVE_ORKET_ENV` set to a file that exports the
+`GARDENER_IT_ORKET_*` settings below, the script sources it and runs the
+Orket tier as well. That adds about 30 minutes of local CPU time and no
+money. If the provider is Ollama and isn't answering, the script starts
+`ollama serve` first.
+
 ### Any command harness
 
 `GARDENER_IT_COMMAND` is the harness command, exactly as it would appear in
