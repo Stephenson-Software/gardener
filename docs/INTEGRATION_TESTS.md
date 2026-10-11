@@ -23,6 +23,7 @@ itself, with the reason, until its settings are present.
 | Offline observability | `test_offline_observability.py` | git | ~7 s, free | yes |
 | Offline self-update | `test_offline_selfupdate.py` | git | ~4 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
+| Write modes | `test_live_write_modes.py` | as Claude Code, plus `GARDENER_IT_WRITE_REPO`, a throwaway GitHub repo | ~2.5 min, ~$0.60 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
 
@@ -132,6 +133,24 @@ The origin is a local bare repository and the webhook a loopback stub.
 
 One real report dispatch. It must exit 0, print a `GARDENER_SUMMARY:` line,
 record a cost, leave the clone unchanged and push nothing.
+
+### Write modes
+
+`align --implement` and `align --file-issue`, for real, against the GitHub
+repository named in `GARDENER_IT_WRITE_REPO`. **Point it at a throwaway
+repository:** each run opens a real pull request or issue there. They are
+closed afterwards (a pull request with its branch) unless
+`GARDENER_IT_KEEP=1`.
+
+- `--implement` opens exactly one pull request from a new branch, with at
+  least one changed file. It does not merge it, move the default branch or
+  open an issue. Its `Bash(gh pr *)` allow-pattern would permit `gh pr
+  merge`, so only the outcome can show the prompt held.
+- `--file-issue` opens exactly one issue with a body. It opens no pull
+  request, does not move the default branch, and leaves the clone
+  unchanged.
+- Neither puts the conventions repo's URL or name in a title, body, branch
+  name or commit message.
 
 ### Any command harness
 

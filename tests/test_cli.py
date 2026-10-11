@@ -27,6 +27,7 @@ from gardener import (
 )
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
+    CONVENTIONS_PRIVACY_REQUIREMENT,
     PRESERVED_DEPENDENCY_DIRS,
     REFRESH_TIMEOUT_SECONDS,
     REPO_RE,
@@ -835,6 +836,13 @@ class TestPromptTemplating(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             prompt = build_prompt(Mode.FILE_ISSUE, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
         self.assertIn("Do not open more than one issue", prompt)
+
+    def test_write_mode_prompts_keep_the_conventions_repo_out_of_what_they_post(self):
+        for mode in (Mode.IMPLEMENT, Mode.FILE_ISSUE):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                prompt = build_prompt(mode, "owner/name", Path(td), Path(td), "main", CONVENTIONS_URL)
+                self.assertIn(CONVENTIONS_PRIVACY_REQUIREMENT, prompt)
+                self.assertNotIn("by URL", prompt)
 
     def test_file_issue_mode_prompt_requires_passive_voice_and_gardener_attribution(self):
         with tempfile.TemporaryDirectory() as td:

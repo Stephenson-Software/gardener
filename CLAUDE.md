@@ -304,11 +304,13 @@ record what you actually observed before changing the docstring's claims.
     sleep'" section for what's actually been deployed where), so a real
     concurrent run is the only thing that actually confirms this works
     under real resource constraints, not just under mocks.
-- `--implement` and `--file-issue` should be exercised for real (not just
-  unit-tested) before being trusted against anything that matters, the
-  same way report mode was — this hadn't happened as of this repo's first
-  version (see `docs/PROJECT_STATUS.md`) and is unrelated to `tend`'s
-  own verification above.
+- `--implement` and `--file-issue`: run the live write-mode tier
+  (`GARDENER_IT_CLAUDE=1 GARDENER_IT_WRITE_REPO=<a throwaway owner/repo>`,
+  see `docs/INTEGRATION_TESTS.md`) after any change to their prompts or
+  `ModeSpec`s. It opens a real pull request and issue in that repository,
+  checks that nothing was merged, that the default branch didn't move, and
+  that the conventions repo isn't named in anything posted, then closes
+  them.
 
 ## Commit and PR conventions
 

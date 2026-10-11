@@ -118,6 +118,17 @@ def repo_arg(value: str) -> str:
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
+# The conventions repo may be private while the target is public: a run
+# once told to cite "the conventions doc(s) by URL" put the repo's name into
+# public pull requests and issues, which later runs then quoted.
+CONVENTIONS_PRIVACY_REQUIREMENT = (
+    "Never name the conventions repo, or give its URL or local path, in a "
+    "branch name, commit message, pull request or issue: it may be private "
+    "while this repo is public. Call it \"the engineering conventions\" and "
+    "cite its documents by file name only (for example "
+    "`docs/README_STRUCTURE.md`)."
+)
+
 MODE_INSTRUCTIONS = {
     Mode.REPORT: """4. Report the gap checklist only. You do NOT have file-write or shell
    tools available in this session — that is enforced at the tool level,
@@ -136,8 +147,9 @@ MODE_INSTRUCTIONS = {
      COMMIT_PR_CONVENTIONS.md. Only add a Co-Authored-By trailer if this
      repo's own history already uses that convention.
    - Push the branch and open a pull request (`gh pr create`) summarizing
-     the gaps closed, referencing the conventions doc(s) by URL instead of
-     restating their rules in the PR body.
+     the gaps closed, referencing the conventions doc(s) by file name
+     instead of restating their rules in the PR body.
+   - {CONVENTIONS_PRIVACY_REQUIREMENT}
    - {dev_loop.ATTRIBUTION_REQUIREMENT}
    - Only `git *` and `gh pr *` commands are available to you; nothing
      else is pre-approved and there is no human available in this session
@@ -148,6 +160,7 @@ MODE_INSTRUCTIONS = {
    cycle. Do not implement any fix yourself — you have no file-write
    tools available in this session, only `gh issue *` commands are
    pre-approved. Do not open more than one issue.
+   - {CONVENTIONS_PRIVACY_REQUIREMENT}
    - {dev_loop.ATTRIBUTION_REQUIREMENT}""",
 }
 

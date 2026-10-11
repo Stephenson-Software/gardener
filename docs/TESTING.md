@@ -605,6 +605,7 @@ Then confirm `gardener tend` and `gardener overnight` refuse with the
 `GARDENER_HARNESS_ALLOW_UNSCOPED` message when it isn't set.
 
 The record of the real runs behind a release lives in `docs/verification/`.
+[0.4.5](verification/0.4.5.md) covers the first real `--implement` and `--file-issue` runs;
 [0.4.4](verification/0.4.4.md) covers `overnight` continuing into the next cycle;
 [0.4.3](verification/0.4.3.md) covers session control and whole-line run logs;
 [0.4.2](verification/0.4.2.md) covers signals reaching running agents;
