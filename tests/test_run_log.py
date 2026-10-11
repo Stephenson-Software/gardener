@@ -7,6 +7,7 @@ a real gardener progress line survives the round trip from `print(...,
 file=sys.stderr)` through the log file and back out of the dashboard's
 parser."""
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -202,10 +203,10 @@ class TestTeeStreamDirectly(unittest.TestCase):
         mirror.write.side_effect = OSError("disk full")
         stream = run_log._TeeStream(primary, mirror)
 
-        n = stream.write("hello")
+        n = stream.write("hello\n")
 
-        self.assertEqual(primary.getvalue(), "hello")
-        self.assertEqual(n, len("hello"))
+        self.assertEqual(primary.getvalue(), "hello\n")
+        self.assertEqual(n, len("hello\n"))
 
     def test_write_survives_a_mirror_flush_failure(self):
         primary = io.StringIO()
@@ -213,9 +214,71 @@ class TestTeeStreamDirectly(unittest.TestCase):
         mirror.flush.side_effect = ValueError("I/O operation on closed file")
         stream = run_log._TeeStream(primary, mirror)
 
-        stream.write("hello")  # must not raise
+        stream.write("hello\n")  # must not raise
 
-        self.assertEqual(primary.getvalue(), "hello")
+        self.assertEqual(primary.getvalue(), "hello\n")
+
+    def test_a_line_is_written_whole_when_its_newline_arrives(self):
+        """`print` writes its text and its newline separately; nothing may
+        be written until the line is complete."""
+        primary, mirror = io.StringIO(), io.StringIO()
+        stream = run_log._TeeStream(primary, mirror)
+        self.assertEqual(stream.write("partial"), len("partial"))
+        self.assertEqual((primary.getvalue(), mirror.getvalue()), ("", ""))
+        stream.write("\n")
+        self.assertEqual((primary.getvalue(), mirror.getvalue()), ("partial\n", "partial\n"))
+
+    def test_flush_writes_out_an_unfinished_line(self):
+        primary, mirror = io.StringIO(), io.StringIO()
+        stream = run_log._TeeStream(primary, mirror)
+        stream.write("no newline")
+        stream.flush()
+        self.assertEqual((primary.getvalue(), mirror.getvalue()), ("no newline", "no newline"))
+
+    def test_concurrent_prints_never_glue_lines_together(self):
+        """Two threads printing at once, as `overnight --concurrency 2`
+        does, produced `...<path>gardener: <repo> checked out ...` in a
+        real log."""
+        import threading
+        import time
+
+        class Yielding(io.StringIO):
+            # A real file write can release the GIL; yield here so threads
+            # actually switch between `print`'s text and its newline.
+            def write(self, s):
+                time.sleep(0)
+                return super().write(s)
+
+        primary, mirror = Yielding(), Yielding()
+        stream = run_log._TeeStream(primary, mirror)
+        start = threading.Barrier(4)
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        self.addCleanup(sys.setswitchinterval, interval)
+
+        def worker(name):
+            start.wait()
+            for i in range(300):
+                print(f"gardener: {name} line {i}", file=stream)
+
+        threads = [threading.Thread(target=worker, args=(f"repo{n}",)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for out in (primary.getvalue(), mirror.getvalue()):
+            lines = out.splitlines()
+            self.assertEqual(len(lines), 1200)
+            for line in lines:
+                self.assertRegex(line, r"^gardener: repo\d line \d+$")
+
+    def test_tee_stderr_flushes_an_unfinished_last_line_into_the_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"GARDENER_STATE_DIR": td}), \
+                 patch("sys.stderr", new=io.StringIO()):
+                with run_log.tee_stderr("unfinished") as path:
+                    sys.stderr.write("last words without a newline")
+            self.assertIn("last words without a newline", Path(path).read_text())
 
     def test_writelines_writes_every_line_to_both_streams(self):
         primary = io.StringIO()

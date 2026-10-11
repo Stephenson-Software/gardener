@@ -18,7 +18,8 @@ itself, with the reason, until its settings are present.
 
 | Tier | File | Needs | Cost | Runs in CI |
 |---|---|---|---|---|
-| Offline contract | `test_offline_contract.py` | git | ~15 s, free | yes |
+| Offline contract | `test_offline_contract.py` | git | ~10 s, free | yes |
+| Offline lifecycle | `test_offline_lifecycle.py` | git | ~10 s, free | yes |
 | Claude Code | `test_live_claude_code.py` | `GARDENER_IT_CLAUDE=1`, an authenticated `claude` | ~30 s, ~$0.15 | no |
 | Any command harness | `test_live_command.py` | `GARDENER_IT_COMMAND` | depends on the harness | no |
 | Orket | `test_live_orket.py` | Orket checkout, catalog, model (below) | refusals ~20 s; inference minutes per test on CPU | no |
@@ -49,6 +50,31 @@ process boundary:
   started dies with it when gardener's timeout fires.
 - **Signals reach the agent:** a SIGTERM or Ctrl-C to `gardener align`
   kills the running agent too, though it runs in its own session.
+
+### Offline lifecycle
+
+The rest of a dispatch's life, still with stand-in agents and no network:
+
+- **Sessions:** `gardener ps` lists a running `align`, and `gardener stop`
+  and `gardener kill` end it and its agent.
+- **`tend`:**
+  - it is refused without the unscoped opt-in;
+  - `merge_allowed` is set only with `--allow-merge` and the repo on the
+    allow-list;
+  - a missing dev-loop skill is bootstrapped inside the sandbox's HOME,
+    never the operator's.
+- **`overnight`:**
+  - with `--concurrency 2`, every garden repo is tended, and no log line is
+    glued to another;
+  - an unready harness aborts before any dispatch;
+  - Ctrl-C mid-batch kills every agent.
+- **Cloning and refreshing:** a second `align` refreshes the clone the
+  first one made.
+
+These use `Sandbox(local_github=True)`: the fake `gh` serves `repo view`,
+`repo clone`, `pr list` and `issue list` from local bare repositories, so
+the real clone-and-refresh path runs offline. Every test asserts that no
+other `gh` call was made.
 
 ### Claude Code
 
@@ -123,12 +149,17 @@ Every test runs in its own sandbox (`support.Sandbox`):
 A test can't write to your run history, alert your Discord, push to your
 hub, or pick up your own harness configuration.
 
-With the offline target, the fixture repo is seeded straight into
-gardener's clone cache and `align` runs with `--no-refresh-target`. A fake
-`gh` on `PATH` records every call and fails. The only calls allowed are
-read-only auth queries, which `claude` itself makes at startup. The
-fixture's `origin` is a GitHub URL that does not exist, so nothing can be
-pushed.
+With the offline target, a fake `gh` (`fake_gh.py`) on `PATH` records
+every call:
+- **By default**, the fixture repo is seeded straight into gardener's clone
+  cache, `align` runs with `--no-refresh-target`, and every `gh` call fails.
+- **With `local_github=True`**, the fake `gh` serves read-only calls from
+  local bare repositories instead.
+
+Either way, a call outside the read-only set is a test failure. The
+fixture's `origin` is never a real GitHub repository, so nothing can be
+pushed. With `fake_home=True`, `HOME` points into the sandbox too, so
+nothing reads or writes the operator's `~/.claude` or `~/local-skills`.
 
 The harness command is wrapped in `recorder.py`, which passes everything
 through unchanged. It also saves what the harness received and printed, so

@@ -93,6 +93,10 @@ DEFAULT_STOP_TIMEOUT_SECONDS = 10.0
 #: How long to wait between liveness polls while `stop()` is waiting out
 #: its grace period.
 _POLL_INTERVAL_SECONDS = 0.2
+#: How long `gardener kill` waits for the signalled session to exit before
+#: reporting it. Signal delivery and exit are not instant: checking at once
+#: reported a session that was in the middle of dying as "still running".
+KILL_SETTLE_SECONDS = 2.0
 
 _PPID_RE = re.compile(r"^PPid:\s+(\d+)", re.MULTILINE)
 
@@ -451,17 +455,31 @@ def _signal_pids(pids: Sequence[int], sig: int, kill_fn: Callable[[int, int], No
     return signalled
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, proc_root: Path = Path("/proc")) -> bool:
+    """Whether `pid` is still running. A zombie (exited, but not yet reaped
+    by its parent) is not: `os.kill(pid, 0)` still succeeds on one, so
+    `gardener stop` used to wait out its whole grace period, escalate, and
+    then report an already-dead session as "still running". Found by the
+    integration suite, whose test process is the session's (not yet
+    reaping) parent. Read from `/proc` where it exists; elsewhere the
+    `os.kill` answer stands."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         # Alive, just not ours to signal.
-        return True
+        pass
     except OSError:
         return False
-    return True
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+    except OSError:
+        return True
+    # The state field follows the parenthesised command name, which may
+    # itself contain spaces or parentheses.
+    state = stat.rpartition(")")[2].split()
+    return not (state and state[0] in ("Z", "X"))
 
 
 @dataclass(frozen=True)
@@ -490,10 +508,14 @@ def stop(
     pid to go away, escalating to SIGKILL after `timeout` if it hasn't.
 
     `escalate=False` (what `gardener kill` uses) sends the signal once and
-    reports whether the process is gone, without waiting or escalating."""
+    reports whether the process is gone, allowing it `KILL_SETTLE_SECONDS`
+    to exit but never escalating."""
     tree = descendants(session.pid, proc_root=proc_root) + [session.pid]
     signalled = _signal_pids(tree, sig, kill_fn)
     if not escalate:
+        deadline = monotonic_fn() + KILL_SETTLE_SECONDS
+        while alive_fn(session.pid) and monotonic_fn() < deadline:
+            sleep_fn(_POLL_INTERVAL_SECONDS)
         return StopResult(
             session=session,
             signalled=signalled,

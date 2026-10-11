@@ -48,6 +48,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional, TextIO
@@ -121,32 +122,57 @@ def prune_old_logs(logs_dir: Path, keep: int = DEFAULT_KEEP) -> list[Path]:
 
 class _TeeStream:
     """Writes to two streams. Only the methods a `print(..., file=...)` call
-    and a subprocess handoff actually touch are implemented."""
+    and a subprocess handoff actually touch are implemented.
+
+    Writes whole lines only, one at a time. `print` writes its text and its
+    newline as two separate calls, so when `overnight --concurrency` worker
+    threads printed at once their lines were glued together mid-line (seen
+    in a real log: `...checked out at <path>gardener: <repo> checked out
+    ...`). The dashboard reads this log line by line, so a glued `finished
+    tending` line can leave a repo looking stuck. Each thread therefore
+    keeps its own unfinished line, and only complete lines are written,
+    under a lock. Found by the integration suite's overnight test."""
 
     def __init__(self, primary: TextIO, mirror: TextIO):
         self._primary = primary
         self._mirror = mirror
+        self._lock = threading.Lock()
+        self._partial = threading.local()
 
     def write(self, s: str) -> int:
-        n = self._primary.write(s)
-        try:
-            self._mirror.write(s)
-            # Unbuffered by intent: the dashboard polls this file every 4s
-            # and a run can sit inside a single `claude` dispatch for
-            # minutes. A half-written buffer flushed only at process exit
-            # would defeat the entire point of writing the file.
-            self._mirror.flush()
-        except (OSError, ValueError):
-            # Disk filled, or the file was closed underneath us. Keep the
-            # run going against the real stderr.
-            pass
-        return n
+        text = getattr(self._partial, "text", "") + s
+        head, newline, tail = text.rpartition("\n")
+        self._partial.text = tail
+        if newline:
+            self._emit(head + newline)
+        return len(s)
+
+    def _emit(self, text: str) -> None:
+        with self._lock:
+            self._primary.write(text)
+            try:
+                self._mirror.write(text)
+                # Unbuffered by intent: the dashboard polls this file every 4s
+                # and a run can sit inside a single `claude` dispatch for
+                # minutes. A half-written buffer flushed only at process exit
+                # would defeat the entire point of writing the file.
+                self._mirror.flush()
+            except (OSError, ValueError):
+                # Disk filled, or the file was closed underneath us. Keep the
+                # run going against the real stderr.
+                pass
 
     def writelines(self, lines) -> None:
         for line in lines:
             self.write(line)
 
     def flush(self) -> None:
+        """Also writes out this thread's unfinished line, as an explicit
+        flush asks for."""
+        pending = getattr(self._partial, "text", "")
+        if pending:
+            self._partial.text = ""
+            self._emit(pending)
         self._primary.flush()
         with contextlib.suppress(OSError, ValueError):
             self._mirror.flush()
@@ -203,10 +229,14 @@ def tee_stderr(
     # is about to write into.
     prune_old_logs(directory, keep=max(1, keep))
     original = sys.stderr
-    sys.stderr = _TeeStream(original, handle)
+    tee = _TeeStream(original, handle)
+    sys.stderr = tee
     try:
         yield path
     finally:
+        # An unfinished last line from this thread still belongs in both.
+        with contextlib.suppress(OSError, ValueError):
+            tee.flush()
         sys.stderr = original
         with contextlib.suppress(OSError, ValueError):
             handle.close()
