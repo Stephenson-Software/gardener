@@ -204,9 +204,19 @@ For Ollama, set `ORKET_GARDENER_PROVIDER=ollama` and the native base URL
 budget) with truncation disabled, so a server-wide `OLLAMA_CONTEXT_LENGTH`
 is no longer needed. That needs Ollama 0.24.0 or later.
 
+Since Orket 0.8.4:
+- **Delivery bar:** a delivered report must have a summary starting with
+  `GARDENER_SUMMARY:` and a findings section. A title-only or template
+  report is refused.
+- **Inputs:** an input over 64 KiB reaches the model instead of failing.
+- **Timeouts:** a timed-out run is closed as failed, and its run ID is in
+  the error.
+
 The [integration suite](INTEGRATION_TESTS.md#orket) has an Orket tier.
-It checks the refusals listed above, and that a delivered report is
-governed and replayable.
+It checks:
+- the refusals listed above;
+- that a delivered report is governed and replayable;
+- on 0.8.4+, each of those three fixes.
 
 #### `gardener-orket-extension` (headless)
 
@@ -222,6 +232,11 @@ durable run record beyond gardener's own. Configure it with
 `GARDENER_HARNESS_COMMAND="/path/to/venv/bin/orket-extension gardener"` and
 the host's `EXTENSION_HOST_API_KEY`; its README lists the rest.
 
+Since Orket 0.8.3, the host refuses a prompt that may not fit its prompt
+profile, with `E_MODEL_INPUT_BUDGET`. Gardener's prompt does not fit the
+packaged 8,192-token profile, so start the host with a larger one; the
+extension's README explains how.
+
 #### What was verified
 
 On one machine (Ollama `llama3.2:3b`, 2 GB GPU), with gardener 0.3.0:
@@ -233,9 +248,11 @@ On one machine (Ollama `llama3.2:3b`, 2 GB GPU), with gardener 0.3.0:
   Ollama's default 4096-token context truncated the prompt. Its llama.cpp
   default was not tested.
 
-So both paths are wired end to end and fail safely. Neither has yet produced
-a useful audit on that hardware. A larger model on a host with a larger
-context is the next step. Details are in the extension's
+So both paths are wired end to end and fail safely. On Orket 0.8.2 and 0.8.4,
+`qwen2.5:7b` on the same machine delivered a mostly correct report through
+Orket's harness ([orket-0.8.2](verification/orket-0.8.2.md),
+[orket-0.8.4](verification/orket-0.8.4.md)). `llama3.2:3b` has not delivered
+a useful one through either path. Details for the extension are in its
 `docs/verification.md`.
 
 **Write modes are not served** by either recipe. Enforcing

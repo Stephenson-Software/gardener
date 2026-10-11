@@ -613,6 +613,8 @@ The record of the real runs behind a release lives in `docs/verification/`.
 Code regression check and the `command` harness.
 [orket-0.8.2](verification/orket-0.8.2.md) covers the integration suite's
 first real runs and Orket 0.8.2 through gardener.
+[orket-0.8.4](verification/orket-0.8.4.md) rechecks Orket 0.8.4's fixes for
+the issues those runs filed.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.

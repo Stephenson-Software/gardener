@@ -30,9 +30,11 @@ verifies delivery and source references, not findings.
 """
 import json
 import os
+import re
 import subprocess
 import unittest
 import urllib.request
+from pathlib import Path
 
 from integration.support import IntegrationCase, Sandbox, env_setting, git
 
@@ -50,6 +52,24 @@ REASON = "set GARDENER_IT_ORKET_SRC/_PYTHON/_CATALOG/_MODEL to run the Orket tie
 def deliver_env() -> dict[str, str]:
     raw = env_setting("GARDENER_IT_ORKET_DELIVER_ENV")
     return {k: str(v) for k, v in json.loads(raw).items()} if raw else {}
+
+
+def large_env() -> dict[str, str]:
+    raw = env_setting("GARDENER_IT_ORKET_LARGE_ENV")
+    return {k: str(v) for k, v in json.loads(raw).items()} if raw else {}
+
+
+def orket_version() -> tuple:
+    """The Orket checkout's version, from its pyproject.toml; (0,) if unknown."""
+    try:
+        text = (Path(SRC) / "pyproject.toml").read_text()
+    except OSError:
+        return (0,)
+    match = re.search(r'^version\s*=\s*"([0-9.]+)"', text, re.M)
+    return tuple(int(p) for p in match.group(1).split(".")) if match else (0,)
+
+
+AT_LEAST_084 = CONFIGURED and orket_version() >= (0, 8, 4)
 
 
 @unittest.skipUnless(CONFIGURED, REASON)
@@ -169,6 +189,11 @@ class Inference(OrketCase):
         self.assertFalse(r.envelope["is_error"])
         self.assertIn("verified delivery and source references only", r.stdout)
         self.assertEqual(r.run["outcome"], "report")
+        if AT_LEAST_084:
+            # Orket 0.8.4 (McElyea/Orket#9): a delivered Gardener report
+            # carries a real summary line, not a title or a template.
+            self.assertRegex(r.stdout, r"GARDENER_SUMMARY:\s*\S")
+            self.assertNotIn("<N>", r.run["gap_summary"])
 
         report = self.inspect(box, r)
         self.assertEqual(report["final_truth"]["completion_classification"], "completion_satisfied")
@@ -193,6 +218,50 @@ class Inference(OrketCase):
                 settings = deliver_env()
                 expected = int(settings.get("ORKET_GARDENER_MAX_INPUT_TOKENS", 8192)) + 2048
                 self.assertEqual(loaded[MODEL].get("context_length"), expected)
+
+    @unittest.skipUnless(AT_LEAST_084, "needs Orket 0.8.4+ (McElyea/Orket#8)")
+    def test_a_timed_out_run_is_closed_and_named(self):
+        """Orket 0.8.4: a timeout closes the run as failed, with an end
+        time and final truth, and the envelope names it for inspection."""
+        settings = deliver_env()
+        box = self.box(**settings)
+        box.settings["GARDENER_ALIGN_TIMEOUT"] = "60"
+        r = box.align()
+        self.assertEqual(r.code, 1, r.describe())
+        self.assertTrue(r.envelope["is_error"])
+        self.assertTrue(r.envelope["session_id"].startswith("orket:agent-run:"), r.envelope)
+        self.assertCloneUntouched(r)
+        report = self.inspect(box, r)
+        self.assertEqual(report["run"]["lifecycle_state"], "failed_terminal")
+        attempt = report["attempts"][0]
+        self.assertEqual(attempt["attempt_state"], "attempt_failed")
+        self.assertIsNotNone(attempt["end_timestamp"])
+        self.assertEqual(report["final_truth"]["completion_classification"], "completion_unsatisfied")
+
+    @unittest.skipUnless(AT_LEAST_084 and large_env(),
+                         "needs Orket 0.8.4+ (McElyea/Orket#7) and GARDENER_IT_ORKET_LARGE_ENV")
+    def test_input_over_64_kib_reaches_the_model(self):
+        """Orket 0.8.4: inputs over 64 KiB used to fail with
+        E_AGENT_CHILD_DISCONNECTED before inference. A 60 s budget keeps
+        this short: reaching the model and timing out is a pass."""
+        source = Path(self.box().root) / "large-conventions"
+        import shutil
+
+        from integration.support import FIXTURES
+
+        shutil.copytree(FIXTURES / "conventions", source)
+        for i in range(8):  # 8 x 12 KB = 96 KB, under the 16 KiB per-file cap
+            (source / "docs" / f"PAD_{i}.md").write_text(("Padding for the size test. " * 460)[:12_000])
+        box = self.box(**large_env())
+        box.settings["GARDENER_ALIGN_TIMEOUT"] = "60"
+        r = box.align(conventions_url=box.conventions(source=source, compact_copy=False))
+        result = r.envelope["result"] if r.envelope else r.stderr
+        self.assertNotIn("CHILD_DISCONNECTED", result)
+        inputs = next(box.root.glob("orket-work/run-*/inputs.json"))
+        self.assertGreater(inputs.stat().st_size, 65_536, "the input was not over 64 KiB")
+        report = self.inspect(box, r)
+        self.assertEqual(len(report["iterations"][0]["model_calls"]), 1, "the model was never called")
+        self.assertCloneUntouched(r)
 
     def test_target_changed_during_the_run_is_refused(self):
         box = self.box(**deliver_env())
