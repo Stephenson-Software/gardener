@@ -75,12 +75,20 @@ against a 0.8.8 API host:
 The second row is 0.8.6's fix: the refusal now names the setting and says
 the input was not truncated.
 
-The first row is a change on Orket's side: since 0.8.5 a request above the
-output ceiling is refused instead of lowered. The extension's old default
-of 1,024 is above the packaged ceiling for this API (768 on most profiles),
-so every dispatch failed before reaching the model. Orket documented this
-in its guide. The extension is being changed to request 768 by default and
-to report this refusal as `blocked`, since it repeats for every repository.
+The first row is not a version change. Orket has refused a request above
+the profile's output ceiling since 0.8.2, rather than lowering it. The
+ceiling depends on the model's profile:
+
+| Ollama profile | Ceiling on this API (`concise_text`) |
+|---|---|
+| `ollama.qwen.chatml.v1` | 768 |
+| `ollama.llama.inst.v1` | 1,536 |
+
+The 0.8.4 recheck used `llama3.2:3b`, so the extension's 1,024-token
+default went through. With `qwen2.5:7b` it is refused before the model is
+called. The extension is being changed to request 768 by default, the
+lowest packaged ceiling, and to report this refusal as `blocked`, since it
+repeats for every repository.
 
 ## Reading the results
 
