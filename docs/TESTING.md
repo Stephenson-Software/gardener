@@ -627,6 +627,9 @@ covers alerts, usage reporting, the dashboard, the hub and doctor end to end.
 self-update through real git, end to end.
 [live-merge-overnight](verification/live-merge-overnight.md) covers the
 merge gate both ways and a real concurrent `overnight`.
+[weekly-selfupdate-phone](verification/weekly-selfupdate-phone.md)
+covers the weekly task launched by Task Scheduler, `gardener update`
+against GitHub, and phone taps on the dashboard.
 
 This exact sequence is what verified gardener's first working version
 against `dmccoystephenson/create-dev-loop`.
