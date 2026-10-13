@@ -333,7 +333,8 @@ to the real stderr, and an unopenable log degrading to a warning with
 stderr left alone — and `_TeeStream` directly (a failing mirror write or
 flush never reaching the run, only whole lines written so four threads
 printing at once never glue lines together, an unfinished last line still
-flushed, `isatty`/`encoding` passing through to the primary). It covers
+flushed, `isatty`/`encoding` passing through to the primary, with
+`encoding` falling back to `utf-8` when the primary has none). It covers
 `prune_old_logs` too (keeping the newest N, ignoring non-`.log` files, a
 missing or unreadable dir and an undeletable file never raising, and a new
 run never pruning its own log even at `keep=0`), and the drift guards
