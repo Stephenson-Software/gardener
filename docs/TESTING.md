@@ -302,7 +302,47 @@ cursor's cycle-completion and reset logic), that the cursor reader never
 `build_batch_summary`'s treatment of a lock-skipped `RepoOutcome` (listed
 under its own line and headline count, excluded from the attempted and
 error totals, never lowering the level, and an all-locked batch reading
-as INFO rather than as a total failure); `tests/test_conventions.py`
+as INFO rather than as a total failure); `tests/test_merge_allowlist.py`
+covers the merge allow-list's JSON read/write the same way, with a real
+file in a tmp dir per test: a missing file reading as an empty list rather
+than an error, `add`/`remove` reporting whether they changed anything,
+`list_allowed` sorted, the file persisting as a plain JSON array with its
+parent directories created, malformed JSON and a non-array document each
+raising `ValueError`, and the atomic save's sibling `.tmp` file not left
+behind; `tests/test_dev_loop.py` covers `slugify_repo_name`/`skill_slug`
+(lowercasing, collapsing non-alphanumeric runs, stripping edge separators,
+and a name with nothing left raising), `has_dev_loop_skill` against a tmp
+commands dir (a broken symlink reads as absent), `step6_unreachable` in
+both directions — false against the real `MODE_SPECS[Mode.CREATE_DEV_LOOP]`,
+true once `Bash(gh repo create *)` is withdrawn from a patched copy — and
+the two prompt builders: the create-dev-loop prompt naming the exact slug,
+confining writes, telling the session to perform Step 6, and never naming
+`gh pr comment`, which that mode's allow-list doesn't grant; the tend
+prompt carrying the headless preamble, the merge authorization matching
+`allow_merge_eligible` in both directions, `gh pr comment` as the
+review-posting path without calling a missing Review object a blocked
+decision (asserted over whitespace-collapsed text so the negation can't be
+dropped unnoticed), the working-directory override, the one-pass rule, the
+orphan marker, the passive-voice and attribution requirement, and the
+continue-the-orphaned-PR instructions appearing only when an `OrphanedPR`
+is passed; `tests/test_run_log.py` covers the stderr tee — both
+destinations written, content flushed while the run is still open, stderr
+restored on a normal exit and on a `BaseException`, two runs in the same
+second appending rather than erasing each other, `fileno` passing through
+to the real stderr, and an unopenable log degrading to a warning with
+stderr left alone — and `_TeeStream` directly (a failing mirror write or
+flush never reaching the run, only whole lines written so four threads
+printing at once never glue lines together, an unfinished last line still
+flushed, `isatty`/`encoding` passing through to the primary, with
+`encoding` falling back to `utf-8` when the primary has none). It covers
+`prune_old_logs` too (keeping the newest N, ignoring non-`.log` files, a
+missing or unreadable dir and an undeletable file never raising, and a new
+run never pruning its own log even at `keep=0`), and the drift guards
+between the writing and reading halves: `run_log.default_logs_dir`
+agreeing with `dashboard.default_logs_dir`, a `log_file_name` result found
+by `dashboard.find_active_log`'s glob, and real `cli.py` progress lines
+written through the tee coming back out of `parse_in_progress`/
+`parse_batch_progress`; `tests/test_conventions.py`
 covers `ConventionsSource.verify_complete()`'s missing-doc detection and
 `ensure_conventions()`'s clone/fetch-reset/no-refresh branches, with
 `_run_git`/`subprocess.run` mocked so no real `git` process ever runs, and
