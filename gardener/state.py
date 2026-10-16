@@ -170,6 +170,14 @@ class RepoStats:
     last_outcome: Optional[str] = None
     cost_usd: float = 0.0
     duration_ms: int = 0
+    #: `error` runs recorded after `last_success` (every error, if the repo
+    #: has never succeeded). The one field here that isn't whole-history:
+    #: the plot's leaf litter is drawn from it so that it shares a clock
+    #: with health, which is keyed on `last_success` — an all-time count
+    #: saturated on almost every repo and drew an error from months ago
+    #: the same as tonight's (issue #115). `errors` stays all-time for the
+    #: table, where a lifetime number is what a reader expects.
+    errors_since_success: int = 0
 
 
 #: How long a quiet gap has to be before the runs either side of it count
@@ -700,6 +708,25 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
                 """
             ).fetchall()
         }
+        # Strictly after the newest success's timestamp: an error recorded
+        # in the same second as that success can't be ordered against it
+        # (see `NEWEST_FIRST`), and leaving it out errs toward the plant
+        # the success already says is healthy.
+        since_success = {
+            r["repo"]: r["n"]
+            for r in conn.execute(
+                f"""
+                SELECT repo, COUNT(*) AS n FROM runs AS outer_runs
+                WHERE outcome = ?
+                  AND timestamp > COALESCE(
+                      (SELECT MAX(timestamp) FROM runs
+                       WHERE repo = outer_runs.repo AND outcome IN ({placeholders})),
+                      '')
+                GROUP BY repo
+                """,
+                (ERROR_OUTCOME, *successes),
+            ).fetchall()
+        }
     return {
         r["repo"]: RepoStats(
             repo=r["repo"],
@@ -712,6 +739,7 @@ def repo_stats(db_path: Optional[Path] = None) -> dict[str, RepoStats]:
             last_outcome=latest.get(r["repo"]),
             cost_usd=round(r["cost_usd"], 4),
             duration_ms=int(r["duration_ms"]),
+            errors_since_success=since_success.get(r["repo"], 0),
         )
         for r in rows
     }

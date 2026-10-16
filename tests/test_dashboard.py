@@ -899,7 +899,8 @@ class TestBuildGardenRows(unittest.TestCase):
         return state.RepoStats(**base)
 
     def test_joins_both_opt_in_lists_with_run_history(self):
-        stats = {"owner/a": self._stats("owner/a", runs=5, successes=4, errors=1, cost_usd=1.234,
+        stats = {"owner/a": self._stats("owner/a", runs=5, successes=4, errors=1,
+                                        errors_since_success=1, cost_usd=1.234,
                                         last_run="2026-07-20T00:00:00+00:00",
                                         last_success="2026-07-19T00:00:00+00:00",
                                         last_outcome="error")}
@@ -910,6 +911,7 @@ class TestBuildGardenRows(unittest.TestCase):
         self.assertTrue(row["can_merge"])
         self.assertFalse(row["in_flight"])
         self.assertEqual((row["runs"], row["successes"], row["errors"]), (5, 4, 1))
+        self.assertEqual(row["errors_since_success"], 1)
         self.assertEqual(row["last_success"], "2026-07-19T00:00:00+00:00")
         self.assertEqual(row["last_outcome"], "error")
         self.assertEqual(row["cost_usd"], 1.23)
@@ -920,6 +922,7 @@ class TestBuildGardenRows(unittest.TestCase):
         rows = dashboard.build_garden_rows(["owner/new"], [], {}, [])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["runs"], 0)
+        self.assertEqual(rows[0]["errors_since_success"], 0)
         self.assertIsNone(rows[0]["last_run"])
         self.assertEqual(rows[0]["cost_usd"], 0.0)
 

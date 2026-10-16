@@ -266,7 +266,7 @@ and previously appeared nowhere.
   | Short brown stem with a single drooping leaf | Runs recorded but none of them succeeded — the leaf count starts at one, so there is no leafless state |
   | Seed in the ground | Never dispatched — sitting in bare soil, or in the pot below when the repo isn't in the garden |
   | Blossom | On the merge allow-list, i.e. allowed to merge its own PRs |
-  | Brown leaf litter on the soil | `error` runs, up to six |
+  | Brown leaf litter on the soil | `error` runs since `last_success` (all of them, if the repo has never succeeded), up to six — on the same clock as health, where an all-time count saturated the cap on most repos. The all-time total stays in the table's Errors column |
   | Width of the soil mound | Dollars spent tending that repo |
   | Terracotta pot instead of soil | Allow-listed but not in the garden |
   | Pulsing glow | Being tended right now (from the same best-effort log parse the "Currently tending" panel uses) |
