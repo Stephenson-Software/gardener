@@ -494,6 +494,9 @@ def build_garden_rows(
                 "runs": s.runs if s else 0,
                 "successes": s.successes if s else 0,
                 "errors": s.errors if s else 0,
+                # What the plot's leaf litter is drawn from, so that it is
+                # on the same clock as health rather than all-time (#115).
+                "errors_since_success": s.errors_since_success if s else 0,
                 "last_run": s.last_run if s else None,
                 "last_success": s.last_success if s else None,
                 "last_outcome": s.last_outcome if s else None,
@@ -1448,7 +1451,7 @@ __LIGHT_THEME_TOKENS__
           <li><b>Colour &amp; droop</b> — days since the last successful tend</li>
           <li><b>Short brown stem, one drooping leaf</b> — dispatched before, but never successfully</li>
           <li><b>Blossom</b> — on the merge allow-list, so a tend may merge its own PR</li>
-          <li><b>Fallen brown leaves</b> — recorded errors</li>
+          <li><b>Fallen brown leaves</b> — errors since the last successful tend</li>
           <li><b>Soil mound</b> — dollars spent tending it</li>
           <li><b>Terracotta pot</b> — allow-listed but not in the garden, so <code>overnight</code> never plants it</li>
           <li><b>Glow</b> — being tended right now</li>
@@ -1770,8 +1773,11 @@ function plantSvg(row, maxCost) {
     }
   }
 
-  // Errors that this repo actually recorded, as leaf litter on the soil.
-  for (let i = 0; i < Math.min(row.errors, 6); i++) {
+  // Errors this repo recorded since its last successful tend, as leaf
+  // litter on the soil — the same clock health runs on. The all-time
+  // count saturated the six-leaf cap on most repos, so an error from
+  // months ago was drawn exactly like tonight's (issue #115).
+  for (let i = 0; i < Math.min(row.errors_since_success, 6); i++) {
     const lx = 26 + rnd() * 48, ly = SOIL_Y + 1 + rnd() * 6;
     parts.push(`<ellipse cx="${n1(lx)}" cy="${n1(ly)}" rx="3.4" ry="1.5" fill="var(--fallen)"`
              + ` transform="rotate(${n1((rnd() - 0.5) * 60)} ${n1(lx)} ${n1(ly)})"/>`);
@@ -1987,8 +1993,8 @@ function renderGarden(rows) {
   // view — re-rendered unconditionally — said "3h ago" for the same repo.
   const plotRows = plotOrderedRows(filteredGardenRows());
   const sig = JSON.stringify(plotRows.map(r =>
-    [r.repo, r.successes, r.errors, r.cost_usd, r.can_merge, r.in_garden, r.in_flight,
-     healthOf(r), fmtAge(daysSince(r.last_success))]));
+    [r.repo, r.successes, r.errors, r.errors_since_success, r.cost_usd, r.can_merge,
+     r.in_garden, r.in_flight, healthOf(r), fmtAge(daysSince(r.last_success))]));
   if (sig !== lastPlotSig) {
     lastPlotSig = sig;
     // The plot is rebuilt wholesale, so a plant that currently has the

@@ -187,6 +187,31 @@ class TestRepoStats(unittest.TestCase):
         self.assertIsNone(stats.last_success)
         self.assertEqual(stats.successes, 0)
 
+    def test_errors_since_success_counts_only_errors_after_the_last_success(self):
+        """The plot's leaf litter is drawn from this, on the same clock as
+        health. An all-time count saturated on almost every repo, so an
+        error from months ago drew the same as tonight's (issue #115)."""
+        self._record("owner/a", "error", "2026-07-01T00:00:00+00:00")
+        self._record("owner/a", "error", "2026-07-02T00:00:00+00:00")
+        self._record("owner/a", "tend", "2026-07-03T00:00:00+00:00")
+        self._record("owner/a", "error", "2026-07-04T00:00:00+00:00")
+        self._record("owner/b", "error", "2026-07-01T00:00:00+00:00")
+        self._record("owner/b", "tend", "2026-07-02T00:00:00+00:00")
+        stats = state.repo_stats(db_path=self.db_path)
+        self.assertEqual((stats["owner/a"].errors, stats["owner/a"].errors_since_success), (3, 1))
+        self.assertEqual((stats["owner/b"].errors, stats["owner/b"].errors_since_success), (1, 0))
+
+    def test_errors_since_success_is_every_error_when_never_successful(self):
+        self._record("owner/a", "error", "2026-07-01T00:00:00+00:00")
+        self._record("owner/a", "error", "2026-07-02T00:00:00+00:00")
+        self.assertEqual(state.repo_stats(db_path=self.db_path)["owner/a"].errors_since_success, 2)
+
+    def test_errors_since_success_is_scoped_per_repo(self):
+        # A success on another repo must not reset this one's litter.
+        self._record("owner/a", "error", "2026-07-02T00:00:00+00:00")
+        self._record("owner/b", "tend", "2026-07-03T00:00:00+00:00")
+        self.assertEqual(state.repo_stats(db_path=self.db_path)["owner/a"].errors_since_success, 1)
+
     def test_last_outcome_uses_insertion_order_not_the_timestamp(self):
         # Timestamps are second-resolution, so two repos dispatched
         # concurrently can tie; `id` is what actually orders them.

@@ -76,8 +76,11 @@ per-repo aggregates — that every value in `state.KNOWN_OUTCOMES` is
 classified as either a success or an error rather than falling silently
 between the two, that a successful `align --implement`/`--file-issue` run
 and a `created_incomplete` bootstrap all count as successes, that a later
-`error` never overwrites `last_success`, and that `last_outcome` breaks a
-same-second timestamp tie by row id). `session_stats` — the
+`error` never overwrites `last_success`, that `last_outcome` breaks a
+same-second timestamp tie by row id, and that `errors_since_success` — the
+one non-all-time field, which the plot's leaf litter is drawn from — counts
+only a repo's own errors after its newest success, or all of them if it has
+none). `session_stats` — the
 newest-contiguous-burst window the dashboard's headline panel is scoped to
 — is covered there too, on the boundary rather than the arithmetic: that a
 previous night's runs are excluded, that the gap threshold is exact at the
