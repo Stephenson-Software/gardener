@@ -153,13 +153,10 @@ def build_score_prompt(repo: str, facts: dict) -> str:
         lines += [f"  {i + 1}. {q}" for i, q in enumerate(QUESTIONS[dim])]
     lines += [
         "",
-        "Reply with ONLY one JSON object, no prose before or after it, shaped:",
-        '{"impact": [a, b, c, d], "confidence": [...], "ease": [...], '
-        '"reach": [...], "effort": [...], '
-        '"reasons": {"impact": "one sentence", "confidence": "...", '
-        '"ease": "...", "reach": "...", "effort": "..."}}',
-        "Each list holds the four answers in question order. Each reason "
-        "names the evidence behind that dimension's answers.",
+        "Reply with ONLY these ten lines, nothing before or after them:",
+        *[f"{dim}: <four answers in question order, space-separated>" for dim in DIMENSIONS],
+        *[f"{dim} reason: <one sentence naming the evidence>" for dim in DIMENSIONS],
+        "For example: `reach: 2 1 3 2` and `reach reason: 4 stars and no releases, so few users.`",
     ]
     return "\n".join(lines)
 
@@ -168,38 +165,42 @@ class ScoreParseError(ValueError):
     pass
 
 
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+_DIM_ALT = "|".join(DIMENSIONS)
+# `impact: 1 2 1 2` (commas, brackets or markdown bold around it tolerated)
+_ANSWERS_RE = re.compile(
+    rf"^[\s*`-]*({_DIM_ALT})[*`]*\s*:\s*\[?\s*(\d)\s*[, ]\s*(\d)\s*[, ]\s*(\d)\s*[, ]\s*(\d)\s*\]?[\s*`.]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_REASON_RE = re.compile(rf"^[\s*`-]*({_DIM_ALT})\s+reason[*`]*\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def parse_score_reply(text: str) -> dict:
     """Validate an agent reply into `{"answers": {dim: [4 ints]}, "scores":
     {dim: int}, "reasons": {dim: str}}`. Raises ScoreParseError on anything
     malformed — a half-valid reply is not stored, since a wrong score would
-    silently reorder the garden for a month."""
-    m = _JSON_OBJECT_RE.search(text or "")
-    if not m:
-        raise ScoreParseError("no JSON object in the reply")
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        raise ScoreParseError(f"reply is not valid JSON: {e}") from e
-    if not isinstance(data, dict):
-        raise ScoreParseError("reply is not a JSON object")
+    silently reorder the garden for a month.
+
+    The reply is ten plain lines (`impact: 1 2 1 2`, `impact reason: ...`),
+    not JSON: in the first full-garden backfill about a quarter of JSON
+    replies were malformed (a reason under the wrong key, a stray brace),
+    because free prose inside a JSON string is exactly what a model gets
+    wrong. A line per answer has nothing to unbalance."""
+    text = text or ""
     answers: dict[str, list[int]] = {}
+    for m in _ANSWERS_RE.finditer(text):
+        dim = m.group(1).lower()
+        if dim in answers:
+            raise ScoreParseError(f"{dim} answered more than once")
+        answers[dim] = [int(g) for g in m.groups()[1:]]
     for dim in DIMENSIONS:
-        values = data.get(dim)
-        if (
-            not isinstance(values, list)
-            or len(values) != len(QUESTIONS[dim])
-            or not all(isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 5 for v in values)
-        ):
-            raise ScoreParseError(f"{dim} must be {len(QUESTIONS[dim])} integers from 1 to 5, got {values!r}")
-        answers[dim] = values
-    raw_reasons = data.get("reasons")
-    reasons = {
-        dim: str(raw_reasons.get(dim, "")).strip() if isinstance(raw_reasons, dict) else ""
-        for dim in DIMENSIONS
-    }
+        values = answers.get(dim)
+        if values is None:
+            raise ScoreParseError(f"no `{dim}: a b c d` line in the reply")
+        if not all(1 <= v <= 5 for v in values):
+            raise ScoreParseError(f"{dim} answers must be 1-5, got {values!r}")
+    reasons = {dim: "" for dim in DIMENSIONS}
+    for m in _REASON_RE.finditer(text):
+        reasons[m.group(1).lower()] = m.group(2).strip()
     return {
         "answers": answers,
         "scores": {dim: parpt_round(answers[dim]) for dim in DIMENSIONS},
