@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 from gardener import (
     dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, parpt, repo_lock,
-    selfupdate, sessions, state, usage,
+    cli, selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
     CLEAN_TIMEOUT_SECONDS,
@@ -4222,6 +4222,38 @@ class TestTimeoutSettings(unittest.TestCase):
                      patch("gardener.cli.notify.default_notifier"), redirect_stderr(io.StringIO()):
                     cmd_overnight(args)
                 self.assertEqual(mock_tend.call_count, expected_calls)
+
+
+class TestScoreListing(unittest.TestCase):
+    """`score --list --json`'s shape — a contract the fleet dashboard reads."""
+
+    def _record(self, reach):
+        return {"scores": {"reach": reach, "impact": 2, "confidence": 3, "ease": 4, "effort": 1},
+                "scored_at": "2026-10-17T00:00:00+00:00"}
+
+    def test_garden_repos_in_rice_order_with_rank_and_last_tend(self):
+        stats = {"o/b": state.RepoStats(repo="o/b", runs=1, successes=1, errors=0,
+                                        last_run="2026-10-18T03:00:00+00:00", last_outcome="tend")}
+        listing = cli.score_listing(
+            ["o/a", "o/b", "o/unscored"],
+            {"o/a": self._record(1), "o/b": self._record(5), "o/gone": self._record(5)},
+            stats,
+        )
+        self.assertEqual([r["repo"] for r in listing["repos"]], ["o/b", "o/a", "o/unscored"])
+        top = listing["repos"][0]
+        self.assertEqual(set(top), {"repo", "rank", "rice", "ice", "scoredAt", "lastTended", "lastOutcome"})
+        self.assertEqual((top["rank"], top["rice"], top["ice"]), (1, 30.0, 24.0))
+        self.assertEqual((top["lastTended"], top["lastOutcome"]), ("2026-10-18T03:00:00+00:00", "tend"))
+        self.assertEqual(listing["repos"][1]["rank"], 2)
+        self.assertEqual(listing["repos"][1]["lastTended"], None)
+        self.assertEqual({k: v for k, v in listing["repos"][2].items() if k != "repo"},
+                         dict.fromkeys(["rank", "rice", "ice", "scoredAt", "lastTended", "lastOutcome"]))
+        json.dumps(listing)  # must serialize as-is
+
+    def test_json_without_list_is_refused(self):
+        args = build_parser().parse_args(["score", "--json"])
+        with patch("sys.stderr"):
+            self.assertEqual(cli.cmd_score(args), 2)
 
 
 class TestScoreRepo(unittest.TestCase):
