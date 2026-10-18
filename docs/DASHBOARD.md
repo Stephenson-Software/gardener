@@ -265,7 +265,7 @@ and previously appeared nowhere.
   | Leaf colour, how far the leaves droop | Days since `last_success` — thriving (<2d), steady (<5d), dry (<10d), wilting beyond that |
   | Short brown stem with a single drooping leaf | Runs recorded but none of them succeeded — the leaf count starts at one, so there is no leafless state |
   | Seed in the ground | Never dispatched — sitting in bare soil, or in the pot below when the repo isn't in the garden |
-  | Blossom | On the merge allow-list, i.e. allowed to merge its own PRs |
+  | Blossom | On the merge allow-list, i.e. allowed to merge its own PRs — drawn only when the garden mixes allow-listed and non-allow-listed repos. When every repo is allow-listed the mark would be on every tended plant and tell none apart, so it is omitted and the summary line reads "all may merge" instead of a count equal to the garden's size |
   | Brown leaf litter on the soil | `error` runs since `last_success` (all of them, if the repo has never succeeded), up to six — on the same clock as health, where an all-time count saturated the cap on most repos. The all-time total stays in the table's Errors column |
   | Width of the soil mound | Dollars spent tending that repo |
   | Terracotta pot instead of soil | Allow-listed but not in the garden |
