@@ -61,7 +61,9 @@ run's attempt order:
   scoring dispatch (`parpt.py`; `cli.py`'s `refresh_parpt_scores` scores
   up to `--rescore-limit` never-scored/stale repos first, out of the same
   budget). Unscored repos sort last. Resumes by repo name like
-  `issue-count`, since scores move between runs.
+  `issue-count`, since scores move between runs. `broken.py` then moves
+  up to `--broken-first-limit` broken repos (red CI, a held release) to
+  the front, ahead of the cursor's once-per-cycle rule.
 - `random` (`random_order`): a fresh shuffle every call. Takes an
   injectable `random.Random` rather than reaching for the `random` module's
   global functions, so tests can assert a deterministic shuffle instead of

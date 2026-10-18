@@ -274,7 +274,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-r
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--broken-first-limit N] [--no-self-update]
 gardener ps [-a] [-q]
 gardener stop <session>... | --all [-t SECONDS]
 gardener kill <session>... | --all [-s SIGNAL]

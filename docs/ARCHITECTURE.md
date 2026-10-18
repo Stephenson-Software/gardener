@@ -44,6 +44,11 @@ gardener/
                        downloads), matched to garden repos by name or
                        GitHub link; pure parsers plus one never-raising
                        fetch per scoring pass
+    broken.py        — broken-first ordering for `--strategy parpt`: red
+                       default-branch CI (batched `gh api graphql`) and
+                       release-gate holds from a quartermaster-style
+                       ledger, with a per-night limit and a cooldown; pure
+                       parsers/ordering plus one never-raising fetch
     conventions.py   — resolves the configured conventions repo URL (no
                        built-in default) and clones/refreshes its local cache
     state.py         — SQLite-backed run history (each row carrying a

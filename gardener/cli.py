@@ -33,7 +33,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
-    overnight, parpt, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
+    broken, overnight, parpt, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -1505,6 +1505,20 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         if not cycle_reset:
             carried = order
             order = overnight.continue_into_next_cycle(carried, full_order, cycle_reset)
+        broken_limit = getattr(args, "broken_first_limit", broken.DEFAULT_BROKEN_FIRST_LIMIT)
+        if strategy is overnight.Strategy.PARPT and broken_limit > 0:
+            # Also out of tonight's budget, like the scoring above.
+            check_started = time.monotonic()
+            now = datetime.now(timezone.utc)
+            found = broken.fetch_broken(garden_list, now)
+            stats = state.repo_stats()
+            order, jumped = broken.broken_first(
+                order, full_order, found,
+                {repo: s.last_run for repo, s in stats.items()}, now, limit=broken_limit,
+            )
+            budget_seconds = max(0.0, budget_seconds - (time.monotonic() - check_started))
+            for repo in jumped:
+                print(f"gardener: overnight: broken first: {repo} ({found[repo]})", file=sys.stderr)
         print(
             f"gardener: overnight starting — {len(garden_list)} repo(s) in garden, "
             f"strategy={strategy.value}, budget={args.hours}h, "
@@ -2312,6 +2326,12 @@ def build_parser() -> argparse.ArgumentParser:
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    overnight_parser.add_argument(
+        "--broken-first-limit", type=int, default=broken.DEFAULT_BROKEN_FIRST_LIMIT,
+        help=(f"With --strategy parpt, how many repos with red CI or a held release "
+              f"go first tonight, ahead of RICE and the cycle (default "
+              f"{broken.DEFAULT_BROKEN_FIRST_LIMIT}; 0 turns it off)"),
+    )
     overnight_parser.add_argument(
         "--rescore-limit", type=int, default=parpt.DEFAULT_RESCORE_LIMIT,
         help=f"With --strategy parpt: how many never-scored or stale repos to score "
