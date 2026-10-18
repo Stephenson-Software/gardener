@@ -33,7 +33,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
-    overnight, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
+    overnight, parpt, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -42,6 +42,7 @@ from gardener.dispatch import (
     TEND_DEFAULT_TIMEOUT_SECONDS,
     TEND_TIMEOUT_ENV,
     DispatchError,
+    HarnessConfig,
     Mode,
     is_device_global_failure,
     looks_like_auth_failure,
@@ -401,6 +402,147 @@ def fetch_issue_counts(garden: list[str], timeout: int = 30) -> dict[str, int]:
         if count is not None:
             counts[repo] = count
     return counts
+
+
+def fetch_score_facts(repo: str, timeout: int = 30) -> dict:
+    """The GitHub facts a Parpt scoring run is handed up front (report mode
+    has no shell, so it can't run `gh` itself). Best-effort like
+    `fetch_open_issue_count`: whatever can't be fetched is simply left out,
+    and the prompt says so."""
+    facts: dict = {}
+    if shutil.which("gh") is None:
+        return facts
+    try:
+        res = _run(
+            ["gh", "repo", "view", repo, "--json",
+             "description,stargazerCount,forkCount,pushedAt,isArchived,primaryLanguage"],
+            timeout=timeout,
+        )
+        if res.returncode == 0:
+            data = json.loads(res.stdout or "{}")
+            facts["description"] = data.get("description") or "(none)"
+            facts["stars"] = data.get("stargazerCount")
+            facts["forks"] = data.get("forkCount")
+            facts["last push"] = data.get("pushedAt")
+            facts["archived"] = data.get("isArchived")
+            facts["primary language"] = (data.get("primaryLanguage") or {}).get("name")
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    issues = fetch_open_issue_count(repo, timeout=timeout)
+    if issues is not None:
+        facts["open issues"] = issues
+    return {k: v for k, v in facts.items() if v is not None}
+
+
+def score_repo(
+    repo: str,
+    model: Optional[str] = None,
+    timeout: int = parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
+    scores_path: Optional[Path] = None,
+    harness_config: Optional[HarnessConfig] = None,
+) -> parpt.ScoreOutcome:
+    """Score one repo with the Parpt questionnaire and store the result.
+
+    Dispatched in `report` mode — the existing read-only spec (Read/Grep/
+    Glob, plan permission mode), so scoring adds no new tool surface to the
+    safety model. Never raises: a failed score leaves the repo's previous
+    record (or its absence) in place, and the parpt ordering already treats
+    an unscored repo as lowest priority."""
+    try:
+        with repo_lock.repo_lock(repo):
+            target_dir = clone_or_refresh_target_repo(repo, default_repos_cache_dir())
+            prompt = parpt.build_score_prompt(repo, fetch_score_facts(repo))
+            result = run_agent(
+                mode=Mode.REPORT,
+                prompt=prompt,
+                cwd=target_dir,
+                model=model,
+                timeout=timeout,
+                harness_config=harness_config,
+            )
+    except repo_lock.RepoLockedError as e:
+        return parpt.ScoreOutcome(repo, False, f"skipped: {e}")
+    except (DispatchError, RuntimeError, ValueError, subprocess.TimeoutExpired, OSError) as e:
+        return parpt.ScoreOutcome(repo, False, f"error: {e}")
+    if not result.ok:
+        return parpt.ScoreOutcome(
+            repo, False, f"scoring run failed: {result.failure_reason or result.stderr or 'no output'}"
+        )
+    try:
+        parsed = parpt.parse_score_reply(result.result_text)
+    except parpt.ScoreParseError as e:
+        return parpt.ScoreOutcome(repo, False, f"unusable reply: {e}")
+    record = {
+        **parsed,
+        "scored_at": state.now_iso(),
+        "cost_usd": result.cost_usd,
+        "session_id": result.session_id,
+    }
+    try:
+        parpt.save_score(repo, record, path=scores_path)
+    except OSError as e:
+        return parpt.ScoreOutcome(repo, False, f"could not save score: {e}")
+    s = parsed["scores"]
+    return parpt.ScoreOutcome(
+        repo, True,
+        f"RICE {parpt.rice(s):.1f} (R{s['reach']} I{s['impact']} C{s['confidence']} "
+        f"E{s['ease']} effort {s['effort']})",
+        record,
+    )
+
+
+def refresh_parpt_scores(
+    garden_list: list[str],
+    limit: int,
+    model: Optional[str] = None,
+    stale_days: int = parpt.DEFAULT_STALE_DAYS,
+    scores_path: Optional[Path] = None,
+) -> dict[str, dict]:
+    """Score up to `limit` never-scored/stale garden repos, then return
+    every stored record — what `--strategy parpt` orders by."""
+    records = parpt.load_scores(scores_path)
+    todo = parpt.repos_needing_score(garden_list, records, limit, stale_days=stale_days)
+    if todo:
+        print(f"gardener: overnight: scoring {len(todo)} repo(s) with Parpt "
+              f"(never scored or older than {stale_days} days)...", file=sys.stderr)
+    for repo in todo:
+        outcome = score_repo(repo, model=model, scores_path=scores_path)
+        print(f"gardener: parpt score {repo}: {outcome.message}", file=sys.stderr)
+    return parpt.load_scores(scores_path)
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    """`gardener score` — (re)score repos with Parpt, or list the scores."""
+    scores_path = getattr(args, "scores_file", None)
+    if args.list:
+        records = parpt.load_scores(scores_path)
+        garden_list = garden.list_garden(path=getattr(args, "garden_file", None))
+        for repo in parpt.order_by_parpt_score(sorted(set(garden_list) | set(records)), records):
+            record = records.get(repo)
+            r = parpt.rice((record or {}).get("scores") or {})
+            when = (record or {}).get("scored_at", "")
+            print(f"{'-' if r is None else f'{r:6.1f}':>6}  {repo}  {when}")
+        return 0
+    if args.repo:
+        repos = list(args.repo)
+    else:
+        garden_list = garden.list_garden(path=getattr(args, "garden_file", None))
+        limit = len(garden_list) if args.all else args.limit
+        repos = parpt.repos_needing_score(
+            garden_list, parpt.load_scores(scores_path), limit, stale_days=args.stale_days
+        )
+        if not repos:
+            print("gardener: every garden repo has a fresh Parpt score", file=sys.stderr)
+            return 0
+    failed = 0
+    for repo in repos:
+        print(f"gardener: scoring {repo} with Parpt...", file=sys.stderr)
+        outcome = score_repo(repo, model=args.model, timeout=args.timeout, scores_path=scores_path)
+        print(f"gardener: {repo}: {outcome.message}", file=sys.stderr)
+        failed += not outcome.ok
+    print(f"gardener: Parpt projects file: {parpt.default_parpt_projects_path(scores_path)}",
+          file=sys.stderr)
+    return 1 if failed else 0
 
 
 def build_prompt(
@@ -1294,6 +1436,16 @@ def cmd_overnight(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             counts = fetch_issue_counts(garden_list)
             full_order = overnight.order_by_issue_count(garden_list, counts)
+        elif strategy is overnight.Strategy.PARPT:
+            # Scoring comes out of the same night's budget as the tends.
+            scoring_started = time.monotonic()
+            records = refresh_parpt_scores(
+                garden_list,
+                limit=getattr(args, "rescore_limit", parpt.DEFAULT_RESCORE_LIMIT),
+                model=args.model,
+            )
+            budget_seconds = max(0.0, budget_seconds - (time.monotonic() - scoring_started))
+            full_order = parpt.order_by_parpt_score(garden_list, records)
         else:
             seed = getattr(args, "random_seed", None)
             rng = random.Random(seed) if seed is not None else None
@@ -2094,7 +2246,10 @@ def build_parser() -> argparse.ArgumentParser:
              "garden fresh every run. round-robin rotates the alphabetically-sorted "
              "garden from where the last run left off. issue-count sorts descending "
              "by each repo's live open-GitHub-issue count (one `gh` call per garden "
-             "repo). issue-count/random resume by repo name rather than list "
+             "repo). parpt sorts descending by each repo's Parpt RICE score, which "
+             "gardener generates itself (scoring up to --rescore-limit unscored/stale "
+             "repos first, out of the same budget). issue-count/random/parpt resume "
+             "by repo name rather than list "
              "position, since their ordering isn't stable across runs — this keeps "
              "the same every-repo-per-cycle guarantee round-robin has; see "
              "docs/OVERNIGHT.md.",
@@ -2107,8 +2262,47 @@ def build_parser() -> argparse.ArgumentParser:
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
+    overnight_parser.add_argument(
+        "--rescore-limit", type=int, default=parpt.DEFAULT_RESCORE_LIMIT,
+        help=f"With --strategy parpt: how many never-scored or stale repos to score "
+             f"before ordering (default {parpt.DEFAULT_RESCORE_LIMIT}; 0 = order by the "
+             f"scores already stored)",
+    )
     overnight_parser.add_argument("--random-seed", type=int, default=None, help=argparse.SUPPRESS)
     overnight_parser.set_defaults(func=cmd_overnight, log_name="overnight")
+
+    score_parser = sub.add_parser(
+        "score",
+        help="Score repos with Parpt (read-only dispatch) for `overnight --strategy parpt`",
+    )
+    score_parser.add_argument(
+        "--repo", type=repo_arg, action="append",
+        help="Score this repo (repeatable). Default: never-scored/stale garden repos",
+    )
+    score_parser.add_argument(
+        "--all", action="store_true",
+        help="Score every never-scored/stale garden repo, not just --limit of them",
+    )
+    score_parser.add_argument(
+        "--limit", type=int, default=parpt.DEFAULT_RESCORE_LIMIT,
+        help=f"How many garden repos to score (default {parpt.DEFAULT_RESCORE_LIMIT})",
+    )
+    score_parser.add_argument(
+        "--stale-days", type=int, default=parpt.DEFAULT_STALE_DAYS,
+        help=f"Re-score a repo whose score is older than this (default {parpt.DEFAULT_STALE_DAYS})",
+    )
+    score_parser.add_argument(
+        "--list", action="store_true",
+        help="Print the stored scores, highest RICE first, instead of scoring",
+    )
+    score_parser.add_argument("--model", default=None, help="Model for the scoring runs")
+    score_parser.add_argument(
+        "--timeout", type=int, default=parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
+        help=f"Per-repo scoring timeout in seconds (default {parpt.DEFAULT_SCORE_TIMEOUT_SECONDS})",
+    )
+    score_parser.add_argument("--garden-file", type=Path, default=None, help=argparse.SUPPRESS)
+    score_parser.add_argument("--scores-file", type=Path, default=None, help=argparse.SUPPRESS)
+    score_parser.set_defaults(func=cmd_score, log_name="score")
 
     ps_parser = sub.add_parser(
         "ps", help="List gardener's running dispatching sessions (align/tend/overnight)"
@@ -2285,8 +2479,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _session_target(args: argparse.Namespace) -> str:
     """What a session is pointed at, for `gardener ps`' TARGET column: the
     `--repo` an `align`/`tend` was given, or `garden` for an `overnight`
-    run, whose target is the whole opt-in list rather than one repo."""
-    return getattr(args, "repo", None) or "garden"
+    run, whose target is the whole opt-in list rather than one repo. A
+    `score --repo` is repeatable, so its list is joined."""
+    repo = getattr(args, "repo", None)
+    if isinstance(repo, list):
+        repo = ",".join(repo)
+    return repo or "garden"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

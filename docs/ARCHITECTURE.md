@@ -13,7 +13,7 @@ gardener/
     __init__.py      — package docstring and __version__; no runtime logic
     __main__.py      — `python3 -m gardener` entry point (delegates to
                        cli.main, same as the `gardener` console script)
-    cli.py          — argparse CLI (align, tend, allowlist, garden, overnight,
+    cli.py          — argparse CLI (align, tend, allowlist, garden, overnight, score,
                        status, tail-transcript, dashboard, update), prompt
                        building, orchestration
     dispatch.py      — the safety-gated subprocess wrapper around the agent:
@@ -34,6 +34,11 @@ gardener/
                        cli.py's cmd_overnight composes it with real time and
                        a real (in-process, optionally concurrent via
                        ThreadPoolExecutor) tend dispatch
+    parpt.py         — autonomous Parpt scoring for `gardener score` and
+                       `overnight --strategy parpt`: the questionnaire,
+                       reply parsing, score storage + Parpt-format export,
+                       staleness selection and RICE ordering (pure; cli.py
+                       does the gh fetch and report-mode dispatch)
     conventions.py   — resolves the configured conventions repo URL (no
                        built-in default) and clones/refreshes its local cache
     state.py         — SQLite-backed run history (each row carrying a

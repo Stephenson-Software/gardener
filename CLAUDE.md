@@ -33,7 +33,7 @@ The "tend to my garden overnight" use case above is now real:
 logic, `cli.py`'s `cmd_overnight` for the real orchestration) dispatches
 `tend --allow-merge` in-process across that list within a time budget,
 resuming across invocations via a small cursor file when the garden is
-bigger than one budget window. `--strategy round-robin|issue-count|random`
+bigger than one budget window. `--strategy round-robin|issue-count|random|parpt`
 (default `random`, see `overnight.DEFAULT_OVERNIGHT_STRATEGY`) picks the
 attempt order, and `--concurrency` (default `2`, see
 `overnight.DEFAULT_OVERNIGHT_CONCURRENCY`) how many repos share a batch —
@@ -42,8 +42,9 @@ strategies and the resume cursor" section is the source of truth for how
 each one works and, critically, why the resume cursor is keyed differently
 per strategy (a bare list index for `round-robin`, repo names for
 `issue-count`/`random`, since only `round-robin`'s ordering is stable
-across runs). It adds no new merge-decision logic of its own — `tend`'s
-existing `merge_eligible()` gate (repo must *also* be on the separate merge
+across runs; `parpt` orders by Parpt RICE scores gardener generates
+itself with read-only `report`-mode runs — see `parpt.py`). It adds no
+new merge-decision logic of its own — `tend`'s existing `merge_eligible()` gate (repo must *also* be on the separate merge
 allow-list) is what actually decides whether a merge can happen, unchanged.
 See `docs/OVERNIGHT.md` for the full
 design, the honest reliability caveat that no device this has been run on
