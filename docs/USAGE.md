@@ -5,7 +5,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-s
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--broken-first-limit N] [--no-self-update]
 gardener score [--repo <owner/repo>]... [--all] [--limit N] [--stale-days N] [--list [--json]] [--model M] [--timeout SECONDS]
 gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
@@ -316,7 +316,11 @@ browses gardener's scores in Parpt itself.
 the start of the run — out of the same `--hours` budget — then tends in
 RICE order, unscored repos last. Every repo is still tended once per
 cycle (see [Overnight](OVERNIGHT.md)); the score only decides who goes
-first.
+first. The exception is `--broken-first-limit` (default 5; `0` turns it
+off): repos with red CI on their default branch, or a release held by
+the release gate in `GARDENER_RELEASE_LEDGER` (env var or `notify.env`),
+go first tonight even if already tended this cycle, unless gardener
+tended them in the last 3 days.
 
 ## `gardener doctor` — pre-flight check on gardener's own state
 

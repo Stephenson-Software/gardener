@@ -3791,10 +3791,11 @@ class TestCmdOvernightStrategies(unittest.TestCase):
         self.assertNotIn("next_index", raw)
 
     @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.broken.fetch_broken", return_value={})
     @patch("gardener.cli.refresh_parpt_scores")
     @patch("gardener.cli._dispatch_tend")
     def test_parpt_strategy_dispatches_highest_rice_first(
-        self, mock_dispatch_tend, mock_refresh, mock_default_notifier
+        self, mock_dispatch_tend, mock_refresh, mock_fetch_broken, mock_default_notifier
     ):
         for repo in ("owner/low", "owner/high", "owner/unscored"):
             garden.add(repo, path=self.garden_file)
@@ -3815,6 +3816,40 @@ class TestCmdOvernightStrategies(unittest.TestCase):
         self.assertEqual(mock_refresh.call_args.kwargs["limit"], 3)
         raw = json.loads(self.cursor_file.read_text())
         self.assertNotIn("next_index", raw)
+
+    @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.state.repo_stats", return_value={})
+    @patch("gardener.cli.broken.fetch_broken")
+    @patch("gardener.cli.refresh_parpt_scores")
+    @patch("gardener.cli._dispatch_tend")
+    def test_parpt_strategy_puts_a_broken_repo_first(
+        self, mock_dispatch_tend, mock_refresh, mock_fetch_broken, mock_stats, mock_default_notifier
+    ):
+        for repo in ("owner/low", "owner/high"):
+            garden.add(repo, path=self.garden_file)
+        mock_refresh.return_value = {
+            "owner/low": {"scores": {"reach": 1, "impact": 3, "confidence": 3, "ease": 3, "effort": 5}},
+            "owner/high": {"scores": {"reach": 5, "impact": 3, "confidence": 3, "ease": 3, "effort": 1}},
+        }
+        mock_fetch_broken.return_value = {"owner/low": "CI is red on main"}
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+        args = self._args(hours=8.0, strategy="parpt")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            cmd_overnight(args)
+        self.assertEqual(self.calls, ["owner/low", "owner/high"])
+        self.assertIn("broken first: owner/low (CI is red on main)", err.getvalue())
+
+        # 0 turns it off without even looking.
+        self.calls.clear()
+        self.cursor_file.unlink()
+        mock_fetch_broken.reset_mock()
+        args = self._args(hours=8.0, strategy="parpt")
+        args.broken_first_limit = 0
+        with redirect_stderr(io.StringIO()):
+            cmd_overnight(args)
+        self.assertEqual(self.calls, ["owner/high", "owner/low"])
+        mock_fetch_broken.assert_not_called()
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli._dispatch_tend")

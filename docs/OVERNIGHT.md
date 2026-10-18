@@ -11,7 +11,7 @@ file (`~/.local/state/gardener/garden.json` by default, overridable via
 never touched overnight just because it exists on this machine, only
 because it was explicitly added. See `gardener/garden.py`.
 
-**`gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--no-self-update]`** is the actual "tend
+**`gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--broken-first-limit N] [--no-self-update]`** is the actual "tend
 to my garden while I sleep" entry point:
 
 0. Fast-forwards gardener's own checkout to `origin` first (on by default;
@@ -87,7 +87,15 @@ to my garden while I sleep" entry point:
      Up to `--rescore-limit` (default 5) never-scored or 30-day-stale repos
      are scored at the start of the run, out of the same budget, so a big
      garden's backlog is worked off a few repos per night. Unscored repos
-     sort last. Resumes by repo name, like `issue-count`.
+     sort last. Resumes by repo name, like `issue-count`. Before the
+     night starts, up to `--broken-first-limit` (default 5; `0` turns it
+     off) **broken** repos jump to the front, ahead of RICE and of the
+     once-per-cycle rule: a default branch whose checks are red, or (with
+     `GARDENER_RELEASE_LEDGER` set to a quartermaster-style `ledger.json`)
+     a release a release gate held in the last 14 days. A repo gardener
+     tended in the last 3 days doesn't jump again, so one tend can't fix
+     doesn't take every night. Each jump is logged as
+     `gardener: overnight: broken first: <repo> (<why>)`.
    - **`random`**: reshuffles the garden fresh every run, so which repos
      get skipped when the time budget runs out varies night to night
      instead of consistently penalizing whichever repos happen to sort (or

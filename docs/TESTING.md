@@ -593,6 +593,17 @@ failed run stores nothing), and the overnight strategy tests include
 shape (RICE order, rank over scored repos only, last-tend fields, nulls
 for the unscored) since the fleet dashboard reads it.
 
+`tests/test_broken.py` covers `broken.py` with an injected `gh` runner:
+the aliased CI query, only `FAILURE`/`ERROR` counting as red (pending,
+no checks and unresolvable repos don't), the newest-entry-recent-`blocked`
+ledger rule (a later publish, an old hold, a `failed` gate run and a repo
+outside the garden all don't count), the RICE-ordered jump with its limit
+and cooldown, batching with stdout read despite gh's non-zero exit, CI and
+ledger reasons joined, and failures skipped rather than raised.
+`test_cli.py`'s `test_parpt_strategy_puts_a_broken_repo_first` drives
+`cmd_overnight` with the fetch mocked, including `--broken-first-limit 0`
+never fetching.
+
 `tests/test_reach.py` covers `reach.py`'s usage signals with an injected
 fetcher, never the network: GitHub-URL parsing, trace program names
 matched ignoring case and punctuation (and left unmatched when two
