@@ -1450,7 +1450,7 @@ __LIGHT_THEME_TOKENS__
           <li><b>Height &amp; leaves</b> — successful tends, all-time</li>
           <li><b>Colour &amp; droop</b> — days since the last successful tend</li>
           <li><b>Short brown stem, one drooping leaf</b> — dispatched before, but never successfully</li>
-          <li><b>Blossom</b> — on the merge allow-list, so a tend may merge its own PR</li>
+          <li><b>Blossom</b> — on the merge allow-list, so a tend may merge its own PR (drawn only when some repos are and some aren't; otherwise the summary says “all may merge”)</li>
           <li><b>Fallen brown leaves</b> — errors since the last successful tend</li>
           <li><b>Soil mound</b> — dollars spent tending it</li>
           <li><b>Terracotta pot</b> — allow-listed but not in the garden, so <code>overnight</code> never plants it</li>
@@ -1688,7 +1688,7 @@ function onStem(t, cx, cy, tx, ty) {
           u * u * SOIL_Y + 2 * u * t * cy + t * t * ty];
 }
 
-function plantSvg(row, maxCost) {
+function plantSvg(row, maxCost, mergeVaries) {
   const rnd = rngFrom(hashName(row.repo));
   const key = healthOf(row);
   const h = HEALTH[key];
@@ -1743,7 +1743,11 @@ function plantSvg(row, maxCost) {
     // allowed to bear fruit on its own, i.e. merge its own PRs. Which
     // flower it is, is decoration — deterministic per repo so the garden
     // isn't 32 identical stamps, but it carries no meaning of its own.
-    if (row.can_merge && row.successes > 0) {
+    // Only drawn when the garden actually mixes allow-listed and
+    // non-allow-listed repos: once the two lists have converged every
+    // tended plant blossomed, a mark that told no plant apart from any
+    // other (#115). The summary line states the uniform case instead.
+    if (mergeVaries && row.can_merge && row.successes > 0) {
       const blooms = ["var(--bloom-1)", "var(--bloom-2)", "var(--bloom-3)",
                       "var(--bloom-4)", "var(--bloom-5)"];
       const tint = h.droop > 0.5 ? "var(--bloom-faded)" : blooms[Math.floor(rnd() * blooms.length)];
@@ -1968,6 +1972,9 @@ function renderGarden(rows) {
   const needsWater = (counts.dry || 0) + (counts.wilting || 0) + (counts.struggling || 0);
   const mergeable = gardenRows.filter(r => r.can_merge).length;
   const potted = gardenRows.filter(r => !r.in_garden).length;
+  // Over the whole garden, not the filtered rows, so typing in the filter
+  // box cannot make blossoms appear or vanish on the plants still shown.
+  const mergeVaries = mergeable > 0 && mergeable < gardenRows.length;
   // `counts.unplanted` was computed here and then dropped — partly because
   // the variable that used to be named `unplanted` meant something else
   // entirely (allow-listed but not in the garden, now `potted`). So the
@@ -1979,7 +1986,7 @@ function renderGarden(rows) {
     ? (gardenFilter ? `${shown} of ${gardenRows.length} shown · ` : "")
       + `${counts.thriving || 0} thriving · ${needsWater} needing water`
       + (neverTended ? ` · ${neverTended} never tended` : "")
-      + ` · ${mergeable} may merge`
+      + (mergeVaries || !mergeable ? ` · ${mergeable} may merge` : " · all may merge")
       + (potted ? ` · ${potted} allow-listed but not planted` : "")
     : "";
 
@@ -1994,7 +2001,8 @@ function renderGarden(rows) {
   const plotRows = plotOrderedRows(filteredGardenRows());
   const sig = JSON.stringify(plotRows.map(r =>
     [r.repo, r.successes, r.errors, r.errors_since_success, r.cost_usd, r.can_merge,
-     r.in_garden, r.in_flight, healthOf(r), fmtAge(daysSince(r.last_success))]));
+     r.in_garden, r.in_flight, healthOf(r), fmtAge(daysSince(r.last_success))])
+    .concat([mergeVaries]));
   if (sig !== lastPlotSig) {
     lastPlotSig = sig;
     // The plot is rebuilt wholesale, so a plant that currently has the
@@ -2015,7 +2023,7 @@ function renderGarden(rows) {
       // it is aria-hidden and the visible text is only the leaf name.
       return `<button type="button" class="${cls}" data-repo="${esc(r.repo)}" title="${esc(title)}"
         aria-label="${esc(title)}" aria-expanded="false" aria-controls="plant-detail">
-        ${plantSvg(r, maxCost)}
+        ${plantSvg(r, maxCost, mergeVaries)}
         <div class="nm">${esc(plantLabel(r.repo))}</div>
         <div class="meta">${r.successes}✓${r.errors ? " " + r.errors + "✗" : ""} · ${esc(age)}</div>
       </button>`;
