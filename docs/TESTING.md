@@ -589,7 +589,9 @@ with `run_agent` mocked (asserting `report` mode, that the priorities text
 reaches the prompt and its fingerprint the record, that a repo's usage
 signals reach its own prompt and no other's, and that a bad reply or
 failed run stores nothing), and the overnight strategy tests include
-`parpt` with `refresh_parpt_scores` mocked.
+`parpt` with `refresh_parpt_scores` mocked, and `TestScoreListing` pins `score --list --json`'s
+shape (RICE order, rank over scored repos only, last-tend fields, nulls
+for the unscored) since the fleet dashboard reads it.
 
 `tests/test_reach.py` covers `reach.py`'s usage signals with an injected
 fetcher, never the network: GitHub-URL parsing, trace program names

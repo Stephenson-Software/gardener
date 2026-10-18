@@ -6,7 +6,7 @@ gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--no-self-update]
-gardener score [--repo <owner/repo>]... [--all] [--limit N] [--stale-days N] [--list] [--model M] [--timeout SECONDS]
+gardener score [--repo <owner/repo>]... [--all] [--limit N] [--stale-days N] [--list [--json]] [--model M] [--timeout SECONDS]
 gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
 gardener tail-transcript <path> [-f | --follow]
@@ -268,6 +268,12 @@ replies were malformed.
   backfill.
 - **`--list`** — prints the stored scores, highest RICE first, instead of
   scoring (`-` marks a garden repo with no score yet).
+- **`--json`** — with `--list`, prints every garden repo as JSON instead:
+  `{"generatedAt", "repos": [{"repo", "rank", "rice", "ice", "scoredAt",
+  "lastTended", "lastOutcome"}]}` in RICE order, `rank` counting scored
+  repos only and `null` for anything unscored or never tended. The fleet
+  dashboard reads this, so treat the keys as a contract. `--list` writes
+  no run log and registers no session.
 - **`--model`**, **`--timeout`** (default 600 s) — per scoring run.
 
 **Owner priorities.** Parpt's questions measure business value ("will

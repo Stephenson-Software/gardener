@@ -26,7 +26,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -521,9 +521,43 @@ def refresh_parpt_scores(
     return parpt.load_scores(scores_path)
 
 
+def score_listing(garden_list: list[str], records: dict, stats: dict) -> dict:
+    """`score --list --json`: every garden repo in RICE order, with its
+    rank among the scored ones (None if unscored) and when it was last
+    tended. Read by the fleet dashboard, so the keys are a contract."""
+    rows = []
+    rank = 0
+    for repo in parpt.order_by_parpt_score(sorted(set(garden_list)), records):
+        record = records.get(repo) or {}
+        scores = record.get("scores") or {}
+        rice = parpt.rice(scores)
+        if rice is not None:
+            rank += 1
+        tended = stats.get(repo)
+        rows.append({
+            "repo": repo,
+            "rank": rank if rice is not None else None,
+            "rice": rice,
+            "ice": parpt.ice(scores) if rice is not None else None,
+            "scoredAt": record.get("scored_at") or None,
+            "lastTended": tended.last_run if tended else None,
+            "lastOutcome": tended.last_outcome if tended else None,
+        })
+    return {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "repos": rows}
+
+
 def cmd_score(args: argparse.Namespace) -> int:
     """`gardener score` — (re)score repos with Parpt, or list the scores."""
     scores_path = getattr(args, "scores_file", None)
+    if args.json and not args.list:
+        print("gardener: score: --json only applies with --list", file=sys.stderr)
+        return 2
+    if args.list and args.json:
+        print(json.dumps(score_listing(
+            garden.list_garden(path=getattr(args, "garden_file", None)),
+            parpt.load_scores(scores_path), state.repo_stats(),
+        ), indent=2))
+        return 0
     if args.list:
         records = parpt.load_scores(scores_path)
         garden_list = garden.list_garden(path=getattr(args, "garden_file", None))
@@ -2311,6 +2345,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--list", action="store_true",
         help="Print the stored scores, highest RICE first, instead of scoring",
     )
+    score_parser.add_argument(
+        "--json", action="store_true",
+        help="With --list, print the garden's scores and last-tended times as JSON",
+    )
     score_parser.add_argument("--model", default=None, help="Model for the scoring runs")
     score_parser.add_argument(
         "--timeout", type=int, default=parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
@@ -2521,7 +2559,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     log_name = getattr(args, "log_name", None)
-    if log_name is None:
+    # `score --list` only reads stored scores (the fleet dashboard polls
+    # it), so it isn't a session worth logging or listing.
+    if log_name is None or (log_name == "score" and args.list):
         return args.func(args)
     # Wrapping here rather than inside each command function means every
     # line a dispatching run prints is captured, including the ones printed
