@@ -120,10 +120,14 @@ imagined failure modes.
   other mode is refused without `GARDENER_HARNESS_ALLOW_UNSCOPED`. Don't
   relax either to make a new harness "just work".
 - **`bypassPermissions` (or any equivalent) must never be reachable**, for
-  any mode, under any flag combination. `_build_invocation` has a runtime
-  check that raises `DispatchError` if it's ever configured — this is
-  deliberately redundant with `MODE_SPECS` never containing it; don't
-  remove the runtime check as "belt and suspenders no one needs," it's
+  any mode, under any flag combination. The runtime check lives in
+  `_check_permission_mode`, which raises `DispatchError` when a spec's
+  permission mode is `FORBIDDEN_PERMISSION_MODE` or is not in the
+  `ALLOWED_PERMISSION_MODES` allow-list. Both harnesses call it before
+  dispatching anything: `_build_invocation` (the `claude-code` argv) and
+  `run_command_harness` (the `command` harness). This is deliberately
+  redundant with `MODE_SPECS` never containing it; don't remove the
+  helper or either call as "belt and suspenders no one needs," it's
   there so a future edit to `MODE_SPECS` can't silently regress this.
 - **Every behavioral claim about the `claude` CLI in `dispatch.py`'s
   docstring was confirmed by hand** against a real invocation before being
