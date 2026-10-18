@@ -582,9 +582,11 @@ a reason) and rejecting every malformed shape (missing dimension, wrong
 answer count, out-of-range, a dimension answered twice), the score file
 round trip and its Parpt-format export holding exactly `Project`'s seven
 fields, `repos_needing_score`'s unscored-then-stale-oldest-first
-selection, and `order_by_parpt_score`'s RICE/ICE/name ordering with
+selection (including a score made under different priorities text counting
+as stale), the priorities file's load/fingerprint and its place in the prompt, and `order_by_parpt_score`'s RICE/ICE/name ordering with
 unscored repos last. `test_cli.py`'s `TestScoreRepo` drives `score_repo`
-with `run_agent` mocked (asserting `report` mode and that a bad reply or
+with `run_agent` mocked (asserting `report` mode, that the priorities text
+reaches the prompt and its fingerprint the record, and that a bad reply or
 failed run stores nothing), and the overnight strategy tests include
 `parpt` with `refresh_parpt_scores` mocked.
 

@@ -270,6 +270,17 @@ replies were malformed.
   scoring (`-` marks a garden repo with no score yet).
 - **`--model`**, **`--timeout`** (default 600 s) — per scoring run.
 
+**Owner priorities.** Parpt's questions measure business value ("will
+this make money", "an edge over competitors"), so on their own they can
+only judge a hobby project by its GitHub stars. Put your own goals in
+`~/.local/state/gardener/parpt_priorities.md` (free text: which projects
+matter most and why, what "value" means for you) and every scoring
+prompt carries it, ahead of the GitHub facts. Each score records a
+fingerprint of the file it was made under; editing the file makes every
+older score stale, so the next `gardener score --all` (or the next few
+nights of `--strategy parpt`) re-scores under the new text. Without the
+file, scoring works exactly as before.
+
 Scores live in `~/.local/state/gardener/parpt_scores.json` (with every
 per-question answer, a one-line reason per dimension, when it was scored
 and what the run cost). After every score gardener also rewrites

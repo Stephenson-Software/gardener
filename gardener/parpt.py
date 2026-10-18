@@ -28,6 +28,7 @@ unit-testable; `cli.py`'s `score_repo` does the fetching and dispatching.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -99,6 +100,30 @@ def default_parpt_projects_path(scores_path: Optional[Path] = None) -> Path:
     return (scores_path or default_scores_path()).parent / "parpt" / "projects.json"
 
 
+def default_priorities_path() -> Path:
+    return default_scores_path().parent / "parpt_priorities.md"
+
+
+def load_priorities(path: Optional[Path] = None) -> str:
+    """The operator's priorities file, or "" when there is none. Parpt's
+    questions measure business value ("will this make money", "an edge over
+    competitors"), so without the owner's own goals a scoring run can only
+    judge a hobby project by its GitHub stars — the first full backfill
+    ranked the operator's flagship project 111th of 126 for exactly that
+    reason. This file is where those goals go: free text, owner-written,
+    read into every scoring prompt."""
+    try:
+        return (path or default_priorities_path()).read_text().strip()
+    except OSError:
+        return ""
+
+
+def priorities_digest(priorities: str) -> str:
+    """A short fingerprint of the priorities text, stored with each score
+    so editing the file marks every score made under the old text stale."""
+    return hashlib.sha256(priorities.encode()).hexdigest()[:12] if priorities else ""
+
+
 def parpt_round(answers: list[int]) -> int:
     """The mean of a dimension's answers, rounded exactly the way Parpt's
     `Math.round(float)` does (half up), not Python's half-to-even `round`
@@ -125,7 +150,7 @@ def ice(scores: dict) -> Optional[float]:
         return None
 
 
-def build_score_prompt(repo: str, facts: dict) -> str:
+def build_score_prompt(repo: str, facts: dict, priorities: str = "") -> str:
     """The prompt for one read-only scoring dispatch. `facts` is whatever
     `cli.py` fetched up front (stars, open issues, last push, ...), since
     report mode has no shell and can't run `gh` itself."""
@@ -147,6 +172,14 @@ def build_score_prompt(repo: str, facts: dict) -> str:
         lines += [f"- {k}: {v}" for k, v in facts.items()]
     else:
         lines.append("- (unavailable)")
+    if priorities:
+        lines += [
+            "",
+            "The owner's priorities. Judge value, reach and impact by these "
+            "goals first; GitHub popularity is only a weak signal next to them:",
+            "",
+            priorities,
+        ]
     lines += ["", "Answer every question with an integer from 1 to 5:"]
     for dim in DIMENSIONS:
         lines.append(f"{dim}:")
@@ -273,10 +306,13 @@ def repos_needing_score(
     limit: int,
     now: Optional[datetime] = None,
     stale_days: int = DEFAULT_STALE_DAYS,
+    digest: Optional[str] = None,
 ) -> list[str]:
     """Up to `limit` garden repos to (re)score: never-scored ones first
     (alphabetically), then stale ones oldest-first. A record with an
-    unreadable timestamp or no usable RICE counts as never scored."""
+    unreadable timestamp or no usable RICE counts as never scored. With
+    `digest` (the current `priorities_digest`), a record scored under
+    different priorities text is stale too, however recent."""
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=stale_days)
     missing: list[str] = []
@@ -286,7 +322,7 @@ def repos_needing_score(
         scored_at = _parse_time(record.get("scored_at")) if record else None
         if record is None or scored_at is None or rice(record.get("scores") or {}) is None:
             missing.append(repo)
-        elif scored_at < cutoff:
+        elif scored_at < cutoff or (digest is not None and record.get("priorities_digest", "") != digest):
             stale.append((scored_at, repo))
     ordered = missing + [repo for _, repo in sorted(stale)]
     return ordered[: max(limit, 0)]
