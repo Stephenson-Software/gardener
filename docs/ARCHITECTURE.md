@@ -39,6 +39,11 @@ gardener/
                        reply parsing, score storage + Parpt-format export,
                        staleness selection and RICE ordering (pure; cli.py
                        does the gh fetch and report-mode dispatch)
+    reach.py         — optional real-usage signals for scoring's reach
+                       questions (trace startups, SpigotMC and plugin-site
+                       downloads), matched to garden repos by name or
+                       GitHub link; pure parsers plus one never-raising
+                       fetch per scoring pass
     conventions.py   — resolves the configured conventions repo URL (no
                        built-in default) and clones/refreshes its local cache
     state.py         — SQLite-backed run history (each row carrying a

@@ -150,10 +150,14 @@ def ice(scores: dict) -> Optional[float]:
         return None
 
 
-def build_score_prompt(repo: str, facts: dict, priorities: str = "") -> str:
+def build_score_prompt(
+    repo: str, facts: dict, priorities: str = "", usage: Optional[dict] = None,
+) -> str:
     """The prompt for one read-only scoring dispatch. `facts` is whatever
     `cli.py` fetched up front (stars, open issues, last push, ...), since
-    report mode has no shell and can't run `gh` itself."""
+    report mode has no shell and can't run `gh` itself. `usage` is this
+    repo's real-usage signals from `reach.py` (trace installs, SpigotMC and
+    plugin-site downloads), when any source knows it."""
     lines = [
         f"You are scoring the repository {repo} with the Parpt prioritization "
         "questionnaire, to decide how early an automated maintenance agent "
@@ -172,6 +176,14 @@ def build_score_prompt(repo: str, facts: dict, priorities: str = "") -> str:
         lines += [f"- {k}: {v}" for k, v in facts.items()]
     else:
         lines.append("- (unavailable)")
+    if usage:
+        lines += [
+            "",
+            "Real usage, from the owner's own telemetry and download "
+            "listings. This is the best evidence of reach there is; weigh "
+            "it well above stars:",
+        ]
+        lines += [f"- {k}: {v}" for k, v in usage.items()]
     if priorities:
         lines += [
             "",

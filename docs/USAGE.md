@@ -281,6 +281,23 @@ older score stale, so the next `gardener score --all` (or the next few
 nights of `--strategy parpt`) re-scores under the new text. Without the
 file, scoring works exactly as before.
 
+**Real usage signals.** Stars say little about reach for a hobby fleet,
+so a scoring prompt can also carry real usage numbers from three
+optional sources, each matched to garden repos without a hand-kept
+mapping (`reach.py`). Set any of them as an environment variable or in
+`notify.env`; an unset one is skipped, and one that is down is skipped
+with a stderr line:
+
+| Setting | Source | Matched by |
+|---|---|---|
+| `GARDENER_REACH_TRACE_URL` | a trace service's `/api/public/summary` (startups from real installations) | program name = repo name, ignoring case and punctuation, when exactly one garden repo matches |
+| `GARDENER_REACH_SPIGET_AUTHOR` | every SpigotMC resource of that author (Spiget API), with downloads | the resource's source-code link |
+| `GARDENER_REACH_DPC_API_URL` | a dansplugins.com-style `/api/v1/plugins` and each plugin's `/downloads` | the plugin's `githubUrl` |
+
+They're fetched once per `gardener score` or overnight scoring pass,
+not per repo. A change in the numbers doesn't make a score stale; re-run
+`gardener score --all` to re-score under fresh numbers.
+
 Scores live in `~/.local/state/gardener/parpt_scores.json` (with every
 per-question answer, a one-line reason per dimension, when it was scored
 and what the run cost). After every score gardener also rewrites

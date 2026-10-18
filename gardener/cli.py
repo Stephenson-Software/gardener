@@ -33,7 +33,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
-    overnight, parpt, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
+    overnight, parpt, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -440,6 +440,7 @@ def score_repo(
     timeout: int = parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
     scores_path: Optional[Path] = None,
     harness_config: Optional[HarnessConfig] = None,
+    usage_facts: Optional[dict] = None,
 ) -> parpt.ScoreOutcome:
     """Score one repo with the Parpt questionnaire and store the result.
 
@@ -452,7 +453,9 @@ def score_repo(
         with repo_lock.repo_lock(repo):
             target_dir = clone_or_refresh_target_repo(repo, default_repos_cache_dir())
             priorities = parpt.load_priorities()
-            prompt = parpt.build_score_prompt(repo, fetch_score_facts(repo), priorities)
+            prompt = parpt.build_score_prompt(
+                repo, fetch_score_facts(repo), priorities, (usage_facts or {}).get(repo),
+            )
             result = run_agent(
                 mode=Mode.REPORT,
                 prompt=prompt,
@@ -511,8 +514,9 @@ def refresh_parpt_scores(
         print(f"gardener: overnight: scoring {len(todo)} repo(s) with Parpt "
               f"(never scored, older than {stale_days} days, or scored under "
               f"different priorities)...", file=sys.stderr)
+    usage_facts = reach.fetch_usage_facts(garden_list) if todo else {}
     for repo in todo:
-        outcome = score_repo(repo, model=model, scores_path=scores_path)
+        outcome = score_repo(repo, model=model, scores_path=scores_path, usage_facts=usage_facts)
         print(f"gardener: parpt score {repo}: {outcome.message}", file=sys.stderr)
     return parpt.load_scores(scores_path)
 
@@ -541,10 +545,15 @@ def cmd_score(args: argparse.Namespace) -> int:
         if not repos:
             print("gardener: every garden repo has a fresh Parpt score", file=sys.stderr)
             return 0
+    # Matched against the whole garden, not just this run's repos, so a
+    # trace program name that two garden repos share stays unmatched.
+    usage_facts = reach.fetch_usage_facts(sorted(
+        set(repos) | set(garden.list_garden(path=getattr(args, "garden_file", None)))))
     failed = 0
     for repo in repos:
         print(f"gardener: scoring {repo} with Parpt...", file=sys.stderr)
-        outcome = score_repo(repo, model=args.model, timeout=args.timeout, scores_path=scores_path)
+        outcome = score_repo(repo, model=args.model, timeout=args.timeout,
+                             scores_path=scores_path, usage_facts=usage_facts)
         print(f"gardener: {repo}: {outcome.message}", file=sys.stderr)
         failed += not outcome.ok
     print(f"gardener: Parpt projects file: {parpt.default_parpt_projects_path(scores_path)}",
