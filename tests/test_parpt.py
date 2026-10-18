@@ -10,10 +10,11 @@ from gardener import parpt
 
 
 def _reply(**overrides) -> str:
-    data = {dim: [3, 3, 3, 3] for dim in parpt.DIMENSIONS}
-    data["reasons"] = {dim: f"{dim} reason" for dim in parpt.DIMENSIONS}
-    data.update(overrides)
-    return json.dumps(data)
+    answers = {dim: [3, 3, 3, 3] for dim in parpt.DIMENSIONS}
+    answers.update(overrides)
+    lines = [f"{dim}: {' '.join(str(v) for v in vals)}" for dim, vals in answers.items() if vals is not None]
+    lines += [f"{dim} reason: {dim} reason" for dim in parpt.DIMENSIONS]
+    return "\n".join(lines)
 
 
 def _record(reach=3, impact=3, confidence=3, ease=3, effort=3, scored_at=None):
@@ -67,33 +68,36 @@ class TestParseScoreReply(unittest.TestCase):
         self.assertEqual(parsed["answers"]["impact"], [5, 5, 4, 4])
         self.assertEqual(parsed["reasons"]["reach"], "reach reason")
 
-    def test_tolerates_prose_around_the_json(self):
-        parsed = parpt.parse_score_reply("Here you go:\n" + _reply() + "\nDone.")
+    def test_tolerates_prose_markdown_and_list_punctuation(self):
+        reply = "Here you go:\n**impact**: [4, 4, 3, 3]\n" + _reply(impact=None) + "\nDone."
+        parsed = parpt.parse_score_reply(reply)
+        self.assertEqual(parsed["answers"]["impact"], [4, 4, 3, 3])
         self.assertEqual(parsed["scores"]["ease"], 3)
 
+    def test_reason_with_braces_and_quotes_is_fine(self):
+        reply = _reply() + '\nimpact reason: uses {"json": "like"} config, 0 stars.'
+        self.assertIn('{"json"', parpt.parse_score_reply(reply)["reasons"]["impact"])
+
     def test_missing_reasons_are_empty_not_an_error(self):
-        data = json.loads(_reply())
-        del data["reasons"]
-        self.assertEqual(parpt.parse_score_reply(json.dumps(data))["reasons"]["impact"], "")
+        reply = "\n".join(l for l in _reply().splitlines() if "reason" not in l)
+        self.assertEqual(parpt.parse_score_reply(reply)["reasons"]["impact"], "")
 
     def test_rejects_malformed_replies(self):
         for bad in (
-            "no json here",
-            "{not json}",
+            "no scores here",
             _reply(impact=[3, 3, 3]),        # too few answers
             _reply(reach=[3, 3, 3, 6]),      # out of range
-            _reply(ease=[3, 3, 3, "3"]),     # not an int
-            _reply(effort=[True, 3, 3, 3]),  # bool is not an answer
+            _reply(ease=[0, 3, 3, 3]),       # out of range
+            _reply(effort=[3, 3, 3, 3, 3]),  # too many answers
+            _reply() + "\nimpact: 1 1 1 1",   # answered twice
         ):
             with self.subTest(bad=bad):
                 with self.assertRaises(parpt.ScoreParseError):
                     parpt.parse_score_reply(bad)
 
     def test_rejects_a_missing_dimension(self):
-        data = json.loads(_reply())
-        del data["confidence"]
         with self.assertRaises(parpt.ScoreParseError):
-            parpt.parse_score_reply(json.dumps(data))
+            parpt.parse_score_reply(_reply(confidence=None))
 
 
 class TestStorage(unittest.TestCase):

@@ -255,6 +255,9 @@ is the mean of its four answers rounded half up, exactly as Parpt rounds,
 and repos rank by Parpt's RICE formula (reach × impact × confidence ÷
 effort), with ICE (impact × confidence × ease) breaking ties. A reply that
 doesn't parse into 20 in-range integers is discarded, not half-stored.
+The reply is ten plain lines (`impact: 1 2 1 2`, `impact reason: ...`),
+not JSON: in the first full-garden backfill about a quarter of JSON
+replies were malformed.
 
 - **No flags** — scores up to `--limit` (default 5) garden repos that have
   never been scored, then the ones whose score is older than

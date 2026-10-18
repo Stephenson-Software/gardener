@@ -576,8 +576,10 @@ that.
 `tests/test_parpt.py` covers `parpt.py`'s pure scoring logic: Parpt's
 RICE/ICE formulas and half-up rounding (2.5 → 3, unlike Python's
 `round`), the prompt carrying all 20 questions and the fetched facts,
-`parse_score_reply` rejecting every malformed shape (missing dimension,
-wrong answer count, out-of-range, string or bool answers), the score file
+`parse_score_reply` reading the ten-line reply format (tolerating
+surrounding prose, markdown and list punctuation, and braces/quotes inside
+a reason) and rejecting every malformed shape (missing dimension, wrong
+answer count, out-of-range, a dimension answered twice), the score file
 round trip and its Parpt-format export holding exactly `Project`'s seven
 fields, `repos_needing_score`'s unscored-then-stale-oldest-first
 selection, and `order_by_parpt_score`'s RICE/ICE/name ordering with

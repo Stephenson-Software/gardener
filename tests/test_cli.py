@@ -4250,7 +4250,7 @@ class TestScoreRepo(unittest.TestCase):
 
     @patch("gardener.cli.run_agent")
     def test_stores_a_valid_reply_in_report_mode(self, mock_run_agent):
-        reply = json.dumps({dim: [4, 4, 4, 4] for dim in parpt.DIMENSIONS})
+        reply = "\n".join(f"{dim}: 4 4 4 4" for dim in parpt.DIMENSIONS)
         outcome = self._score(mock_run_agent, reply)
         self.assertTrue(outcome.ok)
         self.assertIs(mock_run_agent.call_args.kwargs["mode"], dispatch.Mode.REPORT)
