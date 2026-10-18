@@ -5,7 +5,8 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-s
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--no-self-update]
+gardener score [--repo <owner/repo>]... [--all] [--limit N] [--stale-days N] [--list] [--model M] [--timeout SECONDS]
 gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
 gardener tail-transcript <path> [-f | --follow]
@@ -239,6 +240,46 @@ the environment or from `hub.env` in the state directory. Once set, every
 recorded run pushes the outbox after the local write, bounded to 20 s on
 the dispatch path. A failed push prints a `NOTE` line, leaves the runs
 queued, and never fails the run.
+
+## `gardener score` — autonomous Parpt scoring
+
+`gardener score` rates repos with [Parpt](https://github.com/Stephenson-Software/Parpt)'s
+prioritization questionnaire so `gardener overnight --strategy parpt` can
+tend the highest-value repos first. Nobody fills the questionnaire in:
+for each repo gardener fetches a few GitHub facts (description, stars,
+forks, last push, open issues, language), then dispatches a **read-only
+`report`-mode run** (the same Read/Grep/Glob-only spec as a plain
+`align` — see [Safety model](SAFETY.md)) that reads the clone and answers
+Parpt's 20 questions, four per dimension, each 1-5. Each dimension's score
+is the mean of its four answers rounded half up, exactly as Parpt rounds,
+and repos rank by Parpt's RICE formula (reach × impact × confidence ÷
+effort), with ICE (impact × confidence × ease) breaking ties. A reply that
+doesn't parse into 20 in-range integers is discarded, not half-stored.
+
+- **No flags** — scores up to `--limit` (default 5) garden repos that have
+  never been scored, then the ones whose score is older than
+  `--stale-days` (default 30), oldest first.
+- **`--repo owner/repo`** (repeatable) — scores exactly these repos, fresh
+  or not.
+- **`--all`** — scores every never-scored/stale garden repo, for a one-off
+  backfill.
+- **`--list`** — prints the stored scores, highest RICE first, instead of
+  scoring (`-` marks a garden repo with no score yet).
+- **`--model`**, **`--timeout`** (default 600 s) — per scoring run.
+
+Scores live in `~/.local/state/gardener/parpt_scores.json` (with every
+per-question answer, a one-line reason per dimension, when it was scored
+and what the run cost). After every score gardener also rewrites
+`~/.local/state/gardener/parpt/projects.json` in Parpt's own format, so
+`java -Dapp.projects.file=$HOME/.local/state/gardener/parpt/projects.json -jar parpt.jar`
+browses gardener's scores in Parpt itself.
+
+`gardener overnight --strategy parpt` scores up to `--rescore-limit`
+(default 5; `0` uses only the stored scores) never-scored/stale repos at
+the start of the run — out of the same `--hours` budget — then tends in
+RICE order, unscored repos last. Every repo is still tended once per
+cycle (see [Overnight](OVERNIGHT.md)); the score only decides who goes
+first.
 
 ## `gardener doctor` — pre-flight check on gardener's own state
 

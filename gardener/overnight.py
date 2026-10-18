@@ -56,6 +56,12 @@ run's attempt order:
   without ever invoking `gh`; the actual fetch lives in `cli.py`'s
   `fetch_issue_counts`, mirroring `find_orphaned_pr`'s existing gh-calling
   pattern there.
+- `parpt` (`parpt.order_by_parpt_score`): sorts descending by each repo's
+  Parpt RICE score, which gardener generates itself with a read-only
+  scoring dispatch (`parpt.py`; `cli.py`'s `refresh_parpt_scores` scores
+  up to `--rescore-limit` never-scored/stale repos first, out of the same
+  budget). Unscored repos sort last. Resumes by repo name like
+  `issue-count`, since scores move between runs.
 - `random` (`random_order`): a fresh shuffle every call. Takes an
   injectable `random.Random` rather than reaching for the `random` module's
   global functions, so tests can assert a deterministic shuffle instead of
@@ -125,6 +131,7 @@ class Strategy(str, Enum):
     ROUND_ROBIN = "round-robin"
     ISSUE_COUNT = "issue-count"
     RANDOM = "random"
+    PARPT = "parpt"
 
 
 # A full night's sleep — the use case this subcommand exists for. 8h

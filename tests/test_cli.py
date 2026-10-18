@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, repo_lock,
+    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, parpt, repo_lock,
     selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -51,6 +51,7 @@ from gardener.cli import (
     cmd_ps,
     cmd_stop,
     cmd_overnight,
+    score_repo,
     cmd_status,
     cmd_tail_transcript,
     cmd_tend,
@@ -3790,6 +3791,32 @@ class TestCmdOvernightStrategies(unittest.TestCase):
         self.assertNotIn("next_index", raw)
 
     @patch("gardener.cli.notify.default_notifier")
+    @patch("gardener.cli.refresh_parpt_scores")
+    @patch("gardener.cli._dispatch_tend")
+    def test_parpt_strategy_dispatches_highest_rice_first(
+        self, mock_dispatch_tend, mock_refresh, mock_default_notifier
+    ):
+        for repo in ("owner/low", "owner/high", "owner/unscored"):
+            garden.add(repo, path=self.garden_file)
+
+        def scores(reach, effort):
+            return {"scores": {"reach": reach, "impact": 3, "confidence": 3, "ease": 3, "effort": effort}}
+
+        mock_refresh.return_value = {"owner/low": scores(1, 5), "owner/high": scores(5, 1)}
+        mock_dispatch_tend.side_effect = self._fake_dispatch_tend()
+        args = self._args(hours=8.0, strategy="parpt")
+        args.rescore_limit = 3
+
+        with redirect_stderr(io.StringIO()):
+            exit_code = cmd_overnight(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.calls, ["owner/high", "owner/low", "owner/unscored"])
+        self.assertEqual(mock_refresh.call_args.kwargs["limit"], 3)
+        raw = json.loads(self.cursor_file.read_text())
+        self.assertNotIn("next_index", raw)
+
+    @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli._dispatch_tend")
     def test_random_strategy_with_a_seed_is_deterministic(self, mock_dispatch_tend, mock_default_notifier):
         for repo in ("owner/a", "owner/b", "owner/c", "owner/d"):
@@ -4195,3 +4222,52 @@ class TestTimeoutSettings(unittest.TestCase):
                      patch("gardener.cli.notify.default_notifier"), redirect_stderr(io.StringIO()):
                     cmd_overnight(args)
                 self.assertEqual(mock_tend.call_count, expected_calls)
+
+
+class TestScoreRepo(unittest.TestCase):
+    """score_repo dispatches a read-only `report` run and stores what it
+    parses. run_agent, the clone and the `gh` facts are all mocked."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.scores_path = Path(self._tmpdir.name) / "parpt_scores.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _result(self, text, ok=True):
+        return DispatchResult(
+            ok=ok, result_text=text, raw_stdout="{}", stderr="", exit_code=0 if ok else 1,
+            duration_ms=1, cost_usd=0.02, session_id="s", permission_denials=[], is_error=not ok,
+        )
+
+    def _score(self, mock_run_agent, text, ok=True):
+        mock_run_agent.return_value = self._result(text, ok)
+        with patch("gardener.cli.repo_lock.repo_lock", return_value=__import__("contextlib").nullcontext()), \
+                patch("gardener.cli.clone_or_refresh_target_repo", return_value=Path(self._tmpdir.name)), \
+                patch("gardener.cli.fetch_score_facts", return_value={"stars": 3}):
+            return score_repo("owner/repo", scores_path=self.scores_path)
+
+    @patch("gardener.cli.run_agent")
+    def test_stores_a_valid_reply_in_report_mode(self, mock_run_agent):
+        reply = json.dumps({dim: [4, 4, 4, 4] for dim in parpt.DIMENSIONS})
+        outcome = self._score(mock_run_agent, reply)
+        self.assertTrue(outcome.ok)
+        self.assertIs(mock_run_agent.call_args.kwargs["mode"], dispatch.Mode.REPORT)
+        self.assertIn("- stars: 3", mock_run_agent.call_args.kwargs["prompt"])
+        record = parpt.load_scores(self.scores_path)["owner/repo"]
+        self.assertEqual(record["scores"]["reach"], 4)
+        self.assertEqual(record["cost_usd"], 0.02)
+
+    @patch("gardener.cli.run_agent")
+    def test_unusable_reply_stores_nothing(self, mock_run_agent):
+        outcome = self._score(mock_run_agent, "I could not decide.")
+        self.assertFalse(outcome.ok)
+        self.assertIn("unusable reply", outcome.message)
+        self.assertEqual(parpt.load_scores(self.scores_path), {})
+
+    @patch("gardener.cli.run_agent")
+    def test_failed_run_stores_nothing(self, mock_run_agent):
+        outcome = self._score(mock_run_agent, "", ok=False)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(parpt.load_scores(self.scores_path), {})
