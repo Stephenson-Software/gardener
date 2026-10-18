@@ -39,5 +39,6 @@ export PATH="/root/.local/bin:$PATH"
 GARDENER_BIN="/root/.venvs/gardener/bin/gardener"
 HOURS="${GARDENER_OVERNIGHT_HOURS:-8}"
 CONCURRENCY="${GARDENER_OVERNIGHT_CONCURRENCY:-4}"
+STRATEGY="${GARDENER_OVERNIGHT_STRATEGY:-parpt}"
 
-"$GARDENER_BIN" overnight --hours "$HOURS" --concurrency "$CONCURRENCY"
+"$GARDENER_BIN" overnight --hours "$HOURS" --concurrency "$CONCURRENCY" --strategy "$STRATEGY"

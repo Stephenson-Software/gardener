@@ -295,11 +295,16 @@ export PATH="/root/.local/bin:$PATH"
 GARDENER_BIN="/root/.venvs/gardener/bin/gardener"
 HOURS="${GARDENER_OVERNIGHT_HOURS:-8}"
 CONCURRENCY="${GARDENER_OVERNIGHT_CONCURRENCY:-4}"
-"$GARDENER_BIN" overnight --hours "$HOURS" --concurrency "$CONCURRENCY"
+STRATEGY="${GARDENER_OVERNIGHT_STRATEGY:-parpt}"
+"$GARDENER_BIN" overnight --hours "$HOURS" --concurrency "$CONCURRENCY" --strategy "$STRATEGY"
 ```
 
-Both knobs are env-overridable so a single night can be re-tuned from the
-Task Scheduler action without editing tracked code. The concurrency default
+All three knobs are env-overridable so a single night can be re-tuned from
+the Task Scheduler action without editing tracked code. The strategy
+default here is `parpt` (tend in Parpt RICE order, scoring a few
+never-scored/stale repos first — see the strategy list above) rather than
+`cmd_overnight`'s own `random`: Parpt scores need a `gardener score`
+history to mean anything, which only this box has. The concurrency default
 here is deliberately `4` rather than `cmd_overnight`'s own `1`: the flag's
 default stays conservative for anyone invoking `gardener overnight` by hand
 on an unknown machine, whereas this script is device-specific — it only
