@@ -451,7 +451,8 @@ def score_repo(
     try:
         with repo_lock.repo_lock(repo):
             target_dir = clone_or_refresh_target_repo(repo, default_repos_cache_dir())
-            prompt = parpt.build_score_prompt(repo, fetch_score_facts(repo))
+            priorities = parpt.load_priorities()
+            prompt = parpt.build_score_prompt(repo, fetch_score_facts(repo), priorities)
             result = run_agent(
                 mode=Mode.REPORT,
                 prompt=prompt,
@@ -477,6 +478,7 @@ def score_repo(
         "scored_at": state.now_iso(),
         "cost_usd": result.cost_usd,
         "session_id": result.session_id,
+        "priorities_digest": parpt.priorities_digest(priorities),
     }
     try:
         parpt.save_score(repo, record, path=scores_path)
@@ -501,10 +503,14 @@ def refresh_parpt_scores(
     """Score up to `limit` never-scored/stale garden repos, then return
     every stored record — what `--strategy parpt` orders by."""
     records = parpt.load_scores(scores_path)
-    todo = parpt.repos_needing_score(garden_list, records, limit, stale_days=stale_days)
+    todo = parpt.repos_needing_score(
+        garden_list, records, limit, stale_days=stale_days,
+        digest=parpt.priorities_digest(parpt.load_priorities()),
+    )
     if todo:
         print(f"gardener: overnight: scoring {len(todo)} repo(s) with Parpt "
-              f"(never scored or older than {stale_days} days)...", file=sys.stderr)
+              f"(never scored, older than {stale_days} days, or scored under "
+              f"different priorities)...", file=sys.stderr)
     for repo in todo:
         outcome = score_repo(repo, model=model, scores_path=scores_path)
         print(f"gardener: parpt score {repo}: {outcome.message}", file=sys.stderr)
@@ -529,7 +535,8 @@ def cmd_score(args: argparse.Namespace) -> int:
         garden_list = garden.list_garden(path=getattr(args, "garden_file", None))
         limit = len(garden_list) if args.all else args.limit
         repos = parpt.repos_needing_score(
-            garden_list, parpt.load_scores(scores_path), limit, stale_days=args.stale_days
+            garden_list, parpt.load_scores(scores_path), limit, stale_days=args.stale_days,
+            digest=parpt.priorities_digest(parpt.load_priorities()),
         )
         if not repos:
             print("gardener: every garden repo has a fresh Parpt score", file=sys.stderr)

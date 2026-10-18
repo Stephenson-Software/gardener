@@ -56,6 +56,12 @@ class TestQuestionnaire(unittest.TestCase):
         self.assertIn("owner/repo", prompt)
         self.assertIn("- stars: 12", prompt)
 
+    def test_prompt_carries_the_owner_priorities_when_given(self):
+        prompt = parpt.build_score_prompt("owner/repo", {}, "Game X is my flagship.")
+        self.assertIn("owner's priorities", prompt)
+        self.assertIn("Game X is my flagship.", prompt)
+        self.assertNotIn("owner's priorities", parpt.build_score_prompt("owner/repo", {}))
+
     def test_prompt_says_when_facts_are_unavailable(self):
         self.assertIn("(unavailable)", parpt.build_score_prompt("owner/repo", {}))
 
@@ -136,6 +142,21 @@ class TestStorage(unittest.TestCase):
         self.assertIn("many users", projects[0]["description"])
 
 
+class TestPriorities(unittest.TestCase):
+    def test_missing_file_is_empty_and_has_no_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(parpt.load_priorities(Path(tmp) / "nope.md"), "")
+        self.assertEqual(parpt.priorities_digest(""), "")
+
+    def test_file_is_read_stripped_and_digest_tracks_its_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.md"
+            path.write_text("\nRoam first.\n")
+            self.assertEqual(parpt.load_priorities(path), "Roam first.")
+        self.assertEqual(parpt.priorities_digest("a"), parpt.priorities_digest("a"))
+        self.assertNotEqual(parpt.priorities_digest("a"), parpt.priorities_digest("b"))
+
+
 class TestReposNeedingScore(unittest.TestCase):
     NOW = datetime(2026, 10, 17, tzinfo=timezone.utc)
 
@@ -157,6 +178,27 @@ class TestReposNeedingScore(unittest.TestCase):
         todo = parpt.repos_needing_score(["a", "b", "c"], {}, limit=2, now=self.NOW)
         self.assertEqual(todo, ["a", "b"])
         self.assertEqual(parpt.repos_needing_score(["a"], {}, limit=0, now=self.NOW), [])
+
+    def test_scores_under_other_priorities_are_stale_however_recent(self):
+        old = _record(scored_at=self._at(1))
+        old["priorities_digest"] = "aaaa"
+        current = _record(scored_at=self._at(1))
+        current["priorities_digest"] = "bbbb"
+        legacy = _record(scored_at=self._at(2))  # scored before priorities existed
+        records = {"a/old": old, "a/current": current, "a/legacy": legacy}
+        garden = ["a/old", "a/current", "a/legacy"]
+        self.assertEqual(
+            parpt.repos_needing_score(garden, records, 10, now=self.NOW, digest="bbbb"),
+            ["a/legacy", "a/old"],
+        )
+        # priorities file removed: records made under any text are stale,
+        # legacy records (never had one) stay fresh
+        self.assertEqual(
+            parpt.repos_needing_score(garden, records, 10, now=self.NOW, digest=""),
+            ["a/current", "a/old"],
+        )
+        # no digest passed at all: only age counts
+        self.assertEqual(parpt.repos_needing_score(garden, records, 10, now=self.NOW), [])
 
     def test_unreadable_record_counts_as_unscored(self):
         records = {"a/bad": {"scores": {}, "scored_at": "yesterday"}}

@@ -4258,6 +4258,16 @@ class TestScoreRepo(unittest.TestCase):
         record = parpt.load_scores(self.scores_path)["owner/repo"]
         self.assertEqual(record["scores"]["reach"], 4)
         self.assertEqual(record["cost_usd"], 0.02)
+        self.assertEqual(record["priorities_digest"], "")
+
+    @patch("gardener.cli.run_agent")
+    def test_priorities_reach_the_prompt_and_the_record(self, mock_run_agent):
+        reply = "\n".join(f"{dim}: 4 4 4 4" for dim in parpt.DIMENSIONS)
+        with patch("gardener.cli.parpt.load_priorities", return_value="Game X is my flagship."):
+            self._score(mock_run_agent, reply)
+        self.assertIn("Game X is my flagship.", mock_run_agent.call_args.kwargs["prompt"])
+        record = parpt.load_scores(self.scores_path)["owner/repo"]
+        self.assertEqual(record["priorities_digest"], parpt.priorities_digest("Game X is my flagship."))
 
     @patch("gardener.cli.run_agent")
     def test_unusable_reply_stores_nothing(self, mock_run_agent):
