@@ -62,6 +62,12 @@ class TestQuestionnaire(unittest.TestCase):
         self.assertIn("Game X is my flagship.", prompt)
         self.assertNotIn("owner's priorities", parpt.build_score_prompt("owner/repo", {}))
 
+    def test_prompt_carries_usage_signals_when_given(self):
+        prompt = parpt.build_score_prompt("owner/repo", {}, usage={"SpigotMC": "listed, 9 downloads"})
+        self.assertIn("Real usage", prompt)
+        self.assertIn("- SpigotMC: listed, 9 downloads", prompt)
+        self.assertNotIn("Real usage", parpt.build_score_prompt("owner/repo", {}))
+
     def test_prompt_says_when_facts_are_unavailable(self):
         self.assertIn("(unavailable)", parpt.build_score_prompt("owner/repo", {}))
 

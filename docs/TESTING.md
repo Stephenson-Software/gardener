@@ -586,9 +586,18 @@ selection (including a score made under different priorities text counting
 as stale), the priorities file's load/fingerprint and its place in the prompt, and `order_by_parpt_score`'s RICE/ICE/name ordering with
 unscored repos last. `test_cli.py`'s `TestScoreRepo` drives `score_repo`
 with `run_agent` mocked (asserting `report` mode, that the priorities text
-reaches the prompt and its fingerprint the record, and that a bad reply or
+reaches the prompt and its fingerprint the record, that a repo's usage
+signals reach its own prompt and no other's, and that a bad reply or
 failed run stores nothing), and the overnight strategy tests include
 `parpt` with `refresh_parpt_scores` mocked.
+
+`tests/test_reach.py` covers `reach.py`'s usage signals with an injected
+fetcher, never the network: GitHub-URL parsing, trace program names
+matched ignoring case and punctuation (and left unmatched when two
+garden repos share a name), SpigotMC resources and plugin-site entries
+matched by their GitHub links, the download text, nothing fetched when
+unconfigured, every source merged per repo, and a failing source skipped
+while the others are kept.
 
 The agent-harness tests at the end of `tests/test_dispatch.py`
 (`TestLoadHarnessConfig`, `TestRunAgentRouting`, `TestRunCommandAgent`,

@@ -4270,6 +4270,20 @@ class TestScoreRepo(unittest.TestCase):
         self.assertEqual(record["priorities_digest"], parpt.priorities_digest("Game X is my flagship."))
 
     @patch("gardener.cli.run_agent")
+    def test_usage_signals_reach_the_prompt_for_their_repo_only(self, mock_run_agent):
+        reply = "\n".join(f"{dim}: 4 4 4 4" for dim in parpt.DIMENSIONS)
+        mock_run_agent.return_value = self._result(reply)
+        usage_facts = {"owner/repo": {"trace usage": "812 startups"},
+                       "owner/other": {"SpigotMC": "listed"}}
+        with patch("gardener.cli.repo_lock.repo_lock", return_value=__import__("contextlib").nullcontext()), \
+                patch("gardener.cli.clone_or_refresh_target_repo", return_value=Path(self._tmpdir.name)), \
+                patch("gardener.cli.fetch_score_facts", return_value={}):
+            score_repo("owner/repo", scores_path=self.scores_path, usage_facts=usage_facts)
+        prompt = mock_run_agent.call_args.kwargs["prompt"]
+        self.assertIn("- trace usage: 812 startups", prompt)
+        self.assertNotIn("SpigotMC", prompt)
+
+    @patch("gardener.cli.run_agent")
     def test_unusable_reply_stores_nothing(self, mock_run_agent):
         outcome = self._score(mock_run_agent, "I could not decide.")
         self.assertFalse(outcome.ok)
