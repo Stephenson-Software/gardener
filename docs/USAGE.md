@@ -442,7 +442,9 @@ differences, and the Ollama and Orket recipes.
 - `--timeout <seconds>` — how long to wait for the dispatched run
   (`align`, `tend`, and `overnight`, where it applies to each `tend` and
   sets the budget headroom). Without it, `GARDENER_ALIGN_TIMEOUT` /
-  `GARDENER_TEND_TIMEOUT` apply, then the defaults below.
+  `GARDENER_TEND_TIMEOUT` apply, then the defaults below. Like those
+  settings, it must be a positive whole number; anything else is a usage
+  error.
   `align`'s default is 1800s / 30 min (reading and analyzing a real repo
   against ~10 convention docs is not fast). `tend`'s default is 2700s / 45
   min — it runs a full triage/implement/test/PR/self-audit cycle in one
