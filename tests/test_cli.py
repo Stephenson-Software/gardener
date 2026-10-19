@@ -68,6 +68,7 @@ from gardener.cli import (
     find_orphaned_pr,
     main,
     merge_eligible,
+    positive_seconds,
     repo_arg,
 )
 from gardener.dispatch import (
@@ -793,6 +794,53 @@ class TestRepoValidationAtParseTime(unittest.TestCase):
         # dispatches, so a malformed value is a no-match, not an error.
         args = self.parser.parse_args(["status", "--repo", "malformed-entry"])
         self.assertEqual(args.repo, "malformed-entry")
+
+
+class TestPositiveSeconds(unittest.TestCase):
+    """`positive_seconds` is every `--timeout`'s argparse `type=`; it holds
+    the flag to the rule `load_harness_config` already holds the
+    `GARDENER_*_TIMEOUT` variables to."""
+
+    def test_returns_a_positive_value_as_an_int(self):
+        self.assertEqual(positive_seconds("600"), 600)
+
+    def test_raises_argument_type_error_for_a_non_positive_or_non_integer_value(self):
+        for bad in ["0", "-60", "1.5", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                positive_seconds(bad)
+
+
+class TestTimeoutValidationAtParseTime(unittest.TestCase):
+    """A zero or negative --timeout must be a usage error (exit 2) rather
+    than a dispatch that expires at once and is recorded and alerted as a
+    timed-out run — or, on `overnight`, silently replaced by the default."""
+
+    def setUp(self):
+        self.parser = build_parser()
+
+    def _argv(self, timeout):
+        return [
+            ["align", "--repo", "o/r", "--timeout", timeout],
+            ["tend", "--repo", "o/r", "--timeout", timeout],
+            ["overnight", "--timeout", timeout],
+            ["score", "--timeout", timeout],
+        ]
+
+    def test_every_timeout_flag_rejects_zero_and_negative(self):
+        for timeout in ("0", "-60"):
+            for argv in self._argv(timeout):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        self.parser.parse_args(argv)
+                self.assertEqual(ctx.exception.code, 2, argv)
+
+    def test_every_timeout_flag_accepts_a_positive_value(self):
+        for argv in self._argv("90"):
+            self.assertEqual(self.parser.parse_args(argv).timeout, 90, argv)
+
+    def test_score_default_still_applies(self):
+        args = self.parser.parse_args(["score"])
+        self.assertEqual(args.timeout, parpt.DEFAULT_SCORE_TIMEOUT_SECONDS)
 
 
 class TestPromptTemplating(unittest.TestCase):

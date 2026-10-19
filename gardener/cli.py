@@ -117,6 +117,22 @@ def repo_arg(value: str) -> str:
         raise argparse.ArgumentTypeError(f"must look like owner/name, got: {value!r}")
     return value
 
+
+def positive_seconds(value: str) -> int:
+    """argparse `type=` for every `--timeout`. The same rule
+    `load_harness_config` already applies to `GARDENER_ALIGN_TIMEOUT` /
+    `GARDENER_TEND_TIMEOUT`, which the flag overrides: without it a `0` or
+    negative value reached `communicate(timeout=...)`, which expired at
+    once, so a typo was recorded and alerted as a timed-out run (and
+    `overnight`'s `or` fallback turned `0` silently into the default)."""
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = 0
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive whole number of seconds, got: {value!r}")
+    return seconds
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2190,7 +2206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     align.add_argument("--model", default=None, help="Model override passed to the agent harness (default $GARDENER_HARNESS_MODEL)")
     align.add_argument(
-        "--timeout", type=int, default=None,
+        "--timeout", type=positive_seconds, default=None,
         help=f"Seconds to wait for the dispatched agent run (default ${ALIGN_TIMEOUT_ENV} "
              f"or {DEFAULT_TIMEOUT_SECONDS})",
     )
@@ -2232,7 +2248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tend.add_argument("--model", default=None, help="Model override passed to the agent harness (default $GARDENER_HARNESS_MODEL)")
     tend.add_argument(
-        "--timeout", type=int, default=None,
+        "--timeout", type=positive_seconds, default=None,
         help=f"Seconds to wait for the dispatched tend run (default ${TEND_TIMEOUT_ENV} "
              f"or {TEND_DEFAULT_TIMEOUT_SECONDS})",
     )
@@ -2289,7 +2305,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     overnight_parser.add_argument("--model", default=None, help="Model override passed through to each dispatched tend run")
     overnight_parser.add_argument(
-        "--timeout", type=int, default=None,
+        "--timeout", type=positive_seconds, default=None,
         help=f"Seconds each dispatched tend run may take, also used as the budget headroom "
              f"(default ${TEND_TIMEOUT_ENV} or {TEND_DEFAULT_TIMEOUT_SECONDS})",
     )
@@ -2371,7 +2387,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     score_parser.add_argument("--model", default=None, help="Model for the scoring runs")
     score_parser.add_argument(
-        "--timeout", type=int, default=parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
+        "--timeout", type=positive_seconds, default=parpt.DEFAULT_SCORE_TIMEOUT_SECONDS,
         help=f"Per-repo scoring timeout in seconds (default {parpt.DEFAULT_SCORE_TIMEOUT_SECONDS})",
     )
     score_parser.add_argument("--garden-file", type=Path, default=None, help=argparse.SUPPRESS)
