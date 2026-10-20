@@ -52,8 +52,9 @@ to my garden while I sleep" entry point:
    garden alone never authorizes a merge. The garden
    and the merge allow-list are two independent, both-opt-in gates.
 4. **Time budget (`--hours`, default `8.0` — a full night's sleep).** The
-   very first *batch* of a run is always attempted (as long as `--hours` is
-   positive) so a run never silently dispatches nothing; every batch after
+   very first *batch* of a run is always attempted (`--hours` must be
+   positive — zero, negative and `nan` are rejected as a usage error at
+   parse time) so a run never silently dispatches nothing; every batch after
    the first requires enough headroom left in the budget for one more
    worst-case `tend` call (`--timeout`, else `GARDENER_TEND_TIMEOUT`, else
    `TEND_DEFAULT_TIMEOUT_SECONDS`, 45 min) before

@@ -68,6 +68,7 @@ from gardener.cli import (
     find_orphaned_pr,
     main,
     merge_eligible,
+    positive_hours,
     positive_seconds,
     repo_arg,
 )
@@ -841,6 +842,35 @@ class TestTimeoutValidationAtParseTime(unittest.TestCase):
     def test_score_default_still_applies(self):
         args = self.parser.parse_args(["score"])
         self.assertEqual(args.timeout, parpt.DEFAULT_SCORE_TIMEOUT_SECONDS)
+
+
+class TestPositiveHours(unittest.TestCase):
+    """`positive_hours` is `overnight --hours`' argparse `type=`: a budget
+    that can tend nothing must be a usage error, not a run that still pays
+    for `--strategy parpt`'s scoring dispatches first."""
+
+    def test_returns_a_positive_value_as_a_float(self):
+        self.assertEqual(positive_hours("0.1"), 0.1)
+        self.assertEqual(positive_hours("8"), 8.0)
+        self.assertEqual(positive_hours("inf"), float("inf"))
+
+    def test_raises_argument_type_error_for_a_non_positive_or_non_numeric_value(self):
+        for bad in ["0", "-1", "-0.5", "nan", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                positive_hours(bad)
+
+    def test_overnight_rejects_a_non_positive_hours_at_parse_time(self):
+        parser = build_parser()
+        for hours in ("0", "-1", "nan"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["overnight", "--hours", hours])
+            self.assertEqual(ctx.exception.code, 2, hours)
+
+    def test_overnight_accepts_a_positive_hours_and_keeps_the_default(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["overnight", "--hours", "0.1"]).hours, 0.1)
+        self.assertEqual(parser.parse_args(["overnight"]).hours, overnight.DEFAULT_OVERNIGHT_HOURS)
 
 
 class TestPromptTemplating(unittest.TestCase):

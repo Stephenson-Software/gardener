@@ -98,7 +98,8 @@ malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `allowlist add`/`garden add`, while `allowlist remove`/`garden remove`/
 `status --repo` deliberately still accept one; and `positive_seconds`,
 which rejects a zero or negative `--timeout` the same way on `align`/
-`tend`/`overnight`/`score`), the coupling between the
+`tend`/`overnight`/`score`, and `positive_hours`, which rejects a zero,
+negative or `nan` `overnight --hours`), the coupling between the
 parser and `docs/USAGE.md` (every long flag argparse actually *shows* must
 appear in the command reference — flags declared `help=argparse.SUPPRESS`,
 i.e. the path/state overrides and the `--random-seed` test hook, are

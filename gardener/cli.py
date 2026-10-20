@@ -133,6 +133,21 @@ def positive_seconds(value: str) -> int:
         raise argparse.ArgumentTypeError(f"must be a positive whole number of seconds, got: {value!r}")
     return seconds
 
+
+def positive_hours(value: str) -> float:
+    """argparse `type=` for `overnight --hours`. A zero or negative budget
+    can tend nothing, yet `--strategy parpt` still spent real scoring
+    dispatches before the batch loop's budget check noticed; `nan` slipped
+    past `has_time_for_another_repo`'s `<= 0` check and stopped after one
+    batch. `not hours > 0` rejects all three; `inf` stays accepted."""
+    try:
+        hours = float(value)
+    except ValueError:
+        hours = 0.0
+    if not hours > 0:
+        raise argparse.ArgumentTypeError(f"must be a positive number of hours, got: {value!r}")
+    return hours
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2300,7 +2315,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tend every repo in the garden, one after another, within a time budget",
     )
     overnight_parser.add_argument(
-        "--hours", type=float, default=overnight.DEFAULT_OVERNIGHT_HOURS,
+        "--hours", type=positive_hours, default=overnight.DEFAULT_OVERNIGHT_HOURS,
         help=f"Overall time budget in hours (default {overnight.DEFAULT_OVERNIGHT_HOURS})",
     )
     overnight_parser.add_argument("--model", default=None, help="Model override passed through to each dispatched tend run")
