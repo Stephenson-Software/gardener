@@ -99,7 +99,9 @@ malformed `--repo` as a usage error at parse time on `align`/`tend`/
 `status --repo` deliberately still accept one; and `positive_seconds`,
 which rejects a zero or negative `--timeout` the same way on `align`/
 `tend`/`overnight`/`score`, and `positive_hours`, which rejects a zero,
-negative or `nan` `overnight --hours`), the coupling between the
+negative or `nan` `overnight --hours`, and `digest_hours`, which rejects
+those plus `inf` or any window too large for `hub.digest`'s date
+arithmetic on `hub digest --hours`), the coupling between the
 parser and `docs/USAGE.md` (every long flag argparse actually *shows* must
 appear in the command reference — flags declared `help=argparse.SUPPRESS`,
 i.e. the path/state overrides and the `--random-seed` test hook, are

@@ -61,6 +61,7 @@ from gardener.cli import (
     DENIAL_MAX_CHARS,
     DENIAL_PRINT_LIMIT,
     denial_report_lines,
+    digest_hours,
     extract_gap_summary,
     format_denial,
     fetch_issue_counts,
@@ -871,6 +872,35 @@ class TestPositiveHours(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["overnight", "--hours", "0.1"]).hours, 0.1)
         self.assertEqual(parser.parse_args(["overnight"]).hours, overnight.DEFAULT_OVERNIGHT_HOURS)
+
+
+class TestDigestHours(unittest.TestCase):
+    """`digest_hours` is `hub digest --hours`' argparse `type=`: a window
+    `hub.digest` can't compute (a traceback) or that is empty by
+    construction (a misleading "no runs in the last -5 h") must be a usage
+    error instead. Unlike `positive_hours`, `inf` is rejected."""
+
+    def test_returns_a_positive_value_as_a_float(self):
+        self.assertEqual(digest_hours("24"), 24.0)
+        self.assertEqual(digest_hours("0.5"), 0.5)
+
+    def test_raises_argument_type_error_for_a_window_digest_cannot_use(self):
+        for bad in ["0", "-5", "nan", "inf", "1e9", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                digest_hours(bad)
+
+    def test_hub_digest_rejects_a_bad_hours_at_parse_time(self):
+        parser = build_parser()
+        for hours in ("0", "-5", "nan", "inf", "1e9"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["hub", "digest", "--hours", hours])
+            self.assertEqual(ctx.exception.code, 2, hours)
+
+    def test_hub_digest_accepts_a_positive_hours_and_keeps_the_default(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["hub", "digest", "--hours", "48"]).hours, 48.0)
+        self.assertEqual(parser.parse_args(["hub", "digest"]).hours, 24)
 
 
 class TestPromptTemplating(unittest.TestCase):

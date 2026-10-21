@@ -26,7 +26,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -146,6 +146,20 @@ def positive_hours(value: str) -> float:
         hours = 0.0
     if not hours > 0:
         raise argparse.ArgumentTypeError(f"must be a positive number of hours, got: {value!r}")
+    return hours
+
+
+def digest_hours(value: str) -> float:
+    """argparse `type=` for `hub digest --hours`. `positive_hours` plus a
+    window `hub.digest`'s date arithmetic can actually compute: `inf` (fine
+    as an overnight budget) or a huge finite value raised a traceback from
+    `now - timedelta(...)`, and `0`/negative posted "no runs in the last
+    -5 h". The extra day mirrors the slack `digest` subtracts itself."""
+    hours = positive_hours(value)
+    try:
+        datetime.now(timezone.utc) - timedelta(hours=hours, days=1)
+    except OverflowError:
+        raise argparse.ArgumentTypeError(f"is too large a window to summarize, got: {value!r}")
     return hours
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
@@ -2533,7 +2547,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hub_digest.add_argument("--data-dir", type=Path, default=None,
                             help="The hub's store directory (default: <state dir>/hub)")
-    hub_digest.add_argument("--hours", type=float, default=24,
+    hub_digest.add_argument("--hours", type=digest_hours, default=24,
                             help="How far back to summarize (default 24)")
     hub_digest.set_defaults(func=cmd_hub_digest)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
