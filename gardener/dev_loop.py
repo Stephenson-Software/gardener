@@ -267,9 +267,23 @@ def build_tend_prompt(
   killed the whole gardener process) before it could finish or report back
   — that PR is this tool's own unfinished work, not a human's. Before doing
   anything else this run:
-  1. Run `git fetch origin {orphaned_pr.head_branch} && git checkout {orphaned_pr.head_branch}`
-     to continue on that branch instead of starting a new one from
-     {default_branch}.
+  1. Continue on that branch instead of starting a new one from
+     {default_branch}. This checkout is a single-branch clone, so a plain
+     `git fetch origin <branch>` creates no remote-tracking ref and a
+     by-name `git checkout {orphaned_pr.head_branch}` fails. Run these as
+     three separate commands, in order:
+     - `git fetch origin {orphaned_pr.head_branch}:refs/remotes/origin/{orphaned_pr.head_branch}`
+       — if this fails (e.g. `couldn't find remote ref`), the branch is
+       gone: stop, do not fall back to `FETCH_HEAD` or any other ref.
+     - `git log --oneline refs/remotes/origin/{orphaned_pr.head_branch}..{orphaned_pr.head_branch}`
+       — `unknown revision` or no output means nothing local is unpushed.
+     - If that printed no commits: `git checkout -B {orphaned_pr.head_branch} refs/remotes/origin/{orphaned_pr.head_branch}`.
+       If it listed any commits, the interrupted run committed work it
+       never pushed — do NOT use `-B` (it would discard them); instead run
+       `git checkout {orphaned_pr.head_branch}` then
+       `git rebase refs/remotes/origin/{orphaned_pr.head_branch}`.
+     Do not add `--track`. Push with `git push -u origin {orphaned_pr.head_branch}`
+     the first time, since no upstream is configured.
   2. Assess what state it's actually in (`git status`, `git log`, `gh pr
      diff {orphaned_pr.number}`, `gh pr checks {orphaned_pr.number}`) and
      finish that work — do not start a second, duplicate branch/PR for the
