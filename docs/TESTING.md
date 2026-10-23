@@ -333,7 +333,10 @@ decision (asserted over whitespace-collapsed text so the negation can't be
 dropped unnoticed), the working-directory override, the one-pass rule, the
 orphan marker, the passive-voice and attribution requirement, and the
 continue-the-orphaned-PR instructions appearing only when an `OrphanedPR`
-is passed; `tests/test_run_log.py` covers the stderr tee — both
+is passed — fetching its branch into an explicit
+`refs/remotes/origin/<branch>` ref (a by-name checkout fails on the
+single-branch cache clone), and checking for unpushed local commits before
+any `git checkout -B` reset; `tests/test_run_log.py` covers the stderr tee — both
 destinations written, content flushed while the run is still open, stderr
 restored on a normal exit and on a `BaseException`, two runs in the same
 second appending rather than erasing each other, `fileno` passing through

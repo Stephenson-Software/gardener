@@ -196,12 +196,30 @@ class TestPromptBuilding(unittest.TestCase):
         )
         self.assertIn("gardener found an existing OPEN pull request", prompt)
         self.assertIn("#238", prompt)
-        self.assertIn(
-            "git fetch origin feature/plugin-icons-and-versions && "
-            "git checkout feature/plugin-icons-and-versions",
-            prompt,
-        )
         self.assertIn("do not start a second, duplicate branch/PR", prompt)
+
+    def test_tend_prompt_orphan_checkout_uses_explicit_remote_tracking_ref(self):
+        """A depth-1 cache clone is single-branch, so a by-name fetch writes
+        only FETCH_HEAD and a by-name checkout then fails (#222). The prompt
+        must fetch into an explicit ref, guard the -B reset against unpushed
+        local commits, and never suggest the by-name or FETCH_HEAD forms."""
+        branch = "feature/plugin-icons-and-versions"
+        orphan = dev_loop.OrphanedPR(number=238, head_branch=branch)
+        prompt = dev_loop.build_tend_prompt(
+            "owner/name", "name-dev-loop", Path("/tmp/t"), "main", False, orphaned_pr=orphan
+        )
+        ref = f"refs/remotes/origin/{branch}"
+        self.assertIn(f"`git fetch origin {branch}:{ref}`", prompt)
+        self.assertIn(f"`git log --oneline {ref}..{branch}`", prompt)
+        self.assertIn(f"`git checkout -B {branch} {ref}`", prompt)
+        self.assertIn(f"`git rebase {ref}`", prompt)
+        self.assertIn(f"`git push -u origin {branch}`", prompt)
+        self.assertNotIn(f"git fetch origin {branch} &&", prompt)
+        self.assertNotIn(f"-B {branch} FETCH_HEAD", prompt)
+        self.assertLess(
+            prompt.index(f"git log --oneline {ref}"),
+            prompt.index(f"git checkout -B {branch}"),
+        )
 
 
 if __name__ == "__main__":
