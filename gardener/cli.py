@@ -177,6 +177,7 @@ def positive_count(value: str) -> int:
         raise argparse.ArgumentTypeError(f"must be a positive whole number, got: {value!r}")
     return count
 
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
