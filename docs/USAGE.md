@@ -459,7 +459,8 @@ differences, and the Ollama and Orket recipes.
 - `--limit <n>` (`status` only) — how many most-recent runs to show,
   newest first. Defaults to `20`; pass a larger number to page further
   back through the run history, or combine with `--repo` to scope the
-  window to one repo.
+  window to one repo. Must be a positive whole number — `0` or a negative
+  value is a usage error (exit 2).
 - `-v` / `--verbose` (`doctor` only) — print every check, including the
   passing ones, instead of only the problems. Useful the first time, or
   to confirm a check actually ran rather than being skipped.

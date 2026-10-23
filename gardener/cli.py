@@ -162,6 +162,21 @@ def digest_hours(value: str) -> float:
         raise argparse.ArgumentTypeError(f"is too large a window to summarize, got: {value!r}")
     return hours
 
+
+def positive_count(value: str) -> int:
+    """argparse `type=` for `status --limit`. SQLite reads a negative
+    `LIMIT` as no limit at all, so `--limit -1` printed the whole local
+    history while `--all-devices` sent the same value to the hub, which
+    clamps it to 1; and `--limit 0` printed "no runs recorded yet" over a
+    history that had runs in it."""
+    try:
+        count = int(value)
+    except ValueError:
+        count = 0
+    if count <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive whole number, got: {value!r}")
+    return count
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2497,7 +2512,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show local run history")
     status.add_argument("--repo", default=None, help="Filter to one owner/name repo")
     status.add_argument(
-        "--limit", type=int, default=20,
+        "--limit", type=positive_count, default=20,
         help="How many most-recent runs to show (default 20)",
     )
     status.add_argument(
