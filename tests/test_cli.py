@@ -69,6 +69,7 @@ from gardener.cli import (
     find_orphaned_pr,
     main,
     merge_eligible,
+    positive_count,
     positive_hours,
     positive_seconds,
     repo_arg,
@@ -872,6 +873,33 @@ class TestPositiveHours(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["overnight", "--hours", "0.1"]).hours, 0.1)
         self.assertEqual(parser.parse_args(["overnight"]).hours, overnight.DEFAULT_OVERNIGHT_HOURS)
+
+
+class TestPositiveCount(unittest.TestCase):
+    """`positive_count` is `status --limit`'s argparse `type=`: SQLite reads
+    a negative LIMIT as unlimited and the hub clamps it to 1, so the two
+    `status` paths disagreed, and `0` reported an empty history."""
+
+    def test_returns_a_positive_value_as_an_int(self):
+        self.assertEqual(positive_count("5"), 5)
+
+    def test_raises_argument_type_error_for_a_non_positive_or_non_integer_value(self):
+        for bad in ["0", "-1", "1.5", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                positive_count(bad)
+
+    def test_status_rejects_a_non_positive_limit_at_parse_time(self):
+        parser = build_parser()
+        for limit in ("0", "-1"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["status", "--limit", limit])
+            self.assertEqual(ctx.exception.code, 2, limit)
+
+    def test_status_accepts_a_positive_limit_and_keeps_the_default(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["status", "--limit", "3"]).limit, 3)
+        self.assertEqual(parser.parse_args(["status"]).limit, 20)
 
 
 class TestDigestHours(unittest.TestCase):
