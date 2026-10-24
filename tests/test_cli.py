@@ -73,6 +73,7 @@ from gardener.cli import (
     positive_hours,
     positive_seconds,
     repo_arg,
+    stale_days_arg,
 )
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
@@ -900,6 +901,39 @@ class TestPositiveCount(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["status", "--limit", "3"]).limit, 3)
         self.assertEqual(parser.parse_args(["status"]).limit, 20)
+
+
+class TestStaleDaysArg(unittest.TestCase):
+    """`stale_days_arg` is `score --stale-days`' argparse `type=`: a huge
+    value overflowed `repos_needing_score`'s cutoff arithmetic into a
+    traceback, and a negative one marked every scored repo stale."""
+
+    def test_returns_zero_or_a_positive_value_as_an_int(self):
+        self.assertEqual(stale_days_arg("0"), 0)
+        self.assertEqual(stale_days_arg("30"), 30)
+
+    def test_raises_argument_type_error_for_a_negative_or_non_integer_value(self):
+        for bad in ["-1", "1.5", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                stale_days_arg(bad)
+
+    def test_raises_argument_type_error_for_a_value_the_cutoff_cannot_hold(self):
+        for bad in ["3000000", "1000000000"]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                stale_days_arg(bad)
+
+    def test_score_rejects_a_bad_stale_days_at_parse_time(self):
+        parser = build_parser()
+        for days in ("-1", "3000000"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["score", "--stale-days", days])
+            self.assertEqual(ctx.exception.code, 2, days)
+
+    def test_score_accepts_zero_and_keeps_the_default(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["score", "--stale-days", "0"]).stale_days, 0)
+        self.assertEqual(parser.parse_args(["score"]).stale_days, parpt.DEFAULT_STALE_DAYS)
 
 
 class TestDigestHours(unittest.TestCase):

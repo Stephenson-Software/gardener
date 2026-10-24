@@ -102,7 +102,10 @@ which rejects a zero or negative `--timeout` the same way on `align`/
 negative or `nan` `overnight --hours`, and `digest_hours`, which rejects
 those plus `inf` or any window too large for `hub.digest`'s date
 arithmetic on `hub digest --hours`, and `positive_count`, which rejects a
-zero or negative `status --limit`), the coupling between the
+zero or negative `status --limit`, and `stale_days_arg`, which rejects a
+negative `score --stale-days` or one too large for
+`parpt.repos_needing_score`'s cutoff arithmetic while still accepting
+`0`), the coupling between the
 parser and `docs/USAGE.md` (every long flag argparse actually *shows* must
 appear in the command reference — flags declared `help=argparse.SUPPRESS`,
 i.e. the path/state overrides and the `--random-seed` test hook, are

@@ -261,7 +261,8 @@ replies were malformed.
 
 - **No flags** — scores up to `--limit` (default 5) garden repos that have
   never been scored, then the ones whose score is older than
-  `--stale-days` (default 30), oldest first.
+  `--stale-days` (default 30), oldest first. `--stale-days 0` counts every
+  scored repo as stale; a negative value is a usage error.
 - **`--repo owner/repo`** (repeatable) — scores exactly these repos, fresh
   or not.
 - **`--all`** — scores every never-scored/stale garden repo, for a one-off
