@@ -47,7 +47,8 @@ it*. See [Usage](#usage) below for the full command set.
   status`'s own run history plus every `tend`/`overnight` log still being
   written to, so an unattended overnight run doesn't require polling the
   CLI by hand to see what it's doing; `/live` shows what each concurrent
-  slot is doing right now and how close the run is to its usage limit. See
+  slot is doing right now and how close the run is to its usage limit, and
+  `/3d` draws the garden in 3D (WebGL 2, via the Strata engine). See
   [docs/DASHBOARD.md](docs/DASHBOARD.md).
 - **`gardener hub`** (optional): one run history across every device that
   runs gardener. Devices still write locally first and push a copy, so a

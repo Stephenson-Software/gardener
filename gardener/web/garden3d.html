@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>gardener · 3D garden</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --panel: rgba(255, 255, 255, 0.86);
+    --panel-border: rgba(0, 0, 0, 0.12);
+    --text: #1d2a1f;
+    --muted: #55605a;
+    --accent: #2f7d32;
+    --warn: #a3520f;
+    --bg: #c9dcc0;
+    --dot-thriving: #2e8b2e; --dot-steady: #5f8f2a; --dot-dry: #b59a1c;
+    --dot-wilting: #8a5a24; --dot-struggling: #a8321e; --dot-unplanted: #8b8a84;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --panel: rgba(18, 24, 20, 0.84);
+      --panel-border: rgba(255, 255, 255, 0.14);
+      --text: #e3ece4;
+      --muted: #9fb0a4;
+      --accent: #7fd082;
+      --warn: #f0a35c;
+      --bg: #101712;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #garden3d-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none;
+    cursor: grab; outline: none; }
+  #garden3d-canvas.dragging { cursor: grabbing; }
+  #garden3d-canvas.over-plant { cursor: pointer; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); padding: 10px 12px; }
+  #hud { top: max(12px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); max-width: min(360px, calc(100vw - 24px)); }
+  #hud h1 { font-size: 16px; margin: 0 0 2px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  #hud h1 a { font-size: 13px; font-weight: normal; color: var(--accent); }
+  .sub { color: var(--muted); font-size: 12px; }
+  #stale { color: var(--warn); font-weight: 600; }
+  #counts { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 2px; font-size: 13px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: 0; }
+  .h-thriving { background: var(--dot-thriving); } .h-steady { background: var(--dot-steady); }
+  .h-dry { background: var(--dot-dry); } .h-wilting { background: var(--dot-wilting); }
+  .h-struggling { background: var(--dot-struggling); } .h-unplanted { background: var(--dot-unplanted); }
+  #tending { margin-top: 6px; font-size: 13px; }
+  #tending b { color: var(--accent); }
+  #tools { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  #tools input, #tools select, #tools button { font: inherit; font-size: 13px; color: var(--text); background: transparent;
+    border: 1px solid var(--panel-border); border-radius: 6px; padding: 4px 8px; min-height: 32px; }
+  #tools input { flex: 1 1 140px; min-width: 0; }
+  #legend { bottom: max(12px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); font-size: 12px; max-width: min(340px, calc(100vw - 24px)); }
+  #legend[hidden] { display: none; }
+  #legend dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #legend dt { font-weight: 600; }
+  #legend dd { margin: 0; color: var(--muted); }
+  #ticker { bottom: max(12px, env(safe-area-inset-bottom)); right: max(12px, env(safe-area-inset-right)); width: min(360px, calc(100vw - 24px));
+    font-size: 12px; max-height: 32vh; overflow: auto; }
+  #ticker ol { margin: 0; padding: 0; list-style: none; }
+  #ticker li { padding: 3px 0; border-top: 1px solid var(--panel-border); }
+  #ticker li:first-child { border-top: 0; }
+  #ticker .err { color: var(--warn); }
+  #card { top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); width: min(320px, calc(100vw - 24px)); }
+  #card[hidden] { display: none; }
+  #card h2 { font-size: 15px; margin: 0 0 6px; word-break: break-word; padding-right: 28px; }
+  #card h2 a { color: var(--text); }
+  #card table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #card td { padding: 2px 0; } #card td:last-child { text-align: right; }
+  #card-close { position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; border: 0; background: transparent;
+    color: var(--muted); font-size: 20px; cursor: pointer; border-radius: 6px; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--bg); }
+  #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .bed-label { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px; font-weight: 600;
+    padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid var(--panel-border); }
+  #tip { position: fixed; pointer-events: none; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--panel);
+    border: 1px solid var(--panel-border); transform: translate(12px, -50%); white-space: nowrap; }
+  #tip[hidden] { display: none; }
+  #fatal { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; }
+  #fatal[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (max-width: 640px) {
+    /* Phones: the selected plant's card is a bottom sheet, over the ticker. */
+    #card { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; right: 12px; width: auto; z-index: 3; }
+    #ticker { display: none; }
+    #legend { bottom: auto; top: auto; }
+    #hud { right: 12px; max-width: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="garden3d-canvas" tabindex="0" role="img" aria-label="The garden in 3D. Loading."></canvas>
+<div id="labels" aria-hidden="true"></div>
+<div id="tip" hidden></div>
+
+<section id="hud" class="panel" aria-label="Garden summary">
+  <h1><span><span aria-hidden="true">🌱</span> gardener · 3D</span> <a href="/">← dashboard</a></h1>
+  <div class="sub"><span id="updated">loading…</span> <span id="stale" hidden>⚠ stale</span></div>
+  <div id="counts"></div>
+  <div id="tending"></div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
+  <div id="tools">
+    <input id="find" type="search" list="repo-list" placeholder="Find a repo…" aria-label="Find a repo" autocomplete="off">
+    <datalist id="repo-list"></datalist>
+    <select id="sky" aria-label="Sky">
+      <option value="real">Sky: real time</option>
+      <option value="day">Sky: daytime</option>
+    </select>
+    <button id="legend-toggle" type="button" aria-expanded="false" aria-controls="legend">Legend</button>
+  </div>
+</section>
+
+<aside id="legend" class="panel" hidden aria-label="Legend">
+  <dl>
+    <dt>Leaf colour</dt><dd>
+      <span class="dot h-thriving"></span>thriving &lt;2d ·
+      <span class="dot h-steady"></span>steady &lt;5d ·
+      <span class="dot h-dry"></span>dry &lt;10d ·
+      <span class="dot h-wilting"></span>wilting ·
+      <span class="dot h-struggling"></span>never succeeded ·
+      <span class="dot h-unplanted"></span>never tended (a soil mound)</dd>
+    <dt>Height</dt><dd>successful tends, log scale</dd>
+    <dt>Leaves</dt><dd>one more per five successful tends</dd>
+    <dt>Droop</dt><dd>days since the last successful tend</dd>
+    <dt>Weeds</dt><dd>errors since the last success (up to five)</dd>
+    <dt>Bloom</dt><dd>on the merge allow-list and tended in the last 5 days</dd>
+    <dt>Lantern + rain</dt><dd>being tended right now</dd>
+    <dt>Ring</dt><dd>a run just finished</dd>
+    <dt>Beds</dt><dd>one per GitHub owner</dd>
+    <dt>Sky</dt><dd>the real sun for your time zone, or always day</dd>
+  </dl>
+  <p class="sub" style="margin:6px 0 0">Drag to orbit, pinch or scroll to zoom, right-drag or two fingers to pan. Arrow keys orbit, +/− zoom.
+    Rendered by <a href="https://github.com/Preponderous-Software/strata">Strata</a>.</p>
+</aside>
+
+<section id="ticker" class="panel" aria-label="Recent runs"><ol id="runs"></ol></section>
+
+<section id="card" class="panel" hidden aria-label="Selected repo">
+  <button id="card-close" type="button" aria-label="Close">×</button>
+  <h2 id="card-title"></h2>
+  <table><tbody id="card-body"></tbody></table>
+</section>
+
+<div id="fatal" hidden><div class="panel" style="position:static;max-width:420px">
+  <p id="fatal-msg"></p><p><a href="/">Open the 2D dashboard</a></p></div></div>
+
+<script>
+"use strict";
+/* The 3D garden. This script owns the data, the layout, the input and the
+   HTML around the canvas; garden3d.wasm (garden3d/main.cpp, Strata) only
+   draws. Health buckets match the 2D dashboard's healthOf exactly. */
+const POLL_MS = 10000;
+const PLANT_STRIDE = 10, BED_STRIDE = 4;
+const HEALTH_CODE = {unplanted: 0, struggling: 1, wilting: 2, dry: 3, steady: 4, thriving: 5};
+const HEALTH_LABEL = {thriving: "thriving", steady: "steady", dry: "dry", wilting: "wilting",
+  struggling: "struggling", unplanted: "not tended"};
+const HEALTH_ORDER = ["thriving", "steady", "dry", "wilting", "struggling", "unplanted"];
+const SPACING = 1.25, PATH = 2.4;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const coarse = matchMedia("(pointer: coarse)").matches;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+function daysSince(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? null : (Date.now() - t) / 86400000;
+}
+function healthOf(row) {
+  if (!row.runs) return "unplanted";
+  if (!row.last_success) return "struggling";
+  const d = daysSince(row.last_success);
+  if (d == null) return "struggling";
+  if (d < 2) return "thriving";
+  if (d < 5) return "steady";
+  if (d < 10) return "dry";
+  return "wilting";
+}
+function fmtAge(d) {
+  if (d == null) return "never";
+  if (d < 1 / 24) return "just now";
+  if (d < 1) return Math.round(d * 24) + "h ago";
+  return Math.round(d) + "d ago";
+}
+function seedOf(name) {  // stable 0..1 per repo, so a plant keeps its shape
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 16777619);
+  return ((h >>> 0) % 10000) / 10000;
+}
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window */ } },
+};
+
+/* --------------------------------------------------------------- state */
+let mod = null, plantPtr = 0, plantCap = 0;
+let plants = [];          // {row, x, z, top, health}
+let beds = [];            // {owner, cx, cz, x0, z0, x1, z1}
+let layoutKey = "";
+const lastRunSeen = new Map();
+const pulseAt = new Map();
+let firstPoll = true, selected = null, hovered = null, lastStatus = null;
+const cam = {yaw: 0.9, pitch: 0.62, dist: 34, tx: 0, ty: 0, tz: 0};
+let lastInput = performance.now();
+let sky = store.get("garden3d.sky") || "real";
+$("sky").value = sky;
+
+/* -------------------------------------------------------------- layout */
+// One raised bed per owner, biggest first, packed into rows; plants within
+// a bed in name order. A layout only changes when the set of repos does.
+function layout(rows) {
+  const byOwner = new Map();
+  for (const r of rows) {
+    const owner = r.repo.split("/")[0];
+    if (!byOwner.has(owner)) byOwner.set(owner, []);
+    byOwner.get(owner).push(r);
+  }
+  const groups = [...byOwner.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const specs = groups.map(([owner, list]) => {
+    list.sort((a, b) => a.repo.localeCompare(b.repo));
+    const cols = Math.max(1, Math.ceil(Math.sqrt(list.length * 1.6)));
+    const rowsN = Math.ceil(list.length / cols);
+    return {owner, list, cols, rowsN, w: cols * SPACING, d: rowsN * SPACING};
+  });
+  const area = specs.reduce((s, b) => s + (b.w + PATH) * (b.d + PATH), 0);
+  const maxW = Math.max(Math.sqrt(area) * 1.25, specs.length ? specs[0].w : 1);
+  let x = 0, z = 0, rowD = 0, width = 0;
+  const placed = [];
+  for (const s of specs) {
+    if (x > 0 && x + s.w > maxW) { z += rowD + PATH; x = 0; rowD = 0; }
+    placed.push({...s, x0: x, z0: z});
+    x += s.w + PATH; rowD = Math.max(rowD, s.d); width = Math.max(width, x - PATH);
+  }
+  const depth = z + rowD, ox = -width / 2, oz = -depth / 2;
+  beds = []; plants = [];
+  for (const b of placed) {
+    const x0 = b.x0 + ox, z0 = b.z0 + oz;
+    beds.push({owner: b.owner, count: b.list.length, x0, z0, x1: x0 + b.w, z1: z0 + b.d});
+    b.list.forEach((row, i) => {
+      plants.push({row, x: x0 + (i % b.cols + 0.5) * SPACING, z: z0 + (Math.floor(i / b.cols) + 0.5) * SPACING});
+    });
+  }
+  const bounds = [ox, oz, ox + width, oz + depth];
+  if (mod) {
+    const buf = new Float32Array(beds.length * BED_STRIDE);
+    beds.forEach((b, i) => buf.set([b.x0, b.z0, b.x1, b.z1], i * BED_STRIDE));
+    const ptr = mod._malloc(Math.max(4, buf.byteLength));
+    mod.HEAPF32.set(buf, ptr >> 2);
+    mod._g3_set_beds(ptr, beds.length, ...bounds);
+    mod._free(ptr);
+  }
+  const span = Math.max(width, depth);
+  cam.dist = Math.min(Math.max(span * 1.15, 12), 120);
+  maxDist = Math.max(cam.dist * 2, 30);
+  renderLabels();
+}
+let maxDist = 120;
+
+function plantTop(row, health) {
+  if (health === "unplanted") return 0.6;
+  return 0.3 + Math.min(Math.max(0.35 + 0.32 * Math.log2(1 + row.successes), 0.35), 2.6);
+}
+
+/* -------------------------------------------------------------- status */
+async function poll() {
+  let res;
+  try {
+    res = await fetch("/api/status?limit=15", {cache: "no-store", credentials: "same-origin"});
+  } catch (e) { return markStale("can't reach the server"); }
+  if (res.status === 401) { location.reload(); return; }
+  if (!res.ok) return markStale(`server error ${res.status}`);
+  let data;
+  try { data = await res.json(); } catch { return markStale("bad response"); }
+  if (!Array.isArray(data.garden_rows)) return markStale("unexpected response");
+  lastStatus = data;
+  applyStatus(data);
+}
+function markStale(why) {
+  $("stale").hidden = false;
+  $("stale").textContent = "⚠ stale: " + why;
+}
+
+function applyStatus(data) {
+  $("stale").hidden = true;
+  const rows = data.garden_rows.filter((r) => r.in_garden);
+  const key = rows.map((r) => r.repo).sort().join("\n");
+  if (key !== layoutKey) { layoutKey = key; layout(rows); }
+  const byRepo = new Map(rows.map((r) => [r.repo, r]));
+  for (const p of plants) {
+    const row = byRepo.get(p.row.repo);
+    if (row) p.row = row;
+    p.health = healthOf(p.row);
+    p.top = plantTop(p.row, p.health);
+    const prev = lastRunSeen.get(p.row.repo);
+    if (!firstPoll && p.row.last_run && prev !== p.row.last_run) {
+      pulseAt.set(p.row.repo, performance.now());
+      announce(`${p.row.repo} was just tended`);
+    }
+    lastRunSeen.set(p.row.repo, p.row.last_run);
+  }
+  firstPoll = false;
+
+  const counts = {};
+  for (const p of plants) counts[p.health] = (counts[p.health] || 0) + 1;
+  $("counts").innerHTML = HEALTH_ORDER.filter((k) => counts[k])
+    .map((k) => `<span><span class="dot h-${k}"></span>${counts[k]} ${HEALTH_LABEL[k]}</span>`).join("");
+  const tending = plants.filter((p) => p.row.in_flight).map((p) => p.row.repo);
+  const devices = (data.live_devices || []).map((d) => `${esc(d.device)} · ${esc(d.state)}`);
+  $("tending").innerHTML = (tending.length
+      ? `<b>Tending now:</b> ${tending.map(esc).join(", ")}`
+      : `<span class="sub">Nothing is being tended right now.</span>`)
+    + (devices.length ? `<div class="sub">Devices: ${devices.join(" · ")}</div>` : "");
+  $("updated").textContent = `${plants.length} plants · updated ${new Date().toLocaleTimeString()}`;
+  $("garden3d-canvas").setAttribute("aria-label",
+    `The garden in 3D: ${plants.length} repos in ${beds.length} beds. `
+    + HEALTH_ORDER.filter((k) => counts[k]).map((k) => `${counts[k]} ${HEALTH_LABEL[k]}`).join(", ")
+    + (tending.length ? `. Tending now: ${tending.join(", ")}.` : "."));
+  $("repo-list").innerHTML = plants.map((p) => `<option value="${esc(p.row.repo)}">`).join("");
+  $("runs").innerHTML = (data.runs || []).slice(0, 15).map((r) => {
+    const bad = r.outcome === "error" || r.outcome === "timeout";
+    return `<li><span class="${bad ? "err" : ""}">${esc(r.outcome)}</span> · <b>${esc(r.repo)}</b>`
+      + ` <span class="sub">${esc(fmtAge(daysSince(r.timestamp)))}${r.device ? " · " + esc(r.device) : ""}</span></li>`;
+  }).join("") || `<li class="sub">No runs yet.</li>`;
+  if (selected) showCard(selected);
+}
+function announce(text) { $("announce").textContent = text; }
+
+/* ---------------------------------------------------------------- card */
+function showCard(p) {
+  selected = p;
+  const r = p.row, h = p.health || healthOf(r);
+  $("card").hidden = false;
+  $("card-title").innerHTML = `<a href="https://github.com/${esc(r.repo)}" target="_blank" rel="noopener">${esc(r.repo)}</a>`;
+  const rowsHtml = [
+    ["Health", `<span class="dot h-${h}"></span>${r.in_flight ? `<span class="pill">tending now</span>` : esc(HEALTH_LABEL[h])}`],
+    ["Last success", esc(fmtAge(daysSince(r.last_success)))],
+    ["Last run", esc(fmtAge(daysSince(r.last_run))) + (r.last_outcome ? ` (${esc(r.last_outcome)})` : "")],
+    ["Successful tends", r.successes],
+    ["Errors", r.errors + (r.errors_since_success ? ` (${r.errors_since_success} since last success)` : "")],
+    ["Merge allow-listed", r.can_merge ? "yes" : "no"],
+    ["Time · cost", `${Math.round((r.duration_ms || 0) / 60000)} min · $${(r.cost_usd || 0).toFixed(2)}`],
+  ];
+  $("card-body").innerHTML = rowsHtml.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+}
+function hideCard() { selected = null; $("card").hidden = true; }
+$("card-close").addEventListener("click", hideCard);
+
+function focusPlant(p) {
+  cam.tx = p.x; cam.tz = p.z; cam.ty = 0.5;
+  cam.dist = Math.min(cam.dist, 12);
+  showCard(p);
+  lastInput = performance.now();
+}
+$("find").addEventListener("change", (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) return;
+  const p = plants.find((x) => x.row.repo.toLowerCase() === q)
+    || plants.find((x) => x.row.repo.toLowerCase().includes(q));
+  if (p) focusPlant(p);
+});
+$("sky").addEventListener("change", (e) => { sky = e.target.value; store.set("garden3d.sky", sky); });
+$("legend-toggle").addEventListener("click", (e) => {
+  const open = $("legend").hidden;
+  $("legend").hidden = !open;
+  e.currentTarget.setAttribute("aria-expanded", String(open));
+});
+
+/* ----------------------------------------------------------- projection */
+function project(x, y, z) {
+  if (!mod) return null;
+  const m = mod.HEAPF32.subarray(mod._g3_view_proj() >> 2, (mod._g3_view_proj() >> 2) + 16);
+  const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+  const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+  const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+  if (cw <= 0.01) return null;
+  const canvas = $("garden3d-canvas");
+  return {x: (cx / cw * 0.5 + 0.5) * canvas.clientWidth, y: (1 - (cy / cw * 0.5 + 0.5)) * canvas.clientHeight, w: cw};
+}
+function pick(sx, sy) {
+  let best = null, bestD = (coarse ? 30 : 18) ** 2;
+  for (const p of plants) {
+    for (const y of [0.4, (p.top || 1) * 0.7]) {
+      const s = project(p.x, y, p.z);
+      if (!s) continue;
+      const d = (s.x - sx) ** 2 + (s.y - sy) ** 2;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+  }
+  return best;
+}
+const labelEls = new Map();
+function renderLabels() {
+  const host = $("labels");
+  host.innerHTML = "";
+  labelEls.clear();
+  for (const b of beds) {
+    const el = document.createElement("div");
+    el.className = "bed-label";
+    el.textContent = `${b.owner} · ${b.count}`;
+    host.appendChild(el);
+    labelEls.set(b, el);
+  }
+}
+function placeLabels() {
+  for (const [b, el] of labelEls) {
+    const s = project((b.x0 + b.x1) / 2, 0.5, b.z0 - 0.4);
+    if (!s) { el.style.display = "none"; continue; }
+    el.style.display = "";
+    el.style.left = s.x + "px";
+    el.style.top = s.y + "px";
+  }
+}
+
+/* ---------------------------------------------------------------- input */
+const canvas = $("garden3d-canvas");
+const pointers = new Map();
+let dragMoved = 0, pinchStart = null;
+function clampCam() {
+  cam.pitch = Math.min(Math.max(cam.pitch, 0.12), 1.45);
+  cam.dist = Math.min(Math.max(cam.dist, 4), maxDist);
+}
+function pan(dx, dy) {
+  const k = cam.dist / canvas.clientHeight * 1.1;
+  const sx = -Math.sin(cam.yaw), sz = Math.cos(cam.yaw);   // screen-right in world
+  const fx = -Math.cos(cam.yaw), fz = -Math.sin(cam.yaw);  // screen-up (forward) in world
+  cam.tx += (-dx * sx + dy * fx) * k;
+  cam.tz += (-dx * sz + dy * fz) * k;
+}
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, {x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey});
+  dragMoved = 0;
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinchStart = {d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2};
+  }
+  canvas.classList.add("dragging");
+  lastInput = performance.now();
+});
+canvas.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p) {
+    if (e.pointerType === "mouse") hover(e.clientX, e.clientY);
+    return;
+  }
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  dragMoved += Math.abs(dx) + Math.abs(dy);
+  p.x = e.clientX; p.y = e.clientY;
+  if (pointers.size === 2 && pinchStart) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    cam.dist = pinchStart.dist * pinchStart.d / Math.max(d, 1);
+    pan(mx - pinchStart.mx, my - pinchStart.my);
+    pinchStart.mx = mx; pinchStart.my = my;
+  } else if (p.button === 2 || p.shift) {
+    pan(dx, dy);
+  } else {
+    cam.yaw += dx * 0.008;
+    cam.pitch += dy * 0.006;
+  }
+  clampCam();
+  lastInput = performance.now();
+});
+function endPointer(e) {
+  const p = pointers.get(e.pointerId);
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinchStart = null;
+  if (!pointers.size) canvas.classList.remove("dragging");
+  if (p && dragMoved < 6 && e.type === "pointerup") {
+    const hit = pick(e.clientX, e.clientY);
+    if (hit) showCard(hit); else hideCard();
+  }
+}
+canvas.addEventListener("pointerup", endPointer);
+canvas.addEventListener("pointercancel", endPointer);
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  cam.dist *= Math.exp(e.deltaY * 0.0012);
+  clampCam();
+  lastInput = performance.now();
+}, {passive: false});
+canvas.addEventListener("keydown", (e) => {
+  const k = e.key;
+  if (k === "ArrowLeft") cam.yaw -= 0.08;
+  else if (k === "ArrowRight") cam.yaw += 0.08;
+  else if (k === "ArrowUp") cam.pitch += 0.05;
+  else if (k === "ArrowDown") cam.pitch -= 0.05;
+  else if (k === "+" || k === "=") cam.dist *= 0.9;
+  else if (k === "-" || k === "_") cam.dist *= 1.1;
+  else if (k === "Escape") hideCard();
+  else return;
+  e.preventDefault();
+  clampCam();
+  lastInput = performance.now();
+});
+function hover(x, y) {
+  const hit = pick(x, y);
+  hovered = hit;
+  const tip = $("tip");
+  canvas.classList.toggle("over-plant", !!hit);
+  if (!hit) { tip.hidden = true; return; }
+  tip.hidden = false;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+  tip.innerHTML = `<span class="dot h-${hit.health}"></span>${esc(hit.row.repo)}`;
+}
+canvas.addEventListener("pointerleave", () => { $("tip").hidden = true; hovered = null; });
+
+/* ---------------------------------------------------------------- frame */
+// Longitude from the standard-time offset, so the sun rises and sets near
+// the right local hours without asking for the viewer's location.
+function viewerLonLat() {
+  const y = new Date().getFullYear();
+  const std = Math.max(new Date(y, 0, 1).getTimezoneOffset(), new Date(y, 6, 1).getTimezoneOffset());
+  return {lon: -std / 4, lat: 40};
+}
+const where = viewerLonLat();
+let lastSun = 0, dpr = 1;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, coarse ? 2 : 2.5);
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    if (mod) mod._g3_resize(w, h);
+  }
+}
+function frame(now) {
+  resize();
+  if (!reducedMotion && now - lastInput > 20000 && !selected) cam.yaw += 0.0006;
+  if (now - lastSun > 30000 || lastSun === 0 || sky !== frame.sky) {
+    let t = Date.now() / 1000;
+    if (sky === "day") {  // 10:30 local solar time today
+      const d = new Date(); d.setUTCHours(0, 0, 0, 0);
+      t = d.getTime() / 1000 + (10.5 - where.lon / 15) * 3600;
+    }
+    mod._g3_set_sun(t, where.lat, where.lon);
+    lastSun = now; frame.sky = sky;
+  }
+  mod._g3_set_camera(cam.yaw, cam.pitch, cam.dist, cam.tx, cam.ty, cam.tz);
+  const n = plants.length;
+  if (n * PLANT_STRIDE > plantCap) {
+    if (plantPtr) mod._free(plantPtr);
+    plantCap = n * PLANT_STRIDE + 64 * PLANT_STRIDE;
+    plantPtr = mod._malloc(plantCap * 4);
+  }
+  const heap = mod.HEAPF32, base = plantPtr >> 2;
+  for (let i = 0; i < n; i++) {
+    const p = plants[i], r = p.row, o = base + i * PLANT_STRIDE;
+    const pulse = pulseAt.has(r.repo) ? (now - pulseAt.get(r.repo)) / 1000 : -1;
+    heap[o] = p.x; heap[o + 1] = p.z;
+    heap[o + 2] = HEALTH_CODE[p.health || "unplanted"];
+    heap[o + 3] = r.successes || 0;
+    heap[o + 4] = r.errors_since_success || 0;
+    heap[o + 5] = r.in_flight ? 1 : 0;
+    heap[o + 6] = r.can_merge ? 1 : 0;
+    heap[o + 7] = seedOf(r.repo);
+    heap[o + 8] = pulse;
+    heap[o + 9] = (p === selected || p === hovered) ? 1 : 0;
+  }
+  mod._g3_set_plants(plantPtr, n);
+  mod._g3_frame(now / 1000);
+  adaptQuality(now);
+  placeLabels();
+  requestAnimationFrame(frame);
+}
+
+// Start at full quality (or what ?quality=0|1|2 asks for) and step down
+// while the average frame takes longer than 50 ms, so a software renderer or
+// a weak phone stays interactive. It never steps back up within a visit.
+const forcedQuality = new URLSearchParams(location.search).get("quality");
+let quality = forcedQuality != null ? Math.min(Math.max(parseInt(forcedQuality, 10) || 0, 0), 2) : (coarse ? 1 : 2);
+let qStart = 0, qFrames = 0;
+function adaptQuality(now) {
+  if (forcedQuality != null || quality === 0) return;
+  if (!qStart) { qStart = now; qFrames = 0; return; }
+  qFrames++;
+  if (now - qStart < 2000) return;
+  if ((now - qStart) / qFrames > 50) {
+    quality--;
+    mod._g3_set_quality(quality);
+    console.log("garden3d: frames are slow; quality " + quality);
+  }
+  qStart = now; qFrames = 0;
+}
+
+function fatal(msg) {
+  $("fatal-msg").textContent = msg;
+  $("fatal").hidden = false;
+}
+
+async function start() {
+  if (typeof createGarden3D !== "function") return fatal("The 3D garden's engine didn't load.");
+  try {
+    mod = await createGarden3D({
+      locateFile: (p) => "/3d/" + p,
+      print: (t) => console.log(t),
+      printErr: (t) => console.warn(t),
+    });
+  } catch (e) {
+    return fatal("The 3D garden's engine failed to start: " + e);
+  }
+  resize();
+  const sel = mod.stringToNewUTF8("#garden3d-canvas");
+  const rc = mod._g3_init(sel, canvas.width, canvas.height, quality, reducedMotion ? 1 : 0);
+  mod._free(sel);
+  if (rc !== 0) {
+    return fatal(rc < 0 ? "This browser can't draw WebGL 2, which the 3D garden needs."
+                        : "The 3D renderer failed to start (status " + rc + ").");
+  }
+  layout([]);
+  await poll();
+  setInterval(poll, POLL_MS);
+  canvas.focus({preventScroll: true});
+  requestAnimationFrame(frame);
+}
+</script>
+<script src="/3d/garden3d.js" onload="start()" onerror="fatal('The 3D garden\'s engine didn\'t load.')"></script>
+</body>
+</html>

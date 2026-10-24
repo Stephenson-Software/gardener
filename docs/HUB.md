@@ -151,6 +151,7 @@ session, so upgrading devices before the hub is harmless. The design is RFC
 | Garden view | The union of every device's garden and merge allow-list, as each device last pushed them. These lists are display-only on the hub: they are never sent back to a device, and each device's own lists stay its own. |
 | Currently tending, in flight | From each device's latest heartbeat (see "Live heartbeats"). Each repo is tagged with its device. A **stale** device's repos (no beat for 3 of its intervals) are shown greyed and aren't counted in "in flight", because it may have stopped. |
 | Overnight budget and batch | One block per device under Latest session: **live** shows the device's budget and batch bars and "updated Ns ago"; **stale** shows the same greyed, with "last heard N min ago, may have stopped"; **idle** (ended, or unheard for 50 min) is one line. Age is measured on the hub's clock. |
+| 3D garden (`/3d`) | The same combined garden as the garden view, with the devices' live state in its summary panel. |
 | Garden cycle bar, live log, `/live` | Not available: they read a device's cursor file, log text and transcripts, which never leave it. The page doesn't render them. Open the dashboard on the dispatching device for those. |
 
 ## API
@@ -166,6 +167,7 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `POST /api/v1/heartbeat` | device token | A live-state snapshot (see "Live heartbeats"), at most 16 KiB. The hub keeps only the latest per device, filed under the token's name, and ignores a beat older than the stored one for the same session. An unknown slot phase or a malformed field gets a 400 naming it. |
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
+| `GET /3d`, `/3d/garden3d.js`, `/3d/garden3d.wasm` | operator | The 3D garden (see the dashboard docs' "The 3D garden"), over the same `/api/status` |
 
 ## Watching the devices
 

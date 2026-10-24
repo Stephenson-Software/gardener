@@ -113,6 +113,11 @@ gardener/
                        incrementally from each dispatch's transcript, run
                        pace, and the usage-limit gauge (see Dashboard's
                        "The live view")
+    garden3d.py      — serves the 3D garden page at /3d (web/garden3d.html
+                       plus the committed web/garden3d.{js,wasm} that
+                       garden3d/build.sh builds from garden3d/main.cpp with
+                       the Strata engine) for both the dashboard and the hub
+                       (see Dashboard's "The 3D garden")
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests, one test_<module>.py per module above
                        that has runtime logic (state, cli parsing/templating/
