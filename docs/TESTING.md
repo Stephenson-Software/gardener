@@ -276,6 +276,15 @@ the union over live devices only (stale and idle excluded), each device's
 state, batch and budget under `live_devices`, and a local dashboard's
 payload unchanged. The page's per-device rendering has no JS test runner
 here; it was verified by rendering a seeded hub with Playwright.
+`tests/test_garden3d.py` covers the 3D garden's serving side: the three
+`/3d` URLs and their content types (the `.wasm` really starts with the
+wasm magic), nothing else under `/3d` served, a missing file a 404 rather
+than an error, the 2D page linking to it, the hub refusing all three
+without an operator and serving them with one, and that every `mod._g3_*`
+function the page calls is in `garden3d/build.sh`'s export list and in the
+committed glue. The drawing itself is verified by rendering, like the 2D
+garden, and CI's `garden3d` job rebuilds the committed engine and fails on
+any difference.
 `tests/test_hub.py` runs a real hub (`hub.HubHandler` on a loopback port
 over a temp store) and a real device store, so every push is the actual
 HTTP round trip and the actual inserts. UserAuth is a loopback stub

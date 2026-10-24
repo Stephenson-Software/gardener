@@ -19,4 +19,4 @@ gardener = "gardener.cli:main"
 include = ["gardener*"]
 
 [tool.setuptools.package-data]
-gardener = ["prompts/*.tmpl"]
+gardener = ["prompts/*.tmpl", "web/*"]

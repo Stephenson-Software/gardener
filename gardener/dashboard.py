@@ -145,7 +145,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
-from gardener import dispatch, garden, merge_allowlist, overnight, state
+from gardener import dispatch, garden, garden3d, merge_allowlist, overnight, state
 
 LOGS_DIR_NAME = "logs"
 DEFAULT_PORT = 8765
@@ -1004,10 +1004,9 @@ __LIGHT_THEME_TOKENS__
   .hub-device.is-stale { opacity: 0.6; }
   .pill.is-stale { opacity: 0.6; border-style: dashed; }
   #hub-user { margin-left: auto; }
-  .is-hub #hub-user + #live-link { margin-left: 0; }
-  /* On a hub with no signed-in user both right-aligning elements before
-     the theme picker are hidden, so it would otherwise drift left. */
-  .is-hub #hub-user[hidden] ~ .theme-pick { margin-left: auto; }
+  .is-hub #hub-user + #garden3d-link { margin-left: 0; }
+  /* The 3D garden link is on every page (the hub serves /3d too), so it
+     is what right-aligns the header when no signed-in user is shown. */
   .outcome-error { color: var(--err); }
   .outcome-tend, .outcome-created { color: var(--accent); }
   pre#log {
@@ -1383,7 +1382,8 @@ __LIGHT_THEME_TOKENS__
   <span class="sub" id="updated">loading…</span>
   <span id="stale-badge">⚠ stale</span>
   <span class="sub" id="hub-user" hidden></span>
-  <a class="sub" id="live-link" href="/live" style="margin-left:auto">live view →</a>
+  <a class="sub" id="garden3d-link" href="/3d" style="margin-left:auto">3D garden →</a>
+  <a class="sub" id="live-link" href="/live">live view →</a>
   <!-- Three states, not a two-way toggle, so "follow the OS" stays
        reachable once a choice has been made (issue #153). A native select
        brings keyboard and screen-reader handling with it. -->
@@ -2935,6 +2935,12 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._send(500, "application/json; charset=utf-8", error_body.encode("utf-8"))
                 return
             self._send(200, "application/json; charset=utf-8", body)
+        elif garden3d.is_asset_path(parsed.path):
+            found = garden3d.asset(parsed.path)
+            if found is None:
+                self._send(404, "text/plain; charset=utf-8", b"the 3D garden is not in this install\n")
+            else:
+                self._send(200, *found)
         elif parsed.path == "/live":
             self._send(200, "text/html; charset=utf-8", _live().LIVE_PAGE_HTML.encode("utf-8"))
         elif parsed.path == "/api/live":

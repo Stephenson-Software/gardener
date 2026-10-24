@@ -78,7 +78,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from gardener import __version__, dashboard, garden, merge_allowlist, notify, state
+from gardener import __version__, dashboard, garden, garden3d, merge_allowlist, notify, state
 
 URL_ENV = "GARDENER_HUB_URL"
 TOKEN_ENV = "GARDENER_HUB_TOKEN"
@@ -1036,7 +1036,7 @@ class HubHandler(dashboard._DashboardHandler):
             self._api_get(path, parsed.query, device)
             return
         if operator is None:
-            self._deny(browser=path in ("/", "/index.html"))
+            self._deny(browser=path in ("/", "/index.html", "/3d", "/3d/"))
             return
         if path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", dashboard.PAGE_HTML.encode("utf-8"))
@@ -1057,6 +1057,12 @@ class HubHandler(dashboard._DashboardHandler):
                 self._json(500, {"error": type(exc).__name__, "detail": str(exc)})
                 return
             self._json(200, payload)
+        elif garden3d.is_asset_path(path):
+            found = garden3d.asset(path)
+            if found is None:
+                self._send(404, "text/plain; charset=utf-8", b"the 3D garden is not in this install\n")
+            else:
+                self._send(200, *found)
         elif path in ("/live", "/api/live"):
             self._send(
                 404, "text/plain; charset=utf-8",

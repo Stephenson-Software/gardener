@@ -407,6 +407,44 @@ the main page only, but `/live` runs the same `<head>` script against the
 same key, so a choice made on the main page carries over when following
 its header link.
 
+## The 3D garden
+
+`/3d` (linked from the main page's header, and served by the hub too) draws
+the garden view's rows in 3D with the [Strata](https://github.com/Preponderous-Software/strata)
+engine in WebGL 2. It polls the same `/api/status` every 10 s, so it needs
+no endpoint of its own and shows exactly what the garden view shows: only
+repos in the garden (`in_garden`), with the same health buckets as
+`healthOf`.
+
+| What you see | Comes from |
+|---|---|
+| One raised bed per GitHub owner, plants in name order | `repo` |
+| Leaf colour | the same health bucket as the garden view (`runs`, `last_success`) |
+| Height (log scale) and leaf count (one more per five) | `successes` |
+| Droop | the health bucket, i.e. days since `last_success` |
+| Weeds at the base, up to five | `errors_since_success` |
+| Bloom | `can_merge` and health thriving or steady |
+| Lantern and falling rain | `in_flight` |
+| A ring spreading from the plant | `last_run` changed since the previous poll |
+| Sky | the real sun at the viewer's time (`strata_solar_position`, latitude 40°, longitude from the time zone's standard offset), or always 10:30 with "Sky: daytime" |
+
+Clicking or tapping a plant opens its card (a bottom sheet on a phone);
+"Find a repo" flies to one. The page starts with three shadow cascades and
+drops to one, then none, while frames average over 50 ms, so a software
+renderer stays usable; `?quality=0|1|2` fixes the level.
+
+The page (`gardener/web/garden3d.html`) owns the data, layout, input and
+labels. The renderer is `garden3d/main.cpp`, which only draws what the
+page hands it. It is built by `garden3d/build.sh` (emsdk 6.0.11 and
+Strata's v0.4.0 WebAssembly release, checked by SHA-256) into
+`gardener/web/garden3d.js` and `.wasm`, which are committed so installing
+gardener needs no toolchain. CI's `garden3d` job rebuilds them and fails
+if the committed files differ, so after editing `main.cpp` (or the
+exported function list) rerun `build.sh` and commit its output. As with
+the garden view, the drawing is verified by rendering it, not by
+assertion; `tests/test_garden3d.py` covers the serving side and that the
+page calls only exported functions.
+
 ## The live view
 
 `/live` (linked from the main page's header) answers one question — *what
