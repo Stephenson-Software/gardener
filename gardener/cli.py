@@ -178,6 +178,26 @@ def positive_count(value: str) -> int:
     return count
 
 
+def stale_days_arg(value: str) -> int:
+    """argparse `type=` for `score --stale-days`. A value too large for
+    `parpt.repos_needing_score`'s `now - timedelta(days=...)` raised an
+    `OverflowError` traceback, and a negative one put the cutoff in the
+    future, so every scored repo read as stale and was re-scored with a
+    real dispatch. `0` stays accepted: it re-scores everything already
+    scored, a deliberate choice rather than a typo."""
+    try:
+        days = int(value)
+    except ValueError:
+        days = -1
+    if days < 0:
+        raise argparse.ArgumentTypeError(f"must be a whole number of days, 0 or more, got: {value!r}")
+    try:
+        datetime.now(timezone.utc) - timedelta(days=days)
+    except OverflowError:
+        raise argparse.ArgumentTypeError(f"is too many days to compute a cutoff from, got: {value!r}")
+    return days
+
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2419,7 +2439,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"How many garden repos to score (default {parpt.DEFAULT_RESCORE_LIMIT})",
     )
     score_parser.add_argument(
-        "--stale-days", type=int, default=parpt.DEFAULT_STALE_DAYS,
+        "--stale-days", type=stale_days_arg, default=parpt.DEFAULT_STALE_DAYS,
         help=f"Re-score a repo whose score is older than this (default {parpt.DEFAULT_STALE_DAYS})",
     )
     score_parser.add_argument(
