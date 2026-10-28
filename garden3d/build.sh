@@ -38,7 +38,7 @@ em++ "$here/main.cpp" "$work/strata/lib/libstrata.a" -I"$work/strata/include" \
   -std=c++17 -O2 -fwasm-exceptions -Wall -Wextra \
   -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sALLOW_MEMORY_GROWTH=1 \
   -sENVIRONMENT=web -sMODULARIZE=1 -sEXPORT_NAME=createGarden3D \
-  -sEXPORTED_FUNCTIONS=_malloc,_free,_g3_init,_g3_resize,_g3_set_quality,_g3_set_beds,_g3_set_plants,_g3_set_camera,_g3_set_sun,_g3_view_proj,_g3_frame \
+  -sEXPORTED_FUNCTIONS=_malloc,_free,_g3_init,_g3_resize,_g3_set_quality,_g3_set_beds,_g3_set_plants,_g3_set_gardeners,_g3_set_shed,_g3_set_camera,_g3_set_sun,_g3_view_proj,_g3_frame \
   -sEXPORTED_RUNTIME_METHODS=HEAPF32,stringToNewUTF8 \
   -o "$work/garden3d.js"
 

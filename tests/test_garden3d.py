@@ -7,6 +7,8 @@ side: exactly three URLs, the right content types, the hub's operator
 check, and that the page only calls functions the build exports.
 """
 import http.client
+import json
+import os
 import re
 import tempfile
 import threading
@@ -15,7 +17,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from gardener import dashboard, garden3d
-from test_hub import OPERATOR, _basic, _env, _HubFixture
+from unittest.mock import patch
+
+from test_hub import OPERATOR, PHONE_TOKEN, _basic, _env, _HubFixture
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -66,6 +70,33 @@ class TestAssets(unittest.TestCase):
         self.assertIn('"web/*"', pyproject)
 
 
+class TestGardeners(unittest.TestCase):
+    """The gardeners (one per device) are drawn from fields /api/status
+    already carries. What can be asserted without a browser: the local
+    payload names its device, the hub's doesn't (its devices are named by
+    their tokens), and the page never reads log text (RFC 0010: no log or
+    transcript text leaves a device, and the 3D page adds none)."""
+
+    def test_a_local_payload_names_its_device(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"GARDENER_DEVICE_NAME": "Walter"}):
+            self.assertEqual(dashboard.build_status(state_dir=Path(tmp))["device"], "Walter")
+
+    def test_a_hub_payload_names_no_device_of_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(dashboard.build_status(state_dir=Path(tmp), hub=True, live_devices=[])["device"])
+
+    def test_the_page_reads_no_log_text(self):
+        page = (garden3d.WEB_DIR / "garden3d.html").read_text(encoding="utf-8")
+        for field in ("log_tail", "log_tails", "active_log", "summary"):
+            self.assertNotRegex(page, rf"\.{field}\b", field)
+
+    def test_the_page_draws_gardeners_from_live_devices(self):
+        page = (garden3d.WEB_DIR / "garden3d.html").read_text(encoding="utf-8")
+        self.assertIn("data.live_devices", page)
+        self.assertIn("mod._g3_set_gardeners(", page)
+        self.assertIn("mod._g3_set_shed(", page)
+
+
 class TestDashboardServesThePage(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -107,6 +138,18 @@ class TestHubServesThePage(unittest.TestCase):
     def test_the_page_and_engine_require_an_operator(self):
         for path in ("/3d", "/3d/garden3d.js", "/3d/garden3d.wasm"):
             self.assertEqual(self.hub.request("GET", path)[0], 401, path)
+
+    def test_its_status_names_each_beating_device_by_token(self):
+        beat = {"seq": 1, "interval_seconds": 60, "ending": False, "session": {"id": "s1", "command": "overnight"},
+                "in_progress": ["acme/forge"], "slots": [{"repo": "acme/forge", "phase": "running"}]}
+        headers = {"Authorization": f"Bearer {PHONE_TOKEN}"}
+        self.assertEqual(self.hub.request("POST", "/api/v1/heartbeat", headers, json.dumps(beat))[0], 200)
+        status, _, body = self.hub.request("GET", "/api/status", _basic(OPERATOR))
+        data = json.loads(body)
+        self.assertIsNone(data["device"])
+        [device] = data["live_devices"]
+        self.assertEqual((device["device"], device["state"], device["in_progress"]),
+                         ("phone", "live", ["acme/forge"]))
 
     def test_an_operator_gets_them(self):
         status, headers, body = self.hub.request("GET", "/3d", _basic(OPERATOR))

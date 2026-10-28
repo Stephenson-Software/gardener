@@ -282,7 +282,10 @@ wasm magic), nothing else under `/3d` served, a missing file a 404 rather
 than an error, the 2D page linking to it, the hub refusing all three
 without an operator and serving them with one, and that every `mod._g3_*`
 function the page calls is in `garden3d/build.sh`'s export list and in the
-committed glue. The drawing itself is verified by rendering, like the 2D
+committed glue. For the gardeners it checks that a local payload names its
+device and a hub's doesn't, that a heartbeat reaches the hub's
+`/api/status` under the token's device name, and that the page reads no
+log-text field. The drawing itself is verified by rendering, like the 2D
 garden, and CI's `garden3d` job rebuilds the committed engine and fails on
 any difference.
 `tests/test_hub.py` runs a real hub (`hub.HubHandler` on a loopback port

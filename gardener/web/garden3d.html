@@ -76,6 +76,13 @@
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   .bed-label { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px; font-weight: 600;
     padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid var(--panel-border); }
+  .gardener-label { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px;
+    padding: 2px 8px; border-radius: 8px; background: var(--panel); border: 1px solid var(--accent); text-align: center;
+    line-height: 1.25; }
+  .gardener-label b { display: block; }
+  .gardener-label span { color: var(--muted); font-size: 11px; }
+  .gardener-label.stale { border-color: var(--panel-border); color: var(--muted); opacity: 0.75; }
+  .gardener-label.stale b { font-weight: 600; }
   #tip { position: fixed; pointer-events: none; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--panel);
     border: 1px solid var(--panel-border); transform: translate(12px, -50%); white-space: nowrap; }
   #tip[hidden] { display: none; }
@@ -129,6 +136,9 @@
     <dt>Bloom</dt><dd>on the merge allow-list and tended in the last 5 days</dd>
     <dt>Lantern + rain</dt><dd>being tended right now</dd>
     <dt>Ring</dt><dd>a run just finished</dd>
+    <dt>Gardeners</dt><dd>one per device running gardener, named by the device: walks to the plant its session
+      is tending and waters it, or rests by the shed when nothing is in flight. A grey label means its last
+      heartbeat is stale</dd>
     <dt>Beds</dt><dd>one per GitHub owner</dd>
     <dt>Sky</dt><dd>the real sun for your time zone, or always day</dd>
   </dl>
@@ -141,6 +151,7 @@
 <section id="card" class="panel" hidden aria-label="Selected repo">
   <button id="card-close" type="button" aria-label="Close">×</button>
   <h2 id="card-title"></h2>
+  <div id="card-sub" class="sub" hidden></div>
   <table><tbody id="card-body"></tbody></table>
 </section>
 
@@ -153,7 +164,10 @@
    HTML around the canvas; garden3d.wasm (garden3d/main.cpp, Strata) only
    draws. Health buckets match the 2D dashboard's healthOf exactly. */
 const POLL_MS = 10000;
-const PLANT_STRIDE = 10, BED_STRIDE = 4;
+const PLANT_STRIDE = 10, BED_STRIDE = 4, GARDENER_STRIDE = 9;
+const GARDENER_MODE = {resting: 0, walking: 1, tending: 2};
+const GARDENER_SCALE = 1.25;  // main.cpp's kGardenerScale
+const BED_TOP = 0.30, FENCE_MARGIN = 1.6, WALK_SPEED = 1.8, REPO_TURN_MS = 45000;
 const HEALTH_CODE = {unplanted: 0, struggling: 1, wilting: 2, dry: 3, steady: 4, thriving: 5};
 const HEALTH_LABEL = {thriving: "thriving", steady: "steady", dry: "dry", wilting: "wilting",
   struggling: "struggling", unplanted: "not tended"};
@@ -196,7 +210,9 @@ const store = {
 };
 
 /* --------------------------------------------------------------- state */
-let mod = null, plantPtr = 0, plantCap = 0;
+let mod = null, plantPtr = 0, plantCap = 0, gardenerPtr = 0, gardenerCap = 0;
+let gardeners = [];       // {name, x, z, fx, fz, walked, path, key, mode, device}, one per device
+let site = {gateX: 0, fenceZ: 0, shedX: 0, shedZ: 0};
 let plants = [];          // {row, x, z, top, health}
 let beds = [];            // {owner, cx, cz, x0, z0, x1, z1}
 let layoutKey = "";
@@ -244,6 +260,11 @@ function layout(rows) {
     });
   }
   const bounds = [ox, oz, ox + width, oz + depth];
+  // The shed stands outside the fence on the near side, beside the gate.
+  site = {gateX: ox + width / 2, fenceZ: oz + depth + FENCE_MARGIN,
+    shedX: ox + width / 2 + 3.8, shedZ: oz + depth + FENCE_MARGIN + 1.9};
+  for (const gd of gardeners) gd.key = null;  // re-plan against the new layout
+  if (mod) mod._g3_set_shed(site.shedX, site.shedZ, 1);
   if (mod) {
     const buf = new Float32Array(beds.length * BED_STRIDE);
     beds.forEach((b, i) => buf.set([b.x0, b.z0, b.x1, b.z1], i * BED_STRIDE));
@@ -252,8 +273,11 @@ function layout(rows) {
     mod._g3_set_beds(ptr, beds.length, ...bounds);
     mod._free(ptr);
   }
-  const span = Math.max(width, depth);
-  cam.dist = Math.min(Math.max(span * 1.15, 12), 120);
+  const span = Math.max(width, depth + 8);  // + the shed in front
+  // A portrait screen sees less across, so stand further back.
+  const el = $("garden3d-canvas"), aspect = el.clientWidth / Math.max(el.clientHeight, 1);
+  cam.dist = Math.min(Math.max(span * 1.15, 16) / Math.min(Math.max(aspect, 0.6), 1), 120);
+  cam.tz = 1.5;  // a little toward the shed, so it stays in the first view
   maxDist = Math.max(cam.dist * 2, 30);
   renderLabels();
 }
@@ -313,6 +337,7 @@ function applyStatus(data) {
       ? `<b>Tending now:</b> ${tending.map(esc).join(", ")}`
       : `<span class="sub">Nothing is being tended right now.</span>`)
     + (devices.length ? `<div class="sub">Devices: ${devices.join(" · ")}</div>` : "");
+  syncGardeners(data);
   $("updated").textContent = `${plants.length} plants · updated ${new Date().toLocaleTimeString()}`;
   $("garden3d-canvas").setAttribute("aria-label",
     `The garden in 3D: ${plants.length} repos in ${beds.length} beds. `
@@ -328,8 +353,176 @@ function applyStatus(data) {
 }
 function announce(text) { $("announce").textContent = text; }
 
+/* ----------------------------------------------------------- gardeners */
+// One gardener per device running gardener. On a hub they come from each
+// device's latest heartbeat (`live_devices`, RFC 0010), named by the token
+// the device beats with; a local dashboard has one, this device, from its
+// own logs (`in_progress`). Only structured fields are read: device names,
+// states, repo names, phases, counts and times — the same ones the hub's
+// device panels show. Stale changes the label only (RFC 0010: stale is a
+// label): the figure keeps doing what the last beat said.
+function deviceViews(data) {
+  if (data.hub) {
+    return (data.live_devices || []).map((d) => ({
+      name: d.device, state: d.state, age: d.age_seconds,
+      repos: d.state === "idle" ? [] : (d.in_progress || []), device: d}));
+  }
+  return [{name: data.device || "this device", state: "local", age: null, repos: data.in_progress || [],
+    device: {command: null, target: null, batch_progress: data.batch_progress, overnight_run: data.overnight_run,
+      in_progress: data.in_progress || [], slots: []}}];
+}
+function syncGardeners(data) {
+  const views = deviceViews(data);
+  const keep = new Map(gardeners.map((g) => [g.name, g]));
+  gardeners = views.map((v) => {
+    const g = keep.get(v.name) || {name: v.name, x: null, z: null, fx: 0, fz: -1, walked: 0, path: [], key: null,
+      mode: GARDENER_MODE.resting, seed: seedOf("gardener:" + v.name), kind: "gardener"};
+    return Object.assign(g, {view: v});
+  });
+  if (selected && selected.kind === "gardener" && !gardeners.includes(selected)) hideCard();
+  renderGardenerLabels();
+}
+function plantByRepo(repo) { return plants.find((p) => p.row.repo === repo); }
+function tendingRepo(g) {
+  // A session with several repos in flight works its way round them.
+  const repos = g.view.repos.filter((r) => plantByRepo(r));
+  if (!repos.length) return null;
+  return repos[Math.floor(Date.now() / REPO_TURN_MS) % repos.length];
+}
+// Where each gardener should be: beside its plant, or in a row by the shed.
+function destinations() {
+  const out = new Map(), atPlant = new Map();
+  let resting = 0;
+  for (const g of gardeners) {
+    const repo = tendingRepo(g);
+    if (repo) {
+      const p = plantByRepo(repo), n = atPlant.get(repo) || 0;
+      atPlant.set(repo, n + 1);
+      // The first stands on the gate side of the plant, more fan out around it.
+      const a = Math.PI / 2 + n * 2.1, r = 0.62;
+      out.set(g, {key: `plant:${repo}:${n}`, x: p.x + Math.cos(a) * r, z: p.z + Math.sin(a) * r,
+        face: [p.x, p.z], tending: repo});
+    } else {
+      const i = resting++;
+      // Out front of the shed: the door, then along past the bench.
+      out.set(g, {key: `shed:${i}`, x: site.shedX - 0.45 + i * 0.95, z: site.shedZ + 1.75, face: null, tending: null});
+    }
+  }
+  return out;
+}
+const insideFence = (z) => z < site.fenceZ;
+function planPath(g, dest) {
+  const path = [];
+  if (insideFence(g.z) !== insideFence(dest.z)) {
+    const inner = {x: site.gateX, z: site.fenceZ - 0.9}, outer = {x: site.gateX, z: site.fenceZ + 0.9};
+    path.push(...(insideFence(g.z) ? [inner, outer] : [outer, inner]));
+  }
+  path.push({x: dest.x, z: dest.z});
+  return path;
+}
+function groundY(x, z) {
+  for (const b of beds) if (x > b.x0 - 0.1 && x < b.x1 + 0.1 && z > b.z0 - 0.1 && z < b.z1 + 0.1) return BED_TOP;
+  return 0;
+}
+function stepGardeners(dt) {
+  const dests = destinations();
+  for (const g of gardeners) {
+    const d = dests.get(g);
+    g.tending = d.tending;
+    if (g.x == null || reducedMotion) {  // first sight (or no motion): already there
+      g.x = d.x; g.z = d.z; g.path = []; g.key = d.key;
+    } else if (g.key !== d.key) {
+      g.path = planPath(g, d); g.key = d.key;
+    }
+    let move = WALK_SPEED * dt;
+    while (g.path.length && move > 0) {
+      const w = g.path[0], dx = w.x - g.x, dz = w.z - g.z, len = Math.hypot(dx, dz);
+      if (len > 1e-4) { g.fx = dx / len; g.fz = dz / len; }
+      if (len <= move) { g.x = w.x; g.z = w.z; g.walked += len; move -= len; g.path.shift(); }
+      else { g.x += g.fx * move; g.z += g.fz * move; g.walked += move; move = 0; }
+    }
+    if (g.path.length) g.mode = GARDENER_MODE.walking;
+    else {
+      g.mode = d.tending ? GARDENER_MODE.tending : GARDENER_MODE.resting;
+      const [tx, tz] = d.face || [g.x, g.z + 1];  // resting: face out from the shed
+      const len = Math.hypot(tx - g.x, tz - g.z);
+      if (len > 1e-4) { g.fx = (tx - g.x) / len; g.fz = (tz - g.z) / len; }
+    }
+    g.y = groundY(g.x, g.z);
+  }
+}
+function gardenerStatus(g) {
+  const v = g.view;
+  let doing;
+  if (g.tending) doing = (g.mode === GARDENER_MODE.walking ? "walking to " : "tending ") + g.tending;
+  else if (v.repos.length) doing = "tending " + v.repos.join(", ");  // in flight, but not a garden plant
+  else if (v.state === "live") doing = "between repos";
+  else doing = "resting";
+  return v.state === "stale" ? `${doing} · stale ${fmtSeconds(v.age)}` : doing;
+}
+function fmtSeconds(s) {
+  if (s == null) return "?";
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 5400) return Math.round(s / 60) + "m";
+  if (s < 172800) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+}
+const gardenerLabelEls = new Map();
+function renderGardenerLabels() {
+  for (const el of gardenerLabelEls.values()) el.remove();
+  gardenerLabelEls.clear();
+  for (const g of gardeners) {
+    const el = document.createElement("div");
+    el.className = "gardener-label";
+    el.innerHTML = "<b></b><span></span>";
+    el.firstChild.textContent = g.name;
+    $("labels").appendChild(el);
+    gardenerLabelEls.set(g, el);
+  }
+}
+function placeGardenerLabels() {
+  for (const [g, el] of gardenerLabelEls) {
+    const s = g.x == null ? null : project(g.x, (g.y || 0) + 1.65 * GARDENER_SCALE, g.z);
+    if (!s) { el.style.display = "none"; continue; }
+    el.style.display = "";
+    el.style.left = s.x + "px";
+    el.style.top = s.y + "px";
+    el.classList.toggle("stale", g.view.state === "stale");
+    const status = gardenerStatus(g);
+    if (el.lastChild.textContent !== status) el.lastChild.textContent = status;
+  }
+}
+function showGardenerCard(g) {
+  selected = g;
+  const v = g.view, d = v.device || {};
+  $("card").hidden = false;
+  $("card-title").textContent = `🧑‍🌾 ${g.name}`;
+  $("card-sub").hidden = false;
+  $("card-sub").textContent = gardenerStatus(g);
+  const rows = [];
+  if (v.state !== "local") {
+    rows.push(["Heartbeat", esc(v.state) + (v.age != null ? ` · ${esc(fmtSeconds(v.age))} ago` : "")]);
+  }
+  if (d.command) rows.push([v.state === "idle" ? "Last ran" : "Running", esc(d.command) + (d.target ? ` · ${esc(d.target)}` : "")]);
+  rows.push(["In flight", (d.in_progress || []).length ? d.in_progress.map(esc).join("<br>") : "nothing"]);
+  const b = d.batch_progress;
+  if (b) rows.push(["Batch", `${b.start}–${b.end} of ${b.total}`]);
+  const o = d.overnight_run;
+  if (o) {
+    rows.push(["Overnight", esc(o.strategy || "") + (o.finished ? " · finished"
+      : o.remaining_seconds != null ? ` · ${esc(fmtSeconds(o.remaining_seconds))} left` : "")]);
+  }
+  for (const sl of d.slots || []) {
+    rows.push([esc(sl.repo), esc(sl.phase || "") + (sl.stalled ? " · stalled" : "")
+      + (sl.rate_limit_seen ? " · usage limit" : "")]);
+  }
+  $("card-body").innerHTML = rows.map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
+}
+
 /* ---------------------------------------------------------------- card */
 function showCard(p) {
+  if (p.kind === "gardener") return showGardenerCard(p);
+  $("card-sub").hidden = true;
   selected = p;
   const r = p.row, h = p.health || healthOf(r);
   $("card").hidden = false;
@@ -381,6 +574,16 @@ function project(x, y, z) {
 }
 function pick(sx, sy) {
   let best = null, bestD = (coarse ? 30 : 18) ** 2;
+  for (const g of gardeners) {  // checked first: a gardener stands in front of its plant
+    if (g.x == null) continue;
+    for (const y of [0.8, 1.4]) {
+      const s = project(g.x, (g.y || 0) + y * GARDENER_SCALE, g.z);
+      if (!s) continue;
+      const d = (s.x - sx) ** 2 + (s.y - sy) ** 2;
+      if (d < bestD) { bestD = d; best = g; }
+    }
+  }
+  if (best) return best;
   for (const p of plants) {
     for (const y of [0.4, (p.top || 1) * 0.7]) {
       const s = project(p.x, y, p.z);
@@ -394,7 +597,7 @@ function pick(sx, sy) {
 const labelEls = new Map();
 function renderLabels() {
   const host = $("labels");
-  host.innerHTML = "";
+  for (const el of labelEls.values()) el.remove();
   labelEls.clear();
   for (const b of beds) {
     const el = document.createElement("div");
@@ -506,7 +709,8 @@ function hover(x, y) {
   tip.hidden = false;
   tip.style.left = x + "px";
   tip.style.top = y + "px";
-  tip.innerHTML = `<span class="dot h-${hit.health}"></span>${esc(hit.row.repo)}`;
+  tip.innerHTML = hit.kind === "gardener" ? `🧑‍🌾 ${esc(hit.name)} · ${esc(gardenerStatus(hit))}`
+    : `<span class="dot h-${hit.health}"></span>${esc(hit.row.repo)}`;
 }
 canvas.addEventListener("pointerleave", () => { $("tip").hidden = true; hovered = null; });
 
@@ -562,9 +766,24 @@ function frame(now) {
     heap[o + 9] = (p === selected || p === hovered) ? 1 : 0;
   }
   mod._g3_set_plants(plantPtr, n);
+  stepGardeners(Math.min((now - (frame.last || now)) / 1000, 0.25));
+  frame.last = now;
+  const gn = gardeners.length;
+  if (gn * GARDENER_STRIDE > gardenerCap) {
+    if (gardenerPtr) mod._free(gardenerPtr);
+    gardenerCap = gn * GARDENER_STRIDE + 8 * GARDENER_STRIDE;
+    gardenerPtr = mod._malloc(gardenerCap * 4);
+  }
+  const gbase = gardenerPtr >> 2, gheap = mod.HEAPF32;
+  gardeners.forEach((g, i) => {
+    gheap.set([g.x, g.y, g.z, g.fx, g.fz, g.walked, g.mode, g.seed, (g === selected || g === hovered) ? 1 : 0],
+      gbase + i * GARDENER_STRIDE);
+  });
+  mod._g3_set_gardeners(gardenerPtr, gn);
   mod._g3_frame(now / 1000);
   adaptQuality(now);
   placeLabels();
+  placeGardenerLabels();
   requestAnimationFrame(frame);
 }
 

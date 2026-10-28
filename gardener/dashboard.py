@@ -721,6 +721,10 @@ def build_status(
         "schema": PAYLOAD_SCHEMA,
         "generated_at": state.now_iso(),
         "hub": hub,
+        # Which machine this page is reading, so the 3D garden can name the
+        # one gardener a local dashboard has. None on a hub, whose devices
+        # are named by their tokens under `live_devices` instead.
+        "device": None if hub else state.local_device_name(),
         # Echoed back so the page can caption the runs table with the
         # filter actually applied, rather than assuming its own request
         # shape survived.
