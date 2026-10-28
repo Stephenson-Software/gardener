@@ -164,11 +164,13 @@ def digest_hours(value: str) -> float:
 
 
 def positive_count(value: str) -> int:
-    """argparse `type=` for `status --limit`. SQLite reads a negative
-    `LIMIT` as no limit at all, so `--limit -1` printed the whole local
-    history while `--all-devices` sent the same value to the hub, which
-    clamps it to 1; and `--limit 0` printed "no runs recorded yet" over a
-    history that had runs in it."""
+    """argparse `type=` for `status --limit` and `score --limit`. SQLite
+    reads a negative `LIMIT` as no limit at all, so `status --limit -1`
+    printed the whole local history while `--all-devices` sent the same
+    value to the hub, which clamps it to 1; and `--limit 0` printed "no
+    runs recorded yet" over a history that had runs in it. `score --limit`
+    with `0` or a negative value scored nothing, then reported that every
+    garden repo had a fresh Parpt score."""
     try:
         count = int(value)
     except ValueError:
@@ -2435,7 +2437,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Score every never-scored/stale garden repo, not just --limit of them",
     )
     score_parser.add_argument(
-        "--limit", type=int, default=parpt.DEFAULT_RESCORE_LIMIT,
+        "--limit", type=positive_count, default=parpt.DEFAULT_RESCORE_LIMIT,
         help=f"How many garden repos to score (default {parpt.DEFAULT_RESCORE_LIMIT})",
     )
     score_parser.add_argument(

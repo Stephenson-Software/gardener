@@ -902,6 +902,21 @@ class TestPositiveCount(unittest.TestCase):
         self.assertEqual(parser.parse_args(["status", "--limit", "3"]).limit, 3)
         self.assertEqual(parser.parse_args(["status"]).limit, 20)
 
+    def test_score_rejects_a_non_positive_limit_at_parse_time(self):
+        # Before this, `repos_needing_score` returned nothing for either
+        # value and `cmd_score` reported every garden repo freshly scored.
+        parser = build_parser()
+        for limit in ("0", "-1"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["score", "--limit", limit])
+            self.assertEqual(ctx.exception.code, 2, limit)
+
+    def test_score_accepts_a_positive_limit_and_keeps_the_default(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["score", "--limit", "3"]).limit, 3)
+        self.assertEqual(parser.parse_args(["score"]).limit, parpt.DEFAULT_RESCORE_LIMIT)
+
 
 class TestStaleDaysArg(unittest.TestCase):
     """`stale_days_arg` is `score --stale-days`' argparse `type=`: a huge
