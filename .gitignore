@@ -11,3 +11,4 @@ venv/
 htmlcov/
 .claude/
 garden3d/.build/
+fleetcity/.build/

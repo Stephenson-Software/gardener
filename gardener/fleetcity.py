@@ -8,8 +8,10 @@ half of it:
 * `build_city` joins what the hub holds (every device's runs, the garden
   lists devices pushed, the latest heartbeats) with an optional fleet
   snapshot and lays the city out. `/api/city` serves the result to the page
-  (`web/city.html`, drawn by `web/city.{js,wasm}` from `fleetcity/main.cpp`),
-  and `render_still` draws the same layout headless for the nightly digest.
+  (`web/city.html`, drawn by `web/city.{js,wasm}` from `fleetcity/main.cpp`
+  and driven by the Strata web kit's `web/strata-loader.js` and
+  `web/strata-kit.js`, the same two files `/3d` serves), and `render_still`
+  draws the same layout headless for the nightly digest.
 * The **fleet snapshot** is optional: a `city.json` written by the
   Fleet City builder (RFC 0026 §1, schema 1), copied by the operator into
   the hub's data directory. It adds the repositories gardener never ran,
@@ -46,6 +48,8 @@ ASSETS = {
     "/city/": ("city.html", "text/html; charset=utf-8"),
     "/city/city.js": ("city.js", "text/javascript; charset=utf-8"),
     "/city/city.wasm": ("city.wasm", "application/wasm"),
+    "/city/strata-kit.js": ("strata-kit.js", "text/javascript; charset=utf-8"),
+    "/city/strata-loader.js": ("strata-loader.js", "text/javascript; charset=utf-8"),
 }
 #: The page's URLs a signed-out browser is sent to sign in from (the rest
 #: get a plain 401).

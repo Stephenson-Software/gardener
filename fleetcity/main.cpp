@@ -2,11 +2,11 @@
 // the hub's /city page (Stephenson-Software RFC 0026).
 //
 // The hub lays the city out (gardener/fleetcity.py) and the page
-// (gardener/web/city.html) owns the data, input, labels and timelapse. This
-// module only draws, and answers one question: which building is under a
-// point on the canvas. It is handed numbers only: one row of kBuildingStride
-// floats per building, one of kDistrictStride per district, and two RGBA8
-// palettes with one texel per building.
+// (gardener/web/city.html) owns the data, labels and timelapse. This module
+// only draws, and answers one question: which building is under a point on
+// the canvas. It is handed numbers only: one row of kBuildingStride floats
+// per building, one of kDistrictStride per district, and two RGBA8 palettes
+// with one texel per building.
 //
 // RFC 0026 §4: each district is one textured mesh for the bodies (lit) and
 // one for the roofs (unlit, so a lit roof glows at night), never one mesh
@@ -16,17 +16,22 @@
 // timelapse frame is one strata_update_texture_rgba8 call and rebuilds no
 // geometry.
 //
+// The shell around the city (the WebGL 2 context, resizing, quality tiers,
+// the orbit camera, the sun, the frame and its batches, a lost context) is
+// the Strata web kit's strata_kit.h, vendored in strata-kit/ at the
+// repository's root and shared with the 3D garden. This file is the city: it
+// uploads the meshes in strata_kit_engine_ready and fills the frame's
+// batches in strata_kit_build.
+//
 // Build: fleetcity/build.sh (emsdk 6.0.11, Strata's wasm release, SHA-pinned).
-#include <emscripten/emscripten.h>
-#include <emscripten/html5.h>
+#define STRATA_KIT_MAIN
+#include "strata_kit.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
-
-#include "strata/strata.h"
 
 namespace {
 
@@ -62,8 +67,6 @@ struct Building {
 };
 
 struct City {
-    StrataEngine* engine = nullptr;
-    int width = 0, height = 0;
     int texW = 32, texH = 1;
     uint32_t bodyTexture = 0, roofTexture = 0;
     std::vector<uint32_t> meshIds;
@@ -75,18 +78,13 @@ struct City {
     std::vector<float> glows;
     float bounds[4] = {-10, -10, 10, 10};
     int selected = -1, hovered = -1;
-    float yaw = 0.8f, pitch = 0.75f, dist = 80.0f, target[3] = {0, 0, 0};
-    float viewProj[16] = {};
-    float eye[3] = {};
-    float toSun[3] = {0.3f, 0.8f, 0.4f};
-    float night = 0.0f;
-    int quality = 2;
-    bool reducedMotion = false;
-    std::vector<StrataPoint> points;
-    std::vector<StrataLineVertex> lines;
+    bool citySet = false;
 };
 
 City c;
+
+strata_kit::Host& host() { return strata_kit::host(); }
+StrataEngine* engine() { return host().engine; }
 
 void face(MeshData& m, const float p[4][3], const float n[3], const float col[3], float u, float v) {
     const uint32_t base = m.vertices();
@@ -134,7 +132,7 @@ uint32_t addMesh(MeshData& m, uint32_t texture, uint32_t flags) {
     tm.texture = texture;
     tm.flags = flags;
     uint32_t id = 0;
-    if (strata_add_textured_mesh(c.engine, &tm, &id) != STRATA_OK) {
+    if (strata_add_textured_mesh(engine(), &tm, &id) != STRATA_OK) {
         std::fprintf(stderr, "fleetcity: strata_add_textured_mesh: %s\n", strata_last_error());
         return 0;
     }
@@ -144,17 +142,18 @@ uint32_t addMesh(MeshData& m, uint32_t texture, uint32_t flags) {
 }
 
 void rebuild() {
-    if (!c.engine) return;
-    strata_clear_meshes(c.engine);
+    StrataEngine* e = engine();
+    if (!e) return;
+    strata_clear_meshes(e);
     c.meshIds.clear();
     c.meshTags.clear();
-    if (c.bodyTexture) strata_destroy_texture(c.engine, c.bodyTexture);
-    if (c.roofTexture) strata_destroy_texture(c.engine, c.roofTexture);
+    if (c.bodyTexture) strata_destroy_texture(e, c.bodyTexture);
+    if (c.roofTexture) strata_destroy_texture(e, c.roofTexture);
     c.bodyTexture = c.roofTexture = 0;
     std::vector<uint8_t> grey(static_cast<size_t>(c.texW) * c.texH * 4, 128);
     const uint32_t flags = STRATA_TEXTURE_NEAREST | STRATA_TEXTURE_CLAMP_U | STRATA_TEXTURE_CLAMP_V;
-    strata_create_texture_rgba8(c.engine, c.texW, c.texH, grey.data(), flags, &c.bodyTexture);
-    strata_create_texture_rgba8(c.engine, c.texW, c.texH, grey.data(), flags, &c.roofTexture);
+    strata_create_texture_rgba8(e, c.texW, c.texH, grey.data(), flags, &c.bodyTexture);
+    strata_create_texture_rgba8(e, c.texW, c.texH, grey.data(), flags, &c.roofTexture);
 
     // The ground: asphalt around everything, a paved block per district.
     MeshData ground;
@@ -174,7 +173,7 @@ std::vector<int> gDistrictOf;
 // The ground, then one body mesh and one roof mesh per district, in
 // district order: 1 + 2 * districts meshes, far under STRATA_MAX_MESHES.
 void rebuildMeshes() {
-    if (!c.engine) return;
+    if (!engine()) return;
     rebuild();
     const size_t nd = c.districts.size() / kDistrictStride;
     if (!nd) return;
@@ -216,15 +215,6 @@ int32_t tagOf(const std::vector<TriTag>& tags, uint32_t triangle) {
     if (it == tags.begin()) return -1;
     --it;
     return triangle < it->first + it->count ? it->id : -1;
-}
-
-void mul4(const float* a, const float* b, float* out) {  // column-major a * b
-    for (int col = 0; col < 4; ++col)
-        for (int r = 0; r < 4; ++r) {
-            float s = 0.0f;
-            for (int k = 0; k < 4; ++k) s += a[k * 4 + r] * b[col * 4 + k];
-            out[col * 4 + r] = s;
-        }
 }
 
 bool invert4(const float* m, float* out) {
@@ -280,8 +270,7 @@ void outline(const Building& b, float r, float g, float bl, float a) {
     const float y0 = kPad + 0.01f, y1 = kPad + b.h + kRoof + pad;
     const float px[4] = {x0, x1, x1, x0}, pz[4] = {z0, z0, z1, z1};
     auto seg = [&](float ax, float ay, float az, float bx, float by, float bz) {
-        c.lines.push_back({{ax, ay, az}, {r, g, bl, a}});
-        c.lines.push_back({{bx, by, bz}, {r, g, bl, a}});
+        host().line(ax, ay, az, bx, by, bz, {r, g, bl}, a);
     };
     for (int i = 0; i < 4; ++i) {
         const int j = (i + 1) % 4;
@@ -291,70 +280,95 @@ void outline(const Building& b, float r, float g, float bl, float a) {
     }
 }
 
-void* noProcAddress(const char*, void*) { return nullptr; }
+// Street lamps at a district's four corners, outside its pavement.
+template <typename F>
+void eachLamp(const float* d, F f) {
+    const float xs[2] = {d[0] - 0.6f, d[2] + 0.6f}, zs[2] = {d[1] - 0.6f, d[3] + 0.6f};
+    for (float x : xs)
+        for (float z : zs) f(x, z);
+}
+
+constexpr float kLampHeight = 3.0f;
 
 }  // namespace
 
-extern "C" {
+// The kit's hooks (strata_kit.h).
 
-// Creates the WebGL 2 context on the canvas and the engine in it. Returns 0
-// on success, or a negative number (no WebGL 2) or a StrataStatus.
-// preserve keeps the drawing buffer after compositing, for captures.
-EMSCRIPTEN_KEEPALIVE int fc_init(const char* canvasSelector, int width, int height, int quality, int reducedMotion,
-                                 int preserve) {
-    EmscriptenWebGLContextAttributes attrs;
-    emscripten_webgl_init_context_attributes(&attrs);
-    attrs.majorVersion = 2;
-    attrs.minorVersion = 0;
-    attrs.alpha = false;
-    attrs.depth = true;
-    attrs.stencil = false;
-    attrs.antialias = true;
-    attrs.preserveDrawingBuffer = preserve != 0;
-    const EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx = emscripten_webgl_create_context(canvasSelector, &attrs);
-    if (ctx <= 0) return -1;
-    emscripten_webgl_make_context_current(ctx);
+void strata_kit_configure(strata_kit::Options& o) {
+    o.name = "fleetcity";
+    o.fovDegrees = 45.0f;
+    o.nearPlane = 0.5f;
+    o.farPlane = 600.0f;  // raised with the camera's distance in strata_kit_build
+    o.shadowDistanceMin = 60.0f;
+    o.shadowDistancePerDist = 2.0f;
+    // Every beacon and street lamp may be lit at every tier, as before the
+    // kit: the budget is the engine's maximum, beacons first.
+    for (strata_kit::Tier& t : o.tiers) t.maxLights = STRATA_MAX_POINT_LIGHTS;
+}
 
-    StrataEngineDesc desc{};
-    desc.struct_size = sizeof desc;
-    desc.abi_version = STRATA_ABI_VERSION;
-    desc.surface = STRATA_SURFACE_HOST_CONTEXT;
-    desc.width = width;
-    desc.height = height;
-    desc.get_proc_address = noProcAddress;  // must be non-NULL; never called in a browser
-    const StrataStatus status = strata_create(&desc, &c.engine);
-    if (status != STRATA_OK) {
-        std::fprintf(stderr, "strata_create failed: %s (%s)\n", strata_status_string(status), strata_last_error());
-        return status;
-    }
-    if (strata_abi_minor() < 10) {
+// After the engine is made, and again after a lost WebGL context is
+// restored: the meshes and the two palette textures died with the old
+// engine, so their ids are dropped (never destroyed in the new engine) and
+// the city is uploaded again. The page then re-sends both palettes.
+void strata_kit_engine_ready(strata_kit::Host&) {
+    if (strata_abi_minor() < 10)
         std::fprintf(stderr, "fleetcity: Strata ABI 1.%u is older than 1.10\n", strata_abi_minor());
-        return STRATA_ERROR_UNSUPPORTED;
+    c.bodyTexture = c.roofTexture = 0;
+    c.meshIds.clear();
+    c.meshTags.clear();
+    if (c.citySet) rebuildMeshes();
+}
+
+void strata_kit_build(strata_kit::Host& h, double seconds) {
+    // A city far below the camera must not fall past the far plane. The
+    // camera of this frame is already set, so this takes effect from the
+    // next frame; the factor of 4 leaves room for a frame's zoom.
+    h.opts.farPlane = std::max(600.0f, h.dist * 4.0f);
+
+    // Buildings being tended right now: a beacon over the roof, pulsing.
+    int beacons = 0;
+    for (size_t i = 0; i + kBeaconStride <= c.beacons.size(); i += kBeaconStride) {
+        const float* b = &c.beacons[i];
+        const float pulse = h.reducedMotion ? 1.0f : 0.75f + 0.25f * static_cast<float>(std::sin(seconds * 3.0 + i));
+        const strata_kit::Rgb col{b[3], b[4], b[5]};
+        h.point(b[0], b[1] + 0.9f, b[2], 14.0f * pulse, 1.4f, col, b[6]);
+        for (int k = 0; k < 6; ++k)  // a column of light down to the roof
+            h.point(b[0], b[1] + 0.15f * k, b[2], 5.0f, 0.35f, col, std::clamp(b[6], 0.0f, 1.0f) * 0.6f);
+        if (beacons++ < 8) h.light(b[0], b[1] + 1.0f, b[2], 7.0f, col, (1.0f + 2.0f * h.night) * pulse, 2);
     }
-    c.width = width;
-    c.height = height;
-    c.quality = quality;
-    c.reducedMotion = reducedMotion != 0;
-    std::printf("fleetcity: Strata %s on %s\n", strata_version_string(), strata_gpu_description(c.engine));
-    return 0;
+    // Soft glows over lit roofs, so a night's runs read at a distance where
+    // a roof is a pixel.
+    for (size_t i = 0; i + kBeaconStride <= c.glows.size(); i += kBeaconStride) {
+        const float* g = &c.glows[i];
+        const float level = std::clamp(g[6], 0.0f, 1.0f);
+        h.point(g[0], g[1] + 0.25f, g[2], 4.0f + 8.0f * level, 1.4f, {g[3], g[4], g[5]}, 0.25f + 0.6f * level);
+    }
+    // Street lamps at the district corners: the posts always, the lamps lit
+    // after dusk (below the beacons when the light budget runs out).
+    for (size_t i = 0; i + kDistrictStride <= c.districts.size(); i += kDistrictStride) {
+        const float* d = &c.districts[i];
+        const float reach = std::max(d[2] - d[0], d[3] - d[1]) * 0.6f;
+        eachLamp(d, [&](float x, float z) {
+            h.add(STRATA_PRIMITIVE_CYLINDER, x, kLampHeight * 0.5f, z, 0.06f, kLampHeight * 0.5f, 0.06f,
+                  {0.06f, 0.06f, 0.07f});
+            if (h.night > 0.02f) {
+                h.light(x, kLampHeight, z, reach, {1.0f, 0.78f, 0.5f}, 0.9f * h.night, 1);
+                h.point(x, kLampHeight, z, 4.0f, 0.5f, {1.0f, 0.8f, 0.5f}, h.night);
+            }
+        });
+    }
+    if (const Building* b = findBuilding(c.hovered)) outline(*b, 0.85f, 0.9f, 1.0f, 0.55f);
+    if (const Building* b = findBuilding(c.selected)) outline(*b, 1.0f, 1.0f, 1.0f, 0.95f);
 }
 
-// 0: no shadows (software rendering, weak phones), 1: one small cascade,
-// 2: the full three. The page steps down when frames run slow.
-EMSCRIPTEN_KEEPALIVE void fc_set_quality(int quality) { c.quality = std::clamp(quality, 0, 2); }
-
-EMSCRIPTEN_KEEPALIVE void fc_resize(int width, int height) {
-    if (!c.engine || width <= 0 || height <= 0) return;
-    c.width = width;
-    c.height = height;
-    strata_resize(c.engine, width, height);
-}
+// The page's setters. The camera, the sun, the size and the quality are the
+// kit's (sk_*).
 
 // Replaces the whole city: buildings (kBuildingStride floats each), districts
 // (kDistrictStride each), the palette size and the bounds. Both palettes are
-// reset to grey; fc_set_palette fills them.
-EMSCRIPTEN_KEEPALIVE int fc_set_city(const float* rows, int count, const float* districts, int districtCount,
-                                     int texW, int texH, float x0, float z0, float x1, float z1) {
+// reset to grey; fc_set_palette fills them. Returns the buildings kept.
+STRATA_KIT_EXPORT int fc_set_city(const float* rows, int count, const float* districts, int districtCount, int texW,
+                                  int texH, float x0, float z0, float x1, float z1) {
     if (texW < 1 || texH < 1 || texW > STRATA_MAX_TEXTURE_SIZE || texH > STRATA_MAX_TEXTURE_SIZE) return -1;
     c.texW = texW;
     c.texH = texH;
@@ -362,7 +376,7 @@ EMSCRIPTEN_KEEPALIVE int fc_set_city(const float* rows, int count, const float* 
     c.bounds[1] = z0;
     c.bounds[2] = x1;
     c.bounds[3] = z1;
-    c.districts.assign(districts, districts + static_cast<size_t>(districtCount) * kDistrictStride);
+    c.districts.assign(districts, districts + static_cast<size_t>(std::max(districtCount, 0)) * kDistrictStride);
     c.buildings.clear();
     gDistrictOf.clear();
     for (int i = 0; i < count; ++i) {
@@ -372,64 +386,45 @@ EMSCRIPTEN_KEEPALIVE int fc_set_city(const float* rows, int count, const float* 
         c.buildings.push_back({id, r[2], r[3], r[4], r[5], r[6]});
         gDistrictOf.push_back(static_cast<int>(r[1]));
     }
+    c.citySet = true;
     rebuildMeshes();
     return static_cast<int>(c.buildings.size());
 }
 
 // which 0: building bodies, 1: roofs. rgba is texW * texH * 4 bytes.
-EMSCRIPTEN_KEEPALIVE void fc_set_palette(int which, const uint8_t* rgba) {
+STRATA_KIT_EXPORT void fc_set_palette(int which, const uint8_t* rgba) {
     const uint32_t tex = which == 0 ? c.bodyTexture : c.roofTexture;
-    if (!c.engine || !tex) return;
-    strata_update_texture_rgba8(c.engine, tex, 0, 0, c.texW, c.texH, rgba);
+    if (!engine() || !tex) return;
+    strata_update_texture_rgba8(engine(), tex, 0, 0, c.texW, c.texH, rgba);
 }
 
-EMSCRIPTEN_KEEPALIVE void fc_set_beacons(const float* rows, int count) {
-    c.beacons.assign(rows, rows + static_cast<size_t>(count) * kBeaconStride);
+// Buildings being tended right now (kBeaconStride floats each: x, y, z of
+// the roof, r, g, b, strength).
+STRATA_KIT_EXPORT void fc_set_beacons(const float* rows, int count) {
+    c.beacons.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kBeaconStride);
 }
 
 // Soft glows over lit roofs (kBeaconStride floats each: x, y, z, r, g, b,
-// level), so a night's runs read at a distance where a roof is a pixel.
-EMSCRIPTEN_KEEPALIVE void fc_set_glows(const float* rows, int count) {
-    c.glows.assign(rows, rows + static_cast<size_t>(count) * kBeaconStride);
+// level).
+STRATA_KIT_EXPORT void fc_set_glows(const float* rows, int count) {
+    c.glows.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kBeaconStride);
 }
 
-EMSCRIPTEN_KEEPALIVE void fc_set_selected(int selected, int hovered) {
+STRATA_KIT_EXPORT void fc_set_selected(int selected, int hovered) {
     c.selected = selected;
     c.hovered = hovered;
 }
 
-EMSCRIPTEN_KEEPALIVE void fc_set_camera(float yaw, float pitch, float dist, float tx, float ty, float tz) {
-    c.yaw = yaw;
-    c.pitch = pitch;
-    c.dist = dist;
-    c.target[0] = tx;
-    c.target[1] = ty;
-    c.target[2] = tz;
-}
-
-// The sun as it really stands over (lat, lon) at unix_seconds. Returns its
-// elevation in degrees.
-EMSCRIPTEN_KEEPALIVE float fc_set_sun(double unixSeconds, double lat, double lon) {
-    StrataSolarPosition sun{};
-    if (strata_solar_position(unixSeconds, lat, lon, &sun) != STRATA_OK) return 0.0f;
-    std::copy(sun.to_sun, sun.to_sun + 3, c.toSun);
-    c.night = std::clamp((2.0f - sun.elevation_degrees) / 10.0f, 0.0f, 1.0f);
-    if (c.engine) strata_set_sun_direction(c.engine, c.toSun);
-    return sun.elevation_degrees;
-}
-
-// The view-projection matrix of the last frame (column-major), for the page
-// to place labels with.
-EMSCRIPTEN_KEEPALIVE const float* fc_view_proj() { return c.viewProj; }
-
 // The building under a point on the canvas, in CSS pixels from its top-left
 // (cssW x cssH is the canvas's CSS size), or -1. Picking is done in CSS
-// pixels against the last frame's camera, so it does not depend on the
-// device pixel ratio the canvas is drawn at.
-EMSCRIPTEN_KEEPALIVE int fc_pick(float cssX, float cssY, float cssW, float cssH) {
-    if (!c.engine || cssW <= 0 || cssH <= 0) return -1;
+// pixels against the last frame's camera (the kit's view-projection matrix
+// and eye), so it does not depend on the device pixel ratio the canvas is
+// drawn at.
+STRATA_KIT_EXPORT int fc_pick(float cssX, float cssY, float cssW, float cssH) {
+    const strata_kit::Host& h = host();
+    if (!h.engine || cssW <= 0 || cssH <= 0) return -1;
     float inv[16];
-    if (!invert4(c.viewProj, inv)) return -1;
+    if (!invert4(h.viewProj, inv)) return -1;
     const float nx = 2.0f * cssX / cssW - 1.0f, ny = 1.0f - 2.0f * cssY / cssH;
     // A point at mid depth is on the ray under either depth convention.
     const float clip[4] = {nx, ny, 0.5f, 1.0f};
@@ -437,126 +432,10 @@ EMSCRIPTEN_KEEPALIVE int fc_pick(float cssX, float cssY, float cssW, float cssH)
     for (int r = 0; r < 4; ++r)
         for (int k = 0; k < 4; ++k) w[r] += inv[k * 4 + r] * clip[k];
     if (std::fabs(w[3]) < 1e-9f) return -1;
-    const float dir[3] = {w[0] / w[3] - c.eye[0], w[1] / w[3] - c.eye[1], w[2] / w[3] - c.eye[2]};
+    const float dir[3] = {w[0] / w[3] - h.eye[0], w[1] / w[3] - h.eye[1], w[2] / w[3] - h.eye[2]};
     StrataRayHit hit{};
-    if (strata_raycast_meshes(c.engine, c.eye, dir, 1.0e6f, &hit) != STRATA_OK || hit.mesh_id == 0) return -1;
+    if (strata_raycast_meshes(h.engine, h.eye, dir, 1.0e6f, &hit) != STRATA_OK || hit.mesh_id == 0) return -1;
     for (size_t i = 0; i < c.meshIds.size(); ++i)
         if (c.meshIds[i] == hit.mesh_id) return tagOf(c.meshTags[i], static_cast<uint32_t>(hit.triangle));
     return -1;
 }
-
-EMSCRIPTEN_KEEPALIVE int fc_frame(double seconds) {
-    if (!c.engine || c.width <= 0 || c.height <= 0) return 0;
-
-    const float cp = std::cos(c.pitch);
-    c.eye[0] = c.target[0] + c.dist * cp * std::cos(c.yaw);
-    c.eye[1] = c.target[1] + c.dist * std::sin(c.pitch);
-    c.eye[2] = c.target[2] + c.dist * cp * std::sin(c.yaw);
-    const float up[3] = {0.0f, 1.0f, 0.0f};
-    StrataCamera camera{};
-    strata_camera_look_at(c.eye, c.target, up, 45.0f, static_cast<float>(c.width) / c.height, 0.5f,
-                          std::max(600.0f, c.dist * 4.0f), &camera);
-    strata_set_camera(c.engine, &camera);
-    mul4(camera.projection, camera.view, c.viewProj);
-
-    StrataLighting lighting{};
-    strata_lighting_defaults(STRATA_LIGHTING_SUN, &lighting);
-    lighting.cascade_count = c.quality == 2 ? 3 : c.quality;
-    lighting.shadow_map_size = c.quality == 2 ? 2048 : 1024;
-    lighting.shadow_distance = std::max(60.0f, c.dist * 2.0f);
-    lighting.fog = 1;
-    strata_set_lighting(c.engine, &lighting);
-
-    c.points.clear();
-    c.lines.clear();
-    std::vector<StrataPointLight> lights;
-    // Buildings being tended right now: a beacon over the roof, pulsing.
-    for (size_t i = 0; i + kBeaconStride <= c.beacons.size(); i += kBeaconStride) {
-        const float* b = &c.beacons[i];
-        const float pulse = c.reducedMotion ? 1.0f : 0.75f + 0.25f * static_cast<float>(std::sin(seconds * 3.0 + i));
-        StrataPoint p{};
-        p.position[0] = b[0];
-        p.position[1] = b[1] + 0.9f;
-        p.position[2] = b[2];
-        p.size_pixels = 14.0f * pulse;
-        p.world_diameter = 1.4f;
-        p.color[0] = b[3];
-        p.color[1] = b[4];
-        p.color[2] = b[5];
-        p.color[3] = std::clamp(b[6], 0.0f, 1.0f);
-        p.flags = STRATA_POINT_SOFT;
-        c.points.push_back(p);
-        for (int k = 0; k < 6; ++k) {  // a column of light down to the roof
-            StrataPoint q = p;
-            q.position[1] = b[1] + 0.15f * k;
-            q.size_pixels = 5.0f;
-            q.world_diameter = 0.35f;
-            q.color[3] *= 0.6f;
-            c.points.push_back(q);
-        }
-        if (lights.size() < 8)
-            lights.push_back({{b[0], b[1] + 1.0f, b[2]}, 7.0f, {b[3], b[4], b[5]}, (1.0f + 2.0f * c.night) * pulse, 0u});
-    }
-    for (size_t i = 0; i + kBeaconStride <= c.glows.size(); i += kBeaconStride) {
-        const float* g = &c.glows[i];
-        const float level = std::clamp(g[6], 0.0f, 1.0f);
-        StrataPoint p{};
-        p.position[0] = g[0];
-        p.position[1] = g[1] + 0.25f;
-        p.position[2] = g[2];
-        p.size_pixels = 4.0f + 8.0f * level;
-        p.world_diameter = 1.4f;
-        p.color[0] = g[3];
-        p.color[1] = g[4];
-        p.color[2] = g[5];
-        p.color[3] = 0.25f + 0.6f * level;
-        p.flags = STRATA_POINT_SOFT;
-        c.points.push_back(p);
-    }
-    // Street lamps at the district corners, lit after dusk.
-    if (c.night > 0.02f) {
-        for (size_t i = 0; i + kDistrictStride <= c.districts.size() && lights.size() + 4 <= STRATA_MAX_POINT_LIGHTS;
-             i += kDistrictStride) {
-            const float* d = &c.districts[i];
-            const float xs[2] = {d[0] - 0.6f, d[2] + 0.6f}, zs[2] = {d[1] - 0.6f, d[3] + 0.6f};
-            const float reach = std::max(d[2] - d[0], d[3] - d[1]) * 0.6f;
-            for (float x : xs)
-                for (float z : zs) {
-                    lights.push_back({{x, 3.0f, z}, reach, {1.0f, 0.78f, 0.5f}, 0.9f * c.night, 0u});
-                    StrataPoint p{};
-                    p.position[0] = x;
-                    p.position[1] = 3.0f;
-                    p.position[2] = z;
-                    p.size_pixels = 4.0f;
-                    p.world_diameter = 0.5f;
-                    p.color[0] = 1.0f;
-                    p.color[1] = 0.8f;
-                    p.color[2] = 0.5f;
-                    p.color[3] = c.night;
-                    p.flags = STRATA_POINT_SOFT;
-                    c.points.push_back(p);
-                }
-        }
-    }
-    strata_set_point_lights(c.engine, lights.data(), static_cast<int32_t>(lights.size()));
-    if (const Building* b = findBuilding(c.hovered)) outline(*b, 0.85f, 0.9f, 1.0f, 0.55f);
-    if (const Building* b = findBuilding(c.selected)) outline(*b, 1.0f, 1.0f, 1.0f, 0.95f);
-
-    StrataFrameDesc desc{};
-    desc.clear_flags = STRATA_CLEAR_COLOR | STRATA_CLEAR_DEPTH | STRATA_CLEAR_SKY;
-    desc.clear_color[3] = 1.0f;
-    if (strata_begin_frame(c.engine, &desc) != STRATA_OK) {
-        std::fprintf(stderr, "strata_begin_frame: %s\n", strata_last_error());
-        return 0;
-    }
-    if (!c.lines.empty()) strata_submit_lines(c.engine, c.lines.data(), static_cast<int32_t>(c.lines.size()));
-    if (!c.points.empty()) strata_submit_points(c.engine, c.points.data(), static_cast<int32_t>(c.points.size()));
-    if (strata_end_frame(c.engine) != STRATA_OK) {
-        std::fprintf(stderr, "strata_end_frame: %s\n", strata_last_error());
-        return 0;
-    }
-    strata_present(c.engine);
-    return static_cast<int>(c.buildings.size());
-}
-
-}  // extern "C"

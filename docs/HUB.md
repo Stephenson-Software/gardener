@@ -169,7 +169,7 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
 | `GET /3d`, `/3d/garden3d.js`, `/3d/garden3d.wasm`, `/3d/strata-kit.js`, `/3d/strata-loader.js` | operator | The 3D garden (see the dashboard docs' "The 3D garden"), over the same `/api/status` |
-| `GET /city`, `/city/city.js`, `/city/city.wasm` | operator | Fleet City (see below). A signed-out browser is sent to `/login` |
+| `GET /city`, `/city/city.js`, `/city/city.wasm`, `/city/strata-kit.js`, `/city/strata-loader.js` | operator | Fleet City (see below). A signed-out browser is sent to `/login` |
 | `GET /api/city?nights=` | operator | Fleet City's data: the laid-out city, each repository's numbers and the run events of the last `nights` nights (default 14, at most 60). Never served to a device token |
 
 ## Watching the devices
@@ -229,9 +229,19 @@ into the committed `gardener/web/city.{js,wasm}`; CI's `fleetcity` job
 rebuilds them and fails on any difference. Each district is one mesh for
 the bodies and one unlit mesh for the roofs, a per-triangle tag table maps
 a ray-cast hit back to its repository, and colours are two palette
-textures, so a timelapse frame rewrites one texture and no geometry. The
-page steps quality down when frames are slow, pixel density first and
-then shadows, and `?quality=0|1|2` and `?fps=1` work as on `/3d`.
+textures, so a timelapse frame rewrites one texture and no geometry.
+
+The shell around the city is the Strata web kit, the same vendored copy in
+`strata-kit/` that `/3d` builds on (see the dashboard docs' "The 3D
+garden"), so the two pages load, size, step quality, orbit and place labels
+the same way: the loading screen shows real download progress and a
+browser without WebGL 2 gets a message and a link to the 2D dashboard;
+quality steps down when frames are slow, pixel density first and then
+shadows; `?quality=0|1|2`, `?fps=1` and `?drive=1` work as on `/3d`; and a
+lost WebGL context is rebuilt in place (the city and its palettes are
+uploaded again). Only a context lost twice in a minute, or not back in 5 s,
+ends in a notice with a reload link. The page keeps its own timeline,
+beacons, cards, search and legend.
 
 **The nightly still.** `gardener hub city-still` draws the same layout
 with Strata's Python binding on Mesa's software renderer (EGL, no

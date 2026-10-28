@@ -456,9 +456,11 @@ tiers, the camera, the sun and the frame), `strata-loader.js` (the loading
 screen with real download progress, and the fallback) and `strata-kit.js`
 (sizing, quality stepping, orbit/pinch/keyboard input, projection and
 picking in CSS pixels, context loss, label placement). Until a Strata
-release carries the kit it is vendored in `garden3d/strata-kit/` at the
-Strata commit in `PIN` (`update.sh <sha>` re-vendors it; `build.sh`
-refuses files that don't match `SHA256SUMS`). `garden3d/build.sh` builds
+release carries the kit it is vendored in `strata-kit/` at the
+repository's root, at the Strata commit in `PIN` (`update.sh <sha>`
+re-vendors it; both build scripts refuse files that don't match
+`SHA256SUMS`). The hub's Fleet City builds on the same copy, so `/3d` and
+`/city` serve the same two kit scripts. `garden3d/build.sh` builds
 with emsdk 6.0.11 against Strata's v0.6.0 WebAssembly release (checked by
 SHA-256) into `gardener/web/garden3d.js` and `.wasm`, and copies the two kit
 scripts beside them; all four are committed so installing gardener needs no
@@ -470,7 +472,7 @@ drawing is verified by rendering it, not by assertion;
 kit call only exported functions. The kit's own browser test (Strata's
 `web/kit/testing/smoke.cjs`: taps select what a direct pick selects at
 device pixel ratios 1, 2 and 3, and the page survives a lost context) runs
-against `/3d` too.
+against `/3d` and the hub's `/city` too.
 
 ## The live view
 

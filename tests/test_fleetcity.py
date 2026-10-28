@@ -3,7 +3,7 @@
 
 The page's JavaScript and the renderer (`fleetcity/main.cpp`) have no test
 runner here (stdlib-only Python), so they are verified by rendering, as
-/3d is. What is asserted here: the serving side (four URLs, the operator
+/3d is. What is asserted here: the serving side (six URLs, the operator
 check: a signed-out browser is sent to /login, the data is a 401), the
 snapshot parser, the layout and data join, and the headless still when
 Strata's binding is available. Every name is synthetic (tests/city_fixture.py).
@@ -44,27 +44,53 @@ class TestAssets(unittest.TestCase):
         content_type, body = fleetcity.asset("/city/city.wasm")
         self.assertEqual(content_type, "application/wasm")
         self.assertEqual(body[:4], b"\0asm")
+        for kit_script in ("/city/strata-kit.js", "/city/strata-loader.js"):
+            content_type, body = fleetcity.asset(kit_script)
+            self.assertEqual(content_type, "text/javascript; charset=utf-8")
+            self.assertIn(b"MIT licensed, as Strata", body)
+
+    def test_the_kit_scripts_are_the_same_files_as_the_3d_gardens(self):
+        # One vendored kit: /city and /3d serve the very same two files.
+        from gardener import garden3d
+        for name in ("strata-kit.js", "strata-loader.js"):
+            self.assertEqual(fleetcity.ASSETS[f"/city/{name}"], garden3d.ASSETS[f"/3d/{name}"])
 
     def test_nothing_outside_the_table_is_served(self):
-        for path in ("/city/city.html", "/city/../hub.py", "/city/x", "/city.wasm", "/city/garden3d.js"):
+        for path in ("/city/city.html", "/city/../hub.py", "/city/x", "/city.wasm", "/city/garden3d.js",
+                     "/city/strata_kit.h", "/city/build-kit.sh"):
             self.assertIsNone(fleetcity.asset(path), path)
             self.assertFalse(fleetcity.is_asset_path(path), path)
 
     def test_the_page_calls_only_exported_functions(self):
-        page = (fleetcity.WEB_DIR / "city.html").read_text(encoding="utf-8")
+        # build.sh names the city's own exports; the vendored kit's
+        # build-kit.sh adds its sk_* shell and malloc/free. A function the
+        # page (or the kit's page shell) calls but the build doesn't export
+        # is undefined in the browser, and nothing but a render would notice.
         build = (REPO / "fleetcity" / "build.sh").read_text(encoding="utf-8")
-        exported = set(re.search(r"-sEXPORTED_FUNCTIONS=(\S+)", build).group(1).split(","))
-        called = set(re.findall(r"mod\.(_\w+)\(", page))
+        kit_build = (REPO / "strata-kit" / "build-kit.sh").read_text(encoding="utf-8")
+        exported = (set(re.search(r"KIT_EXPORTS=(\S+)", build).group(1).split(","))
+                    | set(re.search(r'^exports="([^"]+)"', kit_build, re.M).group(1).split(",")))
+        page = (fleetcity.WEB_DIR / "city.html").read_text(encoding="utf-8")
+        kit = (fleetcity.WEB_DIR / "strata-kit.js").read_text(encoding="utf-8")
+        called = set(re.findall(r"mod\.(_\w+)\(", page)) | set(re.findall(r"mod\.(_\w+)\(", kit))
         self.assertTrue(called)
+        self.assertIn("_fc_pick", called)
+        self.assertIn("_sk_frame", called)
         self.assertEqual(called - exported, set())
         glue = (fleetcity.WEB_DIR / "city.js").read_text(encoding="utf-8")
         for name in called:
             self.assertIn(name, glue, f"the committed build predates {name}; rerun fleetcity/build.sh")
+        # The kit's build exports HEAPF32, not HEAPU8: the page must not use it.
+        self.assertNotIn("mod.HEAPU8", page)
 
     def test_the_page_loads_its_assets_from_the_served_urls(self):
         page = (fleetcity.WEB_DIR / "city.html").read_text(encoding="utf-8")
-        self.assertIn('src="/city/city.js"', page)
-        self.assertIn('"/city/" + p', page)
+        for url in ("/city/strata-loader.js", "/city/strata-kit.js"):
+            self.assertIn(f'src="{url}"', page)
+            self.assertIn(url, fleetcity.ASSETS)
+        self.assertIn('script: "/city/city.js"', page)
+        self.assertIn('wasm: "/city/city.wasm"', page)
+        self.assertIn('base: "/city/"', page)  # locateFile, for anything else the glue asks for
         self.assertIn('fetch("/api/city"', page)
 
     def test_the_still_pins_the_same_strata_release_as_the_fetch_script(self):
@@ -210,7 +236,8 @@ class TestHubServesTheCity(unittest.TestCase):
         self.addCleanup(self.hub.close)
 
     def test_page_engine_and_data_require_an_operator(self):
-        for path in ("/city", "/city/", "/city/city.js", "/city/city.wasm", "/api/city"):
+        for path in ("/city", "/city/", "/city/city.js", "/city/city.wasm", "/city/strata-kit.js",
+                     "/city/strata-loader.js", "/api/city"):
             self.assertEqual(self.hub.request("GET", path)[0], 401, path)
 
     def test_a_device_token_cannot_read_the_city(self):
@@ -224,6 +251,9 @@ class TestHubServesTheCity(unittest.TestCase):
         self.assertIn(b"city-canvas", body)
         status, headers, _ = self.hub.request("GET", "/city/city.wasm", _basic(OPERATOR))
         self.assertEqual((status, headers["Content-Type"]), (200, "application/wasm"))
+        for script in ("/city/strata-kit.js", "/city/strata-loader.js"):
+            status, headers, _ = self.hub.request("GET", script, _basic(OPERATOR))
+            self.assertEqual((status, headers["Content-Type"]), (200, "text/javascript; charset=utf-8"), script)
         city_fixture.write_hub(self.hub.data_dir, 25)
         status, headers, body = self.hub.request("GET", "/api/city", _basic(OPERATOR))
         self.assertEqual(status, 200)
@@ -258,6 +288,7 @@ class TestUserAuthGate(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertNotIn("Location", headers)
         self.assertEqual(self.hub.request("GET", "/city/city.wasm")[0], 401)
+        self.assertEqual(self.hub.request("GET", "/city/strata-kit.js")[0], 401)
 
     def test_an_account_off_the_allowlist_is_refused(self):
         session = {"Cookie": f"{hub.SESSION_COOKIE}=jwt-stranger"}

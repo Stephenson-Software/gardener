@@ -57,7 +57,7 @@ class TestAssets(unittest.TestCase):
         # build.sh names the garden's own exports; the vendored kit's
         # build-kit.sh adds its sk_* shell and malloc/free.
         build = (REPO / "garden3d" / "build.sh").read_text(encoding="utf-8")
-        kit_build = (REPO / "garden3d" / "strata-kit" / "build-kit.sh").read_text(encoding="utf-8")
+        kit_build = (REPO / "strata-kit" / "build-kit.sh").read_text(encoding="utf-8")
         own = re.search(r"KIT_EXPORTS=(\S+)", build).group(1).split(",")
         shell = re.search(r'^exports="([^"]+)"', kit_build, re.M).group(1).split(",")
         return set(own) | set(shell)
@@ -87,16 +87,16 @@ class TestAssets(unittest.TestCase):
         self.assertIn('base: "/3d/"', page)  # locateFile, for anything else the glue asks for
 
     def test_the_served_kit_scripts_are_the_vendored_kit(self):
-        # build.sh copies them from garden3d/strata-kit/; a hand edit to the
-        # served copy would be lost on the next build, so they must match.
-        vendored = REPO / "garden3d" / "strata-kit"
+        # build.sh copies them from strata-kit/; a hand edit to the served
+        # copy would be lost on the next build, so they must match.
+        vendored = REPO / "strata-kit"
         for name in ("strata-kit.js", "strata-loader.js"):
             self.assertEqual((garden3d.WEB_DIR / name).read_bytes(), (vendored / name).read_bytes(), name)
 
     def test_the_vendored_kit_matches_its_checksums(self):
         # build.sh refuses to build when it doesn't; this says so without emsdk.
         import hashlib
-        vendored = REPO / "garden3d" / "strata-kit"
+        vendored = REPO / "strata-kit"
         pin = (vendored / "PIN").read_text(encoding="utf-8").strip()
         self.assertRegex(pin, r"^[0-9a-f]{40}$")
         lines = (vendored / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -105,6 +105,20 @@ class TestAssets(unittest.TestCase):
             digest, name = line.split(None, 1)
             data = (vendored / name.strip().lstrip("*")).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), digest, name)
+
+    def test_there_is_one_vendored_kit_and_both_scenes_build_on_it(self):
+        # The 3D garden and Fleet City share strata-kit/ at the root: a
+        # second copy could drift from the PIN the first one is checked
+        # against, and the two builds would then write different bytes to
+        # the same gardener/web/strata-kit.js.
+        copies = sorted(str(p.parent.relative_to(REPO)) for p in REPO.rglob("strata_kit.h")
+                        if ".build" not in p.parts)
+        self.assertEqual(copies, ["strata-kit"])
+        for scene in ("garden3d", "fleetcity"):
+            build = (REPO / scene / "build.sh").read_text(encoding="utf-8")
+            self.assertIn('kit="$repo/strata-kit"', build, scene)
+            self.assertIn('"$kit/build-kit.sh"', build, scene)
+            self.assertIn("sha256sum -c --quiet SHA256SUMS", build, scene)
 
     def test_the_web_files_ship_in_the_package(self):
         pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
