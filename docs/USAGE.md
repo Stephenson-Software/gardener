@@ -233,6 +233,7 @@ commands are:
 | `gardener hub status` | Shows this device's hub URL, device name, and how many runs are queued, then whether the hub holds exactly the runs pushed from here (exits 1 on a mismatch). One request; with the hub unreachable it says so and still answers the local part. |
 | `gardener hub devices [--json] [--data-dir D]` | On the hub: each device's run count, newest run, and latest session, flagged `QUIET` (nothing in 36 h) or `ALL-ERRORS`. See `docs/HUB.md`'s "Watching the devices". |
 | `gardener hub digest [--hours N] [--data-dir D]` | On the hub: a plain-text summary of the last N hours (default 24) across devices. |
+| `gardener hub city-still --out F.png [--hours N] [--width W] [--height H] [--strata-lib L] [--strata-python P] [--data-dir D]` | On the hub: Fleet City drawn headless to a PNG (private: it shows every repo the hub knows). Needs Strata's pinned library and Python binding; see the hub docs' "Fleet City". |
 | `gardener status --all-devices` | Reads the hub's combined history instead of this device's, with a device column. |
 
 A device is configured by `GARDENER_HUB_URL` and `GARDENER_HUB_TOKEN`, from

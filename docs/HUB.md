@@ -152,6 +152,7 @@ session, so upgrading devices before the hub is harmless. The design is RFC
 | Currently tending, in flight | From each device's latest heartbeat (see "Live heartbeats"). Each repo is tagged with its device. A **stale** device's repos (no beat for 3 of its intervals) are shown greyed and aren't counted in "in flight", because it may have stopped. |
 | Overnight budget and batch | One block per device under Latest session: **live** shows the device's budget and batch bars and "updated Ns ago"; **stale** shows the same greyed, with "last heard N min ago, may have stopped"; **idle** (ended, or unheard for 50 min) is one line. Age is measured on the hub's clock. |
 | 3D garden (`/3d`) | The same combined garden as the garden view, with one gardener per device that has sent a heartbeat: named by its token, tending the repo its session is on or resting by the shed, grey-labelled when stale. |
+| Fleet City (`/city`) | Every repository the hub knows of as a building in a 3D city, one district per owner; see [Fleet City](#fleet-city). Operator only, like every page here. |
 | Garden cycle bar, live log, `/live` | Not available: they read a device's cursor file, log text and transcripts, which never leave it. The page doesn't render them. Open the dashboard on the dispatching device for those. |
 
 ## API
@@ -168,6 +169,8 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
 | `GET /3d`, `/3d/garden3d.js`, `/3d/garden3d.wasm` | operator | The 3D garden (see the dashboard docs' "The 3D garden"), over the same `/api/status` |
+| `GET /city`, `/city/city.js`, `/city/city.wasm` | operator | Fleet City (see below). A signed-out browser is sent to `/login` |
+| `GET /api/city?nights=` | operator | Fleet City's data: the laid-out city, each repository's numbers and the run events of the last `nights` nights (default 14, at most 60). Never served to a device token |
 
 ## Watching the devices
 
@@ -180,9 +183,68 @@ runs (for the container, `docker exec gardener-hub gardener hub ...`):
 |---|---|
 | `gardener hub devices [--json] [--data-dir D]` | Per device: run count, newest run, and latest session, flagged `QUIET` when no run has arrived in 36 h and `ALL-ERRORS` when every run in the latest session errored. A device that has never pushed isn't listed. |
 | `gardener hub digest [--hours N] [--data-dir D]` | A short plain-text summary of the last N hours (default 24): per device runs, successes, errors, spend, and the repos that errored, plus any quiet device. |
+| `gardener hub city-still --out F.png [--hours N] [--width W --height H] [--data-dir D]` | Fleet City drawn headless to a PNG, every roof lit that a run touched in the last N hours, and one line of counts. Exits 2 when Strata isn't available (see [Fleet City](#fleet-city)). The picture shows the whole fleet, so it goes only where the dashboard itself could. |
 
 Neither sends anything itself. Alerting and posting are the deployment's
 job; the reference deployment calls both from its box-side health monitor.
+
+## Fleet City
+
+![Fleet City on a synthetic fleet: five districts of coloured towers, one selected with its card open](img/fleet-city.png)
+
+<img src="img/fleet-city-phone.png" alt="The same city on a phone, the selected repository's card as a bottom sheet" width="260">
+
+*A synthetic fleet (`tests/city_fixture.py`); no real repository is in any picture here.*
+
+`/city` draws every repository the hub knows of as a building in a city
+(Stephenson-Software RFC 0026): one district per owner, height for
+activity, colour for health, and each run lighting its repository's roof,
+fading over six hours. The timeline at the bottom replays the last two
+weeks of nights; **Live** follows the clock, with a beacon over each
+repository a device is tending right now (its latest heartbeat). Tap or
+click a building for its card. It is the hub's own data, so like the rest
+of the hub it is behind the operator sign-in, and so is `/api/city`.
+
+What the city holds depends on one optional file:
+
+| | Without `city.json` | With `city.json` in the data directory |
+|---|---|---|
+| Buildings | Repositories with a run on the hub, or in a device's garden | Also every repository in the snapshot |
+| Height | gardener runs in the last 90 days (log) | Commits on the default branch in 90 days (log); else days since the last push |
+| Colour | gardener's last success: under 3 days, under 10, older or never | The dashboard's practice-score bands: 80+, 50–79, under 50 |
+| Plot order | First run gardener made on it | Creation date |
+
+`city.json` is the snapshot the Fleet City builder writes (RFC 0026 §1,
+schema 1). Copy it into the hub's data directory (`/data/hub/city.json` in
+the container) and the next poll uses it; a file that doesn't parse is
+ignored with one line on stderr. Only owner, name, visibility, fork,
+creation date, score, 90-day commits and days since a push are read from
+it. It names private repositories, which is why it stays on the hub and
+never in this repository: the tests and the pictures in these docs use a
+synthetic fleet (`tests/city_fixture.py`).
+
+The renderer is `fleetcity/main.cpp`, built by `fleetcity/build.sh`
+(emsdk 6.0.11 and Strata v0.6.0's WebAssembly release, SHA-256 pinned)
+into the committed `gardener/web/city.{js,wasm}`; CI's `fleetcity` job
+rebuilds them and fails on any difference. Each district is one mesh for
+the bodies and one unlit mesh for the roofs, a per-triangle tag table maps
+a ray-cast hit back to its repository, and colours are two palette
+textures, so a timelapse frame rewrites one texture and no geometry. The
+page steps quality down when frames are slow, pixel density first and
+then shadows, and `?quality=0|1|2` and `?fps=1` work as on `/3d`.
+
+**The nightly still.** `gardener hub city-still` draws the same layout
+with Strata's Python binding on Mesa's software renderer (EGL, no
+display), labels the districts only, never a repository, and writes a
+PNG. It needs the Linux library and the binding, both SHA-pinned:
+
+![The nightly still of the same synthetic fleet: districts labelled by owner, last night's roofs lit](img/fleet-city-still.png)
+
+`fleetcity/fetch-strata-python.sh DIR` fetches them, then set
+`GARDENER_STRATA_LIB=DIR/libstrata-0.6.0-linux-x64.so` and
+`GARDENER_STRATA_PYTHON=DIR/python`. The container image does this at
+build time and installs `libegl1` and `libgl1-mesa-dri`. Posting the
+picture is the deployment's job, like the digest's.
 
 ## Orphaned-PR check
 

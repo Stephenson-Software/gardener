@@ -10,6 +10,19 @@ COPY pyproject.toml README.md LICENSE ./
 COPY gardener ./gardener
 RUN pip install --no-cache-dir . && rm -rf /src
 
+# Fleet City's nightly still (`gardener hub city-still`) draws with Strata's
+# released Linux library and its pure-ctypes Python binding, both SHA-256
+# pinned, on Mesa's software renderer through EGL (no display, no GPU).
+# curl is only needed to fetch them and is removed again.
+COPY fleetcity/fetch-strata-python.sh /tmp/fetch-strata-python.sh
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libegl1 libgl1-mesa-dri curl ca-certificates \
+    && /tmp/fetch-strata-python.sh /opt/strata \
+    && apt-get purge -y --auto-remove curl \
+    && rm -rf /var/lib/apt/lists/* /tmp/fetch-strata-python.sh
+ENV GARDENER_STRATA_LIB=/opt/strata/libstrata-0.6.0-linux-x64.so \
+    GARDENER_STRATA_PYTHON=/opt/strata/python
+
 # Non-root, and /data created owned by that user so a fresh named volume
 # mounted there inherits the ownership and the store is writable.
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin gardener \

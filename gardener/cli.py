@@ -149,6 +149,15 @@ def positive_hours(value: str) -> float:
     return hours
 
 
+def city_hours(value: str) -> float:
+    """argparse `type=` for `hub city-still --hours`: 0 < hours <= 1440
+    (60 nights, the most Fleet City reads back)."""
+    hours = positive_hours(value)
+    if hours > 1440:
+        raise argparse.ArgumentTypeError(f"must be at most 1440 (60 days), got {value!r}")
+    return hours
+
+
 def digest_hours(value: str) -> float:
     """argparse `type=` for `hub digest --hours`. `positive_hours` plus a
     window `hub.digest`'s date arithmetic can actually compute: `inf` (fine
@@ -2047,6 +2056,36 @@ def cmd_hub_digest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hub_city_still(args: argparse.Namespace) -> int:
+    """Fleet City (RFC 0026) drawn headless to a PNG, for the gateway's
+    digest timer to attach to the owner's private digest. Exits 0 with the
+    PNG written, 2 when Strata's binding or library is missing or isn't the
+    pinned release, 1 when rendering fails."""
+    from gardener import fleetcity
+
+    data_dir = args.data_dir or state.default_state_dir() / "hub"
+    db_path = data_dir / "gardener.sqlite3"
+    city = fleetcity.build_city(
+        db_path,
+        snapshot=fleetcity.load_snapshot(data_dir),
+        garden_repos=hub.union_device_lists(db_path)["garden"],
+        nights=max(1, int(args.hours // 24) + 1),
+    )
+    try:
+        result = fleetcity.render_still(city, args.out, width=args.width, height=args.height, hours=args.hours,
+                                        lib_path=args.strata_lib, binding_dir=args.strata_python)
+    except fleetcity.StillUnavailable as exc:
+        print(f"gardener hub city-still: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - one line for the timer's log, never a traceback
+        print(f"gardener hub city-still: rendering failed: {exc!r}", file=sys.stderr)
+        return 1
+    lit = result["lit"]
+    print(f"Fleet City: {result['repos']} repos; last {args.hours:g} h: {lit['ok']} tended, "
+          f"{lit['created']} created, {lit['error']} errored")
+    return 0
+
+
 def cmd_hub_token(args: argparse.Namespace) -> int:
     """Mint a device token. The token goes in that device's hub.env; only
     the digest line goes on the hub, so the hub never holds a usable one."""
@@ -2588,6 +2627,21 @@ def build_parser() -> argparse.ArgumentParser:
     hub_digest.add_argument("--hours", type=digest_hours, default=24,
                             help="How far back to summarize (default 24)")
     hub_digest.set_defaults(func=cmd_hub_digest)
+    hub_city = hub_sub.add_parser(
+        "city-still", help="On the hub: draw Fleet City headless to a PNG (private: it shows every repo)",
+    )
+    hub_city.add_argument("--data-dir", type=Path, default=None,
+                          help="The hub's store directory (default: <state dir>/hub)")
+    hub_city.add_argument("--out", type=Path, required=True, help="Where to write the PNG")
+    hub_city.add_argument("--hours", type=city_hours, default=24,
+                          help="Light the roofs of repos run in the last N hours (default 24)")
+    hub_city.add_argument("--width", type=int, default=1280, choices=range(320, 4097), metavar="PX")
+    hub_city.add_argument("--height", type=int, default=720, choices=range(180, 4097), metavar="PX")
+    hub_city.add_argument("--strata-lib", default=None,
+                          help="libstrata-0.6.0-linux-x64.so (default: $GARDENER_STRATA_LIB)")
+    hub_city.add_argument("--strata-python", default=None,
+                          help="Directory holding Strata's Python binding (default: $GARDENER_STRATA_PYTHON)")
+    hub_city.set_defaults(func=cmd_hub_city_still)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
     hub_token.add_argument("--device", required=True,
                            help="The name the hub will show this device's runs under")
