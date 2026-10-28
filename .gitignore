@@ -10,3 +10,4 @@ venv/
 .coverage
 htmlcov/
 .claude/
+garden3d/.build/

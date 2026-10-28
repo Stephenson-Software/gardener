@@ -3,8 +3,9 @@
 The page's JavaScript and the renderer (`garden3d/main.cpp`) have no test
 runner here (stdlib-only Python), so they are verified by rendering, as
 the 2D garden is (docs/DASHBOARD.md). What is asserted here is the serving
-side: exactly three URLs, the right content types, the hub's operator
-check, and that the page only calls functions the build exports.
+side: exactly the page's URLs, the right content types, the hub's operator
+check, that the page and the Strata web kit only call functions the build
+exports, and that the vendored kit is the one its PIN names.
 """
 import http.client
 import json
@@ -32,9 +33,14 @@ class TestAssets(unittest.TestCase):
         content_type, body = garden3d.asset("/3d/garden3d.wasm")
         self.assertEqual(content_type, "application/wasm")
         self.assertEqual(body[:4], b"\0asm")
+        for kit_script in ("/3d/strata-kit.js", "/3d/strata-loader.js"):
+            content_type, body = garden3d.asset(kit_script)
+            self.assertEqual(content_type, "text/javascript; charset=utf-8")
+            self.assertIn(b"MIT licensed, as Strata", body)
 
     def test_nothing_outside_the_table_is_served(self):
-        for path in ("/3d/garden3d.html", "/3d/../hub.py", "/3d/web/garden3d.js", "/3d/x", "/garden3d.wasm"):
+        for path in ("/3d/garden3d.html", "/3d/../hub.py", "/3d/web/garden3d.js", "/3d/x", "/garden3d.wasm",
+                     "/strata-kit.js", "/3d/strata_kit.h", "/3d/build-kit.sh"):
             self.assertIsNone(garden3d.asset(path), path)
             self.assertFalse(garden3d.is_asset_path(path), path)
 
@@ -47,14 +53,25 @@ class TestAssets(unittest.TestCase):
             finally:
                 garden3d.WEB_DIR = original
 
-    def test_the_page_calls_only_exported_functions(self):
-        # A function the page calls but build.sh doesn't export is undefined
-        # in the browser, and nothing but a render would notice.
-        page = (garden3d.WEB_DIR / "garden3d.html").read_text(encoding="utf-8")
+    def _exported(self):
+        # build.sh names the garden's own exports; the vendored kit's
+        # build-kit.sh adds its sk_* shell and malloc/free.
         build = (REPO / "garden3d" / "build.sh").read_text(encoding="utf-8")
-        exported = set(re.search(r"-sEXPORTED_FUNCTIONS=(\S+)", build).group(1).split(","))
-        called = set(re.findall(r"mod\.(_\w+)\(", page))
+        kit_build = (REPO / "garden3d" / "strata-kit" / "build-kit.sh").read_text(encoding="utf-8")
+        own = re.search(r"KIT_EXPORTS=(\S+)", build).group(1).split(",")
+        shell = re.search(r'^exports="([^"]+)"', kit_build, re.M).group(1).split(",")
+        return set(own) | set(shell)
+
+    def test_the_page_calls_only_exported_functions(self):
+        # A function the page (or the kit's page shell) calls but the build
+        # doesn't export is undefined in the browser, and nothing but a
+        # render would notice.
+        exported = self._exported()
+        page = (garden3d.WEB_DIR / "garden3d.html").read_text(encoding="utf-8")
+        kit = (garden3d.WEB_DIR / "strata-kit.js").read_text(encoding="utf-8")
+        called = set(re.findall(r"mod\.(_\w+)\(", page)) | set(re.findall(r"mod\.(_\w+)\(", kit))
         self.assertTrue(called)
+        self.assertIn("_sk_frame", called)
         self.assertEqual(called - exported, set())
         glue = (garden3d.WEB_DIR / "garden3d.js").read_text(encoding="utf-8")
         for name in called:
@@ -62,8 +79,32 @@ class TestAssets(unittest.TestCase):
 
     def test_the_page_loads_its_assets_from_the_served_urls(self):
         page = (garden3d.WEB_DIR / "garden3d.html").read_text(encoding="utf-8")
-        self.assertIn('src="/3d/garden3d.js"', page)
-        self.assertIn('"/3d/" + p', page)  # locateFile, for the .wasm
+        for url in ("/3d/strata-loader.js", "/3d/strata-kit.js"):
+            self.assertIn(f'src="{url}"', page)
+            self.assertIn(url, garden3d.ASSETS)
+        self.assertIn('script: "/3d/garden3d.js"', page)
+        self.assertIn('wasm: "/3d/garden3d.wasm"', page)
+        self.assertIn('base: "/3d/"', page)  # locateFile, for anything else the glue asks for
+
+    def test_the_served_kit_scripts_are_the_vendored_kit(self):
+        # build.sh copies them from garden3d/strata-kit/; a hand edit to the
+        # served copy would be lost on the next build, so they must match.
+        vendored = REPO / "garden3d" / "strata-kit"
+        for name in ("strata-kit.js", "strata-loader.js"):
+            self.assertEqual((garden3d.WEB_DIR / name).read_bytes(), (vendored / name).read_bytes(), name)
+
+    def test_the_vendored_kit_matches_its_checksums(self):
+        # build.sh refuses to build when it doesn't; this says so without emsdk.
+        import hashlib
+        vendored = REPO / "garden3d" / "strata-kit"
+        pin = (vendored / "PIN").read_text(encoding="utf-8").strip()
+        self.assertRegex(pin, r"^[0-9a-f]{40}$")
+        lines = (vendored / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines)
+        for line in lines:
+            digest, name = line.split(None, 1)
+            data = (vendored / name.strip().lstrip("*")).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest, name)
 
     def test_the_web_files_ship_in_the_package(self):
         pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")

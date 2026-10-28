@@ -16,6 +16,9 @@
     --bg: #c9dcc0;
     --dot-thriving: #2e8b2e; --dot-steady: #5f8f2a; --dot-dry: #b59a1c;
     --dot-wilting: #8a5a24; --dot-struggling: #a8321e; --dot-unplanted: #8b8a84;
+    /* The Strata loading shell (strata-loader.js) follows the page. */
+    --sk-loader-bg: var(--bg); --sk-loader-fg: var(--text); --sk-loader-panel: var(--panel);
+    --sk-loader-accent: var(--accent);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -86,8 +89,6 @@
   #tip { position: fixed; pointer-events: none; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--panel);
     border: 1px solid var(--panel-border); transform: translate(12px, -50%); white-space: nowrap; }
   #tip[hidden] { display: none; }
-  #fatal { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; }
-  #fatal[hidden] { display: none; }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   @media (max-width: 640px) {
     /* Phones: the selected plant's card is a bottom sheet, over the ticker. */
@@ -155,14 +156,16 @@
   <table><tbody id="card-body"></tbody></table>
 </section>
 
-<div id="fatal" hidden><div class="panel" style="position:static;max-width:420px">
-  <p id="fatal-msg"></p><p><a href="/">Open the 2D dashboard</a></p></div></div>
-
+<script src="/3d/strata-loader.js"></script>
+<script src="/3d/strata-kit.js"></script>
 <script>
 "use strict";
-/* The 3D garden. This script owns the data, the layout, the input and the
-   HTML around the canvas; garden3d.wasm (garden3d/main.cpp, Strata) only
-   draws. Health buckets match the 2D dashboard's healthOf exactly. */
+/* The 3D garden. This script owns the data, the layout and the HTML around
+   the canvas; garden3d.wasm (garden3d/main.cpp, Strata) only draws. The shell
+   between them (loading, sizing, quality, camera input, projection, context
+   loss) is the Strata web kit: strata-loader.js and strata-kit.js, vendored
+   in garden3d/strata-kit/. Health buckets match the 2D dashboard's healthOf
+   exactly. */
 const POLL_MS = 10000;
 const PLANT_STRIDE = 10, BED_STRIDE = 4, GARDENER_STRIDE = 9;
 const GARDENER_MODE = {resting: 0, walking: 1, tending: 2};
@@ -204,13 +207,10 @@ function seedOf(name) {  // stable 0..1 per repo, so a plant keeps its shape
   for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 16777619);
   return ((h >>> 0) % 10000) / 10000;
 }
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window */ } },
-};
+const store = StrataKit.store;
 
 /* --------------------------------------------------------------- state */
-let mod = null, plantPtr = 0, plantCap = 0, gardenerPtr = 0, gardenerCap = 0;
+let mod = null, kit = null, plantPtr = 0, plantCap = 0, gardenerPtr = 0, gardenerCap = 0;
 let gardeners = [];       // {name, x, z, fx, fz, walked, path, key, mode, device}, one per device
 let site = {gateX: 0, fenceZ: 0, shedX: 0, shedZ: 0};
 let plants = [];          // {row, x, z, top, health}
@@ -219,8 +219,8 @@ let layoutKey = "";
 const lastRunSeen = new Map();
 const pulseAt = new Map();
 let firstPoll = true, selected = null, hovered = null, lastStatus = null;
-const cam = {yaw: 0.9, pitch: 0.62, dist: 34, tx: 0, ty: 0, tz: 0};
-let lastInput = performance.now();
+const cam = {yaw: 0.9, pitch: 0.62, dist: 34, tx: 0, ty: 0, tz: 0};  // the kit moves this same object
+const limits = {minPitch: 0.12, maxPitch: 1.45, minDist: 4, maxDist: 120};
 let sky = store.get("garden3d.sky") || "real";
 $("sky").value = sky;
 
@@ -278,10 +278,9 @@ function layout(rows) {
   const el = $("garden3d-canvas"), aspect = el.clientWidth / Math.max(el.clientHeight, 1);
   cam.dist = Math.min(Math.max(span * 1.15, 16) / Math.min(Math.max(aspect, 0.6), 1), 120);
   cam.tz = 1.5;  // a little toward the shed, so it stays in the first view
-  maxDist = Math.max(cam.dist * 2, 30);
+  limits.maxDist = Math.max(cam.dist * 2, 30);
   renderLabels();
 }
-let maxDist = 120;
 
 function plantTop(row, health) {
   if (health === "unplanted") return 0.6;
@@ -480,20 +479,9 @@ function renderGardenerLabels() {
     gardenerLabelEls.set(g, el);
   }
 }
-function placeGardenerLabels() {
-  for (const [g, el] of gardenerLabelEls) {
-    const s = g.x == null ? null : project(g.x, (g.y || 0) + 1.65 * GARDENER_SCALE, g.z);
-    if (!s) { el.style.display = "none"; continue; }
-    el.style.display = "";
-    el.style.left = s.x + "px";
-    el.style.top = s.y + "px";
-    el.classList.toggle("stale", g.view.state === "stale");
-    const status = gardenerStatus(g);
-    if (el.lastChild.textContent !== status) el.lastChild.textContent = status;
-  }
-}
 function showGardenerCard(g) {
   selected = g;
+  if (kit) kit.selected = g;  // the idle orbit waits while a card is open
   const v = g.view, d = v.device || {};
   $("card").hidden = false;
   $("card-title").textContent = `🧑‍🌾 ${g.name}`;
@@ -524,6 +512,7 @@ function showCard(p) {
   if (p.kind === "gardener") return showGardenerCard(p);
   $("card-sub").hidden = true;
   selected = p;
+  if (kit) kit.selected = p;
   const r = p.row, h = p.health || healthOf(r);
   $("card").hidden = false;
   $("card-title").innerHTML = `<a href="https://github.com/${esc(r.repo)}" target="_blank" rel="noopener">${esc(r.repo)}</a>`;
@@ -538,14 +527,14 @@ function showCard(p) {
   ];
   $("card-body").innerHTML = rowsHtml.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
 }
-function hideCard() { selected = null; $("card").hidden = true; }
+function hideCard() { selected = null; if (kit) kit.selected = null; $("card").hidden = true; }
 $("card-close").addEventListener("click", hideCard);
 
 function focusPlant(p) {
   cam.tx = p.x; cam.tz = p.z; cam.ty = 0.5;
   cam.dist = Math.min(cam.dist, 12);
   showCard(p);
-  lastInput = performance.now();
+  if (kit) kit.touch();
 }
 $("find").addEventListener("change", (e) => {
   const q = e.target.value.trim().toLowerCase();
@@ -562,18 +551,12 @@ $("legend-toggle").addEventListener("click", (e) => {
 });
 
 /* ----------------------------------------------------------- projection */
-function project(x, y, z) {
-  if (!mod) return null;
-  const m = mod.HEAPF32.subarray(mod._g3_view_proj() >> 2, (mod._g3_view_proj() >> 2) + 16);
-  const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
-  const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
-  const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
-  if (cw <= 0.01) return null;
-  const canvas = $("garden3d-canvas");
-  return {x: (cx / cw * 0.5 + 0.5) * canvas.clientWidth, y: (1 - (cy / cw * 0.5 + 0.5)) * canvas.clientHeight, w: cw};
-}
-function pick(sx, sy) {
-  let best = null, bestD = (coarse ? 30 : 18) ** 2;
+// World -> CSS pixels on the canvas (the kit's project), or null.
+function project(x, y, z) { return kit ? kit.project(x, y, z) : null; }
+// The plant or gardener nearest (sx, sy), CSS pixels on the canvas, within
+// radius (the kit's: wider on a coarse pointer).
+function pick(sx, sy, radius) {
+  let best = null, bestD = radius * radius;
   for (const g of gardeners) {  // checked first: a gardener stands in front of its plant
     if (g.x == null) continue;
     for (const y of [0.8, 1.4]) {
@@ -607,101 +590,27 @@ function renderLabels() {
     labelEls.set(b, el);
   }
 }
+// Every label in one pass through the kit's placement, so they never pile
+// up: a gardener's label is never hidden (it steps up until it is clear), a
+// bed's steps up once, then hides while something covers it.
 function placeLabels() {
-  for (const [b, el] of labelEls) {
-    const s = project((b.x0 + b.x1) / 2, 0.5, b.z0 - 0.4);
-    if (!s) { el.style.display = "none"; continue; }
-    el.style.display = "";
-    el.style.left = s.x + "px";
-    el.style.top = s.y + "px";
+  const items = [];
+  for (const [g, el] of gardenerLabelEls) {
+    el.classList.toggle("stale", g.view.state === "stale");
+    const status = gardenerStatus(g);
+    if (el.lastChild.textContent !== status) el.lastChild.textContent = status;
+    items.push({el, rank: 0, q: g.x == null ? null : project(g.x, (g.y || 0) + 1.65 * GARDENER_SCALE, g.z)});
   }
+  for (const [b, el] of labelEls) items.push({el, rank: 1, q: project((b.x0 + b.x1) / 2, 0.5, b.z0 - 0.4)});
+  StrataKit.placeLabels(items);
 }
 
 /* ---------------------------------------------------------------- input */
+// Orbit, pan, pinch, wheel and keys are the kit's; these are what a tap, a
+// hover and Escape mean here.
 const canvas = $("garden3d-canvas");
-const pointers = new Map();
-let dragMoved = 0, pinchStart = null;
-function clampCam() {
-  cam.pitch = Math.min(Math.max(cam.pitch, 0.12), 1.45);
-  cam.dist = Math.min(Math.max(cam.dist, 4), maxDist);
-}
-function pan(dx, dy) {
-  const k = cam.dist / canvas.clientHeight * 1.1;
-  const sx = -Math.sin(cam.yaw), sz = Math.cos(cam.yaw);   // screen-right in world
-  const fx = -Math.cos(cam.yaw), fz = -Math.sin(cam.yaw);  // screen-up (forward) in world
-  cam.tx += (-dx * sx + dy * fx) * k;
-  cam.tz += (-dx * sz + dy * fz) * k;
-}
-canvas.addEventListener("pointerdown", (e) => {
-  canvas.setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, {x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey});
-  dragMoved = 0;
-  if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    pinchStart = {d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2};
-  }
-  canvas.classList.add("dragging");
-  lastInput = performance.now();
-});
-canvas.addEventListener("pointermove", (e) => {
-  const p = pointers.get(e.pointerId);
-  if (!p) {
-    if (e.pointerType === "mouse") hover(e.clientX, e.clientY);
-    return;
-  }
-  const dx = e.clientX - p.x, dy = e.clientY - p.y;
-  dragMoved += Math.abs(dx) + Math.abs(dy);
-  p.x = e.clientX; p.y = e.clientY;
-  if (pointers.size === 2 && pinchStart) {
-    const [a, b] = [...pointers.values()];
-    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    cam.dist = pinchStart.dist * pinchStart.d / Math.max(d, 1);
-    pan(mx - pinchStart.mx, my - pinchStart.my);
-    pinchStart.mx = mx; pinchStart.my = my;
-  } else if (p.button === 2 || p.shift) {
-    pan(dx, dy);
-  } else {
-    cam.yaw += dx * 0.008;
-    cam.pitch += dy * 0.006;
-  }
-  clampCam();
-  lastInput = performance.now();
-});
-function endPointer(e) {
-  const p = pointers.get(e.pointerId);
-  pointers.delete(e.pointerId);
-  if (pointers.size < 2) pinchStart = null;
-  if (!pointers.size) canvas.classList.remove("dragging");
-  if (p && dragMoved < 6 && e.type === "pointerup") {
-    const hit = pick(e.clientX, e.clientY);
-    if (hit) showCard(hit); else hideCard();
-  }
-}
-canvas.addEventListener("pointerup", endPointer);
-canvas.addEventListener("pointercancel", endPointer);
-canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-canvas.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  cam.dist *= Math.exp(e.deltaY * 0.0012);
-  clampCam();
-  lastInput = performance.now();
-}, {passive: false});
-canvas.addEventListener("keydown", (e) => {
-  const k = e.key;
-  if (k === "ArrowLeft") cam.yaw -= 0.08;
-  else if (k === "ArrowRight") cam.yaw += 0.08;
-  else if (k === "ArrowUp") cam.pitch += 0.05;
-  else if (k === "ArrowDown") cam.pitch -= 0.05;
-  else if (k === "+" || k === "=") cam.dist *= 0.9;
-  else if (k === "-" || k === "_") cam.dist *= 1.1;
-  else if (k === "Escape") hideCard();
-  else return;
-  e.preventDefault();
-  clampCam();
-  lastInput = performance.now();
-});
-function hover(x, y) {
-  const hit = pick(x, y);
+function onTap(hit) { if (hit) showCard(hit); else hideCard(); }
+function hover(hit, x, y) {
   hovered = hit;
   const tip = $("tip");
   canvas.classList.toggle("over-plant", !!hit);
@@ -712,7 +621,11 @@ function hover(x, y) {
   tip.innerHTML = hit.kind === "gardener" ? `🧑‍🌾 ${esc(hit.name)} · ${esc(gardenerStatus(hit))}`
     : `<span class="dot h-${hit.health}"></span>${esc(hit.row.repo)}`;
 }
-canvas.addEventListener("pointerleave", () => { $("tip").hidden = true; hovered = null; });
+function onKey(e) {
+  if (e.key !== "Escape") return false;
+  hideCard();
+  return true;
+}
 
 /* ---------------------------------------------------------------- frame */
 // Longitude from the standard-time offset, so the sun rises and sets near
@@ -723,28 +636,19 @@ function viewerLonLat() {
   return {lon: -std / 4, lat: 40};
 }
 const where = viewerLonLat();
-let lastSun = 0, dpr = 1;
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, coarse ? 2 : 2.5);
-  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w; canvas.height = h;
-    if (mod) mod._g3_resize(w, h);
-  }
-}
-function frame(now) {
-  resize();
-  if (!reducedMotion && now - lastInput > 20000 && !selected) cam.yaw += 0.0006;
-  if (now - lastSun > 30000 || lastSun === 0 || sky !== frame.sky) {
-    let t = Date.now() / 1000;
+let lastSun = 0, sunSky = null;
+// One frame's data, at scene time t (seconds) and page time now (ms); the
+// kit then draws it with its camera.
+function frame(t, now, dt) {
+  if (now - lastSun > 30000 || lastSun === 0 || sky !== sunSky) {
+    let when = Date.now() / 1000;
     if (sky === "day") {  // 10:30 local solar time today
       const d = new Date(); d.setUTCHours(0, 0, 0, 0);
-      t = d.getTime() / 1000 + (10.5 - where.lon / 15) * 3600;
+      when = d.getTime() / 1000 + (10.5 - where.lon / 15) * 3600;
     }
-    mod._g3_set_sun(t, where.lat, where.lon);
-    lastSun = now; frame.sky = sky;
+    kit.setSun(when, where.lat, where.lon);
+    lastSun = now; sunSky = sky;
   }
-  mod._g3_set_camera(cam.yaw, cam.pitch, cam.dist, cam.tx, cam.ty, cam.tz);
   const n = plants.length;
   if (n * PLANT_STRIDE > plantCap) {
     if (plantPtr) mod._free(plantPtr);
@@ -754,7 +658,7 @@ function frame(now) {
   const heap = mod.HEAPF32, base = plantPtr >> 2;
   for (let i = 0; i < n; i++) {
     const p = plants[i], r = p.row, o = base + i * PLANT_STRIDE;
-    const pulse = pulseAt.has(r.repo) ? (now - pulseAt.get(r.repo)) / 1000 : -1;
+    const pulse = pulseAt.has(r.repo) ? (performance.now() - pulseAt.get(r.repo)) / 1000 : -1;
     heap[o] = p.x; heap[o + 1] = p.z;
     heap[o + 2] = HEALTH_CODE[p.health || "unplanted"];
     heap[o + 3] = r.successes || 0;
@@ -766,8 +670,7 @@ function frame(now) {
     heap[o + 9] = (p === selected || p === hovered) ? 1 : 0;
   }
   mod._g3_set_plants(plantPtr, n);
-  stepGardeners(Math.min((now - (frame.last || now)) / 1000, 0.25));
-  frame.last = now;
+  stepGardeners(dt);
   const gn = gardeners.length;
   if (gn * GARDENER_STRIDE > gardenerCap) {
     if (gardenerPtr) mod._free(gardenerPtr);
@@ -780,63 +683,55 @@ function frame(now) {
       gbase + i * GARDENER_STRIDE);
   });
   mod._g3_set_gardeners(gardenerPtr, gn);
-  mod._g3_frame(now / 1000);
-  adaptQuality(now);
-  placeLabels();
-  placeGardenerLabels();
-  requestAnimationFrame(frame);
 }
 
-// Start at full quality (or what ?quality=0|1|2 asks for) and step down
-// while the average frame takes longer than 50 ms, so a software renderer or
-// a weak phone stays interactive. It never steps back up within a visit.
-const forcedQuality = new URLSearchParams(location.search).get("quality");
-let quality = forcedQuality != null ? Math.min(Math.max(parseInt(forcedQuality, 10) || 0, 0), 2) : (coarse ? 1 : 2);
-let qStart = 0, qFrames = 0;
-function adaptQuality(now) {
-  if (forcedQuality != null || quality === 0) return;
-  if (!qStart) { qStart = now; qFrames = 0; return; }
-  qFrames++;
-  if (now - qStart < 2000) return;
-  if ((now - qStart) / qFrames > 50) {
-    quality--;
-    mod._g3_set_quality(quality);
-    console.log("garden3d: frames are slow; quality " + quality);
+// For tools and the kit's smoke test: each plant's and gardener's pick point,
+// in viewport CSS pixels, named as a tap would select it.
+function targets() {
+  const r = canvas.getBoundingClientRect(), out = [];
+  for (const g of gardeners) {
+    const s = g.x == null ? null : project(g.x, (g.y || 0) + 1.4 * GARDENER_SCALE, g.z);
+    if (s) out.push({id: "gardener:" + g.name, x: s.x + r.left, y: s.y + r.top});
   }
-  qStart = now; qFrames = 0;
+  for (const p of plants) {
+    const s = project(p.x, 0.4, p.z);
+    if (s) out.push({id: p.row.repo, x: s.x + r.left, y: s.y + r.top});
+  }
+  return out;
 }
-
-function fatal(msg) {
-  $("fatal-msg").textContent = msg;
-  $("fatal").hidden = false;
-}
+const idOf = (hit) => (hit.kind === "gardener" ? "gardener:" + hit.name : hit.row.repo);
 
 async function start() {
-  if (typeof createGarden3D !== "function") return fatal("The 3D garden's engine didn't load.");
   try {
-    mod = await createGarden3D({
-      locateFile: (p) => "/3d/" + p,
-      print: (t) => console.log(t),
-      printErr: (t) => console.warn(t),
+    mod = await StrataLoader.load({
+      script: "/3d/garden3d.js", factory: "createGarden3D", wasm: "/3d/garden3d.wasm", base: "/3d/",
+      title: "the 3D garden", fallback: {href: "/", text: "Open the 2D dashboard"},
     });
   } catch (e) {
-    return fatal("The 3D garden's engine failed to start: " + e);
+    return;  // the loader is showing why, with the link to the 2D dashboard
   }
-  resize();
-  const sel = mod.stringToNewUTF8("#garden3d-canvas");
-  const rc = mod._g3_init(sel, canvas.width, canvas.height, quality, reducedMotion ? 1 : 0);
-  mod._free(sel);
-  if (rc !== 0) {
-    return fatal(rc < 0 ? "This browser can't draw WebGL 2, which the 3D garden needs."
-                        : "The 3D renderer failed to start (status " + rc + ").");
+  try {
+    kit = StrataKit.create({
+      module: mod, canvas, camera: cam, limits, reducedMotion,
+      dprCap: coarse ? 2 : 2.5,
+      frame, after: placeLabels, pick, idOf, targets, onTap, onHover: hover, onKey,
+      onSlow: () => StrataLoader.slow(),
+      onFatal: (code, msg) => StrataLoader.fallback(code, msg),
+    });
+  } catch (e) {
+    return StrataLoader.fallback(e.code === "no-webgl2" ? "no-webgl2" : "engine",
+      e.code === "no-webgl2" ? "This browser can't draw WebGL 2, which the 3D garden needs."
+                             : "The 3D renderer failed to start (status " + e.status + ").");
   }
   layout([]);
   await poll();
   setInterval(poll, POLL_MS);
   canvas.focus({preventScroll: true});
-  requestAnimationFrame(frame);
+  kit.start();
+  if (kit.driven) kit.drive(0);
+  StrataLoader.done();
 }
+start();
 </script>
-<script src="/3d/garden3d.js" onload="start()" onerror="fatal('The 3D garden\'s engine didn\'t load.')"></script>
 </body>
 </html>

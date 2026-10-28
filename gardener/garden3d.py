@@ -2,9 +2,12 @@
 
 The page is `web/garden3d.html`; it draws through `web/garden3d.js` and
 `web/garden3d.wasm`, which `garden3d/build.sh` builds from
-`garden3d/main.cpp` against the Strata engine's WebAssembly release. The
-built files are committed, so serving them needs nothing beyond the
-standard library: this module only maps the three URLs to the three files.
+`garden3d/main.cpp` against the Strata engine's WebAssembly release, and it
+loads and drives them through the Strata web kit's two page scripts,
+`web/strata-loader.js` and `web/strata-kit.js` (copied from the vendored kit
+in `garden3d/strata-kit/` by the same build). The built files are committed,
+so serving them needs nothing beyond the standard library: this module only
+maps the page's URLs to those five files.
 The page reads the same `/api/status` the 2D dashboard polls, so it needs
 no endpoint of its own, and on the hub it sits behind the same operator
 check as every other page."""
@@ -23,6 +26,8 @@ ASSETS = {
     "/3d/": ("garden3d.html", "text/html; charset=utf-8"),
     "/3d/garden3d.js": ("garden3d.js", "text/javascript; charset=utf-8"),
     "/3d/garden3d.wasm": ("garden3d.wasm", "application/wasm"),
+    "/3d/strata-kit.js": ("strata-kit.js", "text/javascript; charset=utf-8"),
+    "/3d/strata-loader.js": ("strata-loader.js", "text/javascript; charset=utf-8"),
 }
 
 

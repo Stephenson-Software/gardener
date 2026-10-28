@@ -1,25 +1,26 @@
 // garden3d: the gardener garden in 3D, drawn by Strata (WebGL 2).
 //
 // The page (gardener/web/garden3d.html) owns everything but the drawing: it
-// polls /api/status, lays the plants out, handles the pointer and keyboard,
-// and draws the labels and cards as HTML. It hands this module numbers only:
-// one row of PLANT_STRIDE floats per plant, one row of BED_STRIDE per raised
-// bed, one row of GARDENER_STRIDE per device running gardener, where the
-// shed stands, an orbit camera and a clock. Every visual property of a plant comes
-// from a column of gardener's own run history, as in the 2D garden; the
-// mapping is the page's legend.
+// polls /api/status, lays the plants out, and draws the labels and cards as
+// HTML. It hands this module numbers only: one row of PLANT_STRIDE floats per
+// plant, one row of BED_STRIDE per raised bed, one row of GARDENER_STRIDE per
+// device running gardener, and where the shed stands. Every visual property of
+// a plant comes from a column of gardener's own run history, as in the 2D
+// garden; the mapping is the page's legend.
+//
+// The shell around the scene (the WebGL 2 context, resizing, quality tiers,
+// the orbit camera, the sun, the frame and its batches) is the Strata web
+// kit's strata_kit.h, vendored in garden3d/strata-kit/. This file is the
+// scene: it fills the frame's batches in strata_kit_build.
 //
 // Build: garden3d/build.sh (emsdk 6.0.11, Strata's wasm release, SHA-pinned).
-#include <emscripten/emscripten.h>
-#include <emscripten/html5.h>
+#define STRATA_KIT_MAIN
+#include "strata_kit.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <vector>
-
-#include "strata/strata.h"
 
 namespace {
 
@@ -43,9 +44,7 @@ enum Health { kUnplanted = 0, kStruggling, kWilting, kDry, kSteady, kThriving };
 constexpr float kBedTop = 0.30f;
 constexpr float kPi = 3.14159265f;
 
-struct Rgb {
-    float r, g, b;
-};
+using strata_kit::Rgb;
 
 // Linear RGB. The leaf ramp runs from vivid green to brown, as the 2D page's.
 const Rgb kLeaf[6] = {
@@ -65,60 +64,27 @@ const Rgb kShirts[6] = {{0.10f, 0.22f, 0.55f}, {0.60f, 0.12f, 0.10f}, {0.55f, 0.
                         {0.30f, 0.12f, 0.45f}, {0.08f, 0.40f, 0.40f}, {0.55f, 0.22f, 0.35f}};
 const Rgb kPetals[4] = {{0.85f, 0.25f, 0.45f}, {0.95f, 0.70f, 0.10f}, {0.55f, 0.30f, 0.85f}, {0.95f, 0.45f, 0.15f}};
 
+// The data the page last handed over.
 struct Garden {
-    StrataEngine* engine = nullptr;
-    int width = 0, height = 0;
     std::vector<float> plants;
     std::vector<float> beds;
     std::vector<float> gardeners;
+    bool bedsSet = false;
     bool shed = false;
     float shedX = 0.0f, shedZ = 0.0f;
-    std::vector<StrataRenderItem> items;
-    std::vector<StrataPoint> points;
-    std::vector<StrataLineVertex> lines;
     float bounds[4] = {-10, -10, 10, 10};  // garden rectangle x0 z0 x1 z1
-    // Orbit camera.
-    float yaw = 0.7f, pitch = 0.55f, dist = 30.0f, target[3] = {0, 0, 0};
-    float viewProj[16] = {};
-    float eye[3] = {};
-    // Sun.
-    float toSun[3] = {0.3f, 0.8f, 0.4f};
-    float night = 0.0f;  // 0 by day .. 1 at night
-    int quality = 2;     // see g3_set_quality
-    bool reducedMotion = false;
 };
 
 Garden g;
 
+strata_kit::Host& host() { return strata_kit::host(); }
+
 void add(int kind, float x, float y, float z, float sx, float sy, float sz, Rgb c) {
-    StrataRenderItem it{};
-    it.kind = kind;
-    it.position[0] = x;
-    it.position[1] = y;
-    it.position[2] = z;
-    it.scale[0] = sx;
-    it.scale[1] = sy;
-    it.scale[2] = sz;
-    it.color[0] = c.r;
-    it.color[1] = c.g;
-    it.color[2] = c.b;
-    it.color[3] = 1.0f;
-    g.items.push_back(it);
+    host().add(kind, x, y, z, sx, sy, sz, c);
 }
 
-void point(float x, float y, float z, float px, float world, float r, float gg, float b, float a, bool soft) {
-    StrataPoint p{};
-    p.position[0] = x;
-    p.position[1] = y;
-    p.position[2] = z;
-    p.size_pixels = px;
-    p.world_diameter = world;
-    p.color[0] = r;
-    p.color[1] = gg;
-    p.color[2] = b;
-    p.color[3] = a;
-    p.flags = soft ? STRATA_POINT_SOFT : 0u;
-    g.points.push_back(p);
+void point(float x, float y, float z, float px, float world, float r, float gg, float b, float a) {
+    host().point(x, y, z, px, world, {r, gg, b}, a);
 }
 
 float hash(float a, float b) {
@@ -143,7 +109,7 @@ void buildPlant(const float* p, double t) {
     } else {
         const float h = plantHeight(successes);
         const float droop = kDroop[health];
-        const float swayAmp = g.reducedMotion ? 0.0f : (inFlight ? 0.07f : 0.025f);
+        const float swayAmp = host().reducedMotion ? 0.0f : (inFlight ? 0.07f : 0.025f);
         const float sway = static_cast<float>(std::sin(t * (inFlight ? 2.6 : 1.1) + seed * 40.0)) * swayAmp;
         add(STRATA_PRIMITIVE_CYLINDER, x, kBedTop + h * 0.5f, z, 0.07f, h * 0.5f, 0.07f, kStem[health]);
         const int leaves = std::clamp(2 + static_cast<int>(successes / 5.0f), 2, 7);
@@ -183,13 +149,13 @@ void buildPlant(const float* p, double t) {
     const float top = kBedTop + (health == kUnplanted ? 0.3f : plantHeight(successes));
     if (inFlight) {
         // Being tended right now: a lantern above it and water falling.
-        point(x, top + 1.5f, z, 10.0f, 0.35f, 1.0f, 0.85f, 0.45f, 1.0f, true);
+        point(x, top + 1.5f, z, 10.0f, 0.35f, 1.0f, 0.85f, 0.45f, 1.0f);
         const int drops = 8;
         for (int i = 0; i < drops; ++i) {
             const double phase = std::fmod(t * 0.9 + i / static_cast<double>(drops) + seed, 1.0);
             const float dx = (hash(seed, i * 3.0f) - 0.5f) * 0.6f, dz = (hash(i * 5.0f, seed) - 0.5f) * 0.6f;
             const float y = top + 1.3f - static_cast<float>(phase) * 1.3f;
-            point(x + dx, y, z + dz, 4.0f, 0.06f, 0.45f, 0.70f, 1.0f, 0.85f, true);
+            point(x + dx, y, z + dz, 4.0f, 0.06f, 0.45f, 0.70f, 1.0f, 0.85f);
         }
     }
     if (pulse >= 0.0f && pulse < 4.0f) {
@@ -197,20 +163,19 @@ void buildPlant(const float* p, double t) {
         const float r = 0.3f + pulse * 0.6f, alpha = 1.0f - pulse / 4.0f;
         for (int i = 0; i < 18; ++i) {
             const float a = i * 2.0f * kPi / 18.0f;
-            point(x + std::cos(a) * r, kBedTop + 0.05f, z + std::sin(a) * r, 5.0f, 0.0f, 0.75f, 1.0f, 0.55f, alpha,
-                  true);
+            point(x + std::cos(a) * r, kBedTop + 0.05f, z + std::sin(a) * r, 5.0f, 0.0f, 0.75f, 1.0f, 0.55f, alpha);
         }
     }
     if (selected) {
-        const double spin = g.reducedMotion ? 0.0 : t * 0.8;
+        const double spin = host().reducedMotion ? 0.0 : t * 0.8;
         for (int i = 0; i < 24; ++i) {
             const float a0 = static_cast<float>(i * 2.0 * kPi / 24.0 + spin);
             const float a1 = static_cast<float>((i + 0.6) * 2.0 * kPi / 24.0 + spin);
             const float r = 0.62f, y = kBedTop + 0.03f;
             StrataLineVertex v0{{x + std::cos(a0) * r, y, z + std::sin(a0) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
             StrataLineVertex v1{{x + std::cos(a1) * r, y, z + std::sin(a1) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
-            g.lines.push_back(v0);
-            g.lines.push_back(v1);
+            host().lines.push_back(v0);
+            host().lines.push_back(v1);
         }
     }
 }
@@ -234,9 +199,9 @@ void buildGardener(const float* p, double t) {
     };
 
     // Walking: the legs take turns lifting and swinging; resting: breathing.
-    const float gait = mode == kWalking && !g.reducedMotion ? walked * 4.2f / kGardenerScale : 0.0f;
+    const float gait = mode == kWalking && !host().reducedMotion ? walked * 4.2f / kGardenerScale : 0.0f;
     const float bob = mode == kWalking ? std::fabs(std::sin(gait)) * 0.04f
-                      : (mode == kResting && !g.reducedMotion)
+                      : (mode == kResting && !host().reducedMotion)
                           ? static_cast<float>(std::sin(t * 1.3 + seed * 20.0)) * 0.012f
                           : 0.0f;
     for (int side = -1; side <= 1; side += 2) {
@@ -274,11 +239,11 @@ void buildGardener(const float* p, double t) {
             tipY = cy + 0.05f - 0.03f * i;
             part(STRATA_PRIMITIVE_SPHERE, tipX, tipY, tipZ, 0.06f, 0.06f, 0.06f, tin);
         }
-        const int drops = g.reducedMotion ? 1 : 7;
+        const int drops = host().reducedMotion ? 1 : 7;
         for (int i = 0; i < drops; ++i) {
-            const float ph = g.reducedMotion ? 0.5f : static_cast<float>(std::fmod(t * 1.4 + i / 7.0 + seed, 1.0));
+            const float ph = host().reducedMotion ? 0.5f : static_cast<float>(std::fmod(t * 1.4 + i / 7.0 + seed, 1.0));
             point(x + (tipX + fx * 0.25f * ph) * kGardenerScale, y0 + (tipY - 0.55f * ph * ph) * kGardenerScale,
-                  z + (tipZ + fz * 0.25f * ph) * kGardenerScale, 3.5f, 0.05f, 0.50f, 0.75f, 1.0f, 0.9f, true);
+                  z + (tipZ + fz * 0.25f * ph) * kGardenerScale, 3.5f, 0.05f, 0.50f, 0.75f, 1.0f, 0.9f);
         }
     }
     if (selected) {
@@ -286,8 +251,8 @@ void buildGardener(const float* p, double t) {
             const float a0 = i * 2.0f * kPi / 20.0f, a1 = (i + 0.6f) * 2.0f * kPi / 20.0f, r = 0.55f;
             StrataLineVertex v0{{x + std::cos(a0) * r, y0 + 0.03f, z + std::sin(a0) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
             StrataLineVertex v1{{x + std::cos(a1) * r, y0 + 0.03f, z + std::sin(a1) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
-            g.lines.push_back(v0);
-            g.lines.push_back(v1);
+            host().lines.push_back(v0);
+            host().lines.push_back(v1);
         }
     }
 }
@@ -295,7 +260,7 @@ void buildGardener(const float* p, double t) {
 // The potting shed the gardeners rest at. It stands outside the fence on
 // the near side, its door and bench facing away from the garden, toward
 // where the camera starts.
-void buildShed(std::vector<StrataPointLight>& lights) {
+void buildShed() {
     const float x = g.shedX, z = g.shedZ;
     const Rgb plank{0.40f, 0.26f, 0.14f}, dark{0.20f, 0.12f, 0.06f}, roof{0.30f, 0.12f, 0.08f};
     const float w = 2.4f, d = 1.7f, h = 1.8f, front = z + d * 0.5f;
@@ -311,11 +276,10 @@ void buildShed(std::vector<StrataPointLight>& lights) {
     add(STRATA_PRIMITIVE_CUBE, x + 0.6f, 0.42f, front + 0.3f, 0.95f, 0.08f, 0.32f, plank);
     add(STRATA_PRIMITIVE_CUBE, x + 0.2f, 0.2f, front + 0.3f, 0.08f, 0.4f, 0.28f, dark);
     add(STRATA_PRIMITIVE_CUBE, x + 1.0f, 0.2f, front + 0.3f, 0.08f, 0.4f, 0.28f, dark);
-    const float glow = 0.25f + 0.75f * g.night;
+    const float glow = 0.25f + 0.75f * host().night;
     add(STRATA_PRIMITIVE_SPHERE, x - 0.45f, 1.62f, front + 0.12f, 0.18f, 0.18f, 0.18f,
         {0.9f * glow, 0.65f * glow, 0.30f * glow});
-    if (g.night > 0.02f && lights.size() < STRATA_MAX_POINT_LIGHTS)
-        lights.push_back({{x - 0.45f, 1.62f, front + 0.3f}, 5.0f, {1.0f, 0.72f, 0.40f}, 1.4f * g.night, 0u});
+    if (host().night > 0.02f) host().light(x - 0.45f, 1.62f, front + 0.3f, 5.0f, {1.0f, 0.72f, 0.40f}, 1.4f * host().night);
 }
 
 void buildBeds() {
@@ -334,7 +298,7 @@ void buildBeds() {
 
 // The fence, the trees and the lantern posts: static, but cheap enough to
 // resubmit every frame with the plants.
-void buildSurroundings(std::vector<StrataPointLight>& lights) {
+void buildSurroundings() {
     const float m = 1.6f;
     const float x0 = g.bounds[0] - m, z0 = g.bounds[1] - m, x1 = g.bounds[2] + m, z1 = g.bounds[3] + m;
     const Rgb post{0.36f, 0.25f, 0.15f}, rail{0.42f, 0.30f, 0.18f};
@@ -386,21 +350,12 @@ void buildSurroundings(std::vector<StrataPointLight>& lights) {
     const float lz[8] = {z0, z0, z0, (z0 + z1) * 0.5f, z1, z1, z1, (z0 + z1) * 0.5f};
     for (int i = 0; i < 8; ++i) {
         add(STRATA_PRIMITIVE_CUBE, lx[i], 1.1f, lz[i], 0.12f, 2.2f, 0.12f, {0.10f, 0.10f, 0.11f});
-        const float glow = 0.25f + 0.75f * g.night;
+        const float glow = 0.25f + 0.75f * host().night;
         add(STRATA_PRIMITIVE_SPHERE, lx[i], 2.3f, lz[i], 0.32f, 0.32f, 0.32f,
             {0.9f * glow, 0.65f * glow, 0.30f * glow});
-        if (g.night > 0.02f)
-            lights.push_back({{lx[i], 2.3f, lz[i]}, std::max(w, d) * 0.45f, {1.0f, 0.72f, 0.40f}, 1.4f * g.night, 0u});
+        if (host().night > 0.02f)
+            host().light(lx[i], 2.3f, lz[i], std::max(w, d) * 0.45f, {1.0f, 0.72f, 0.40f}, 1.4f * host().night);
     }
-}
-
-void mul4(const float* a, const float* b, float* out) {  // column-major a * b
-    for (int c = 0; c < 4; ++c)
-        for (int r = 0; r < 4; ++r) {
-            float s = 0.0f;
-            for (int k = 0; k < 4; ++k) s += a[k * 4 + r] * b[c * 4 + k];
-            out[c * 4 + r] = s;
-        }
 }
 
 void setTerrain() {
@@ -439,165 +394,66 @@ void setTerrain() {
     tile.heights = heights.data();
     tile.colors = colors.data();
     tile.color[3] = 1.0f;
-    strata_set_terrain(g.engine, &tile);
+    strata_set_terrain(host().engine, &tile);
+    host().terrainSamples = sx * sz;
 }
-
-void* noProcAddress(const char*, void*) { return nullptr; }
 
 }  // namespace
 
-extern "C" {
+// The kit's hooks (strata_kit.h).
 
-// Creates the WebGL 2 context on the canvas and the engine in it. Returns 0
-// on success, or a negative number (no WebGL 2) or a StrataStatus.
-EMSCRIPTEN_KEEPALIVE int g3_init(const char* canvasSelector, int width, int height, int quality, int reducedMotion) {
-    EmscriptenWebGLContextAttributes attrs;
-    emscripten_webgl_init_context_attributes(&attrs);
-    attrs.majorVersion = 2;
-    attrs.minorVersion = 0;
-    attrs.alpha = false;
-    attrs.depth = true;
-    attrs.stencil = false;
-    attrs.antialias = true;
-    const EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx = emscripten_webgl_create_context(canvasSelector, &attrs);
-    if (ctx <= 0) return -1;
-    emscripten_webgl_make_context_current(ctx);
-
-    StrataEngineDesc desc{};
-    desc.struct_size = sizeof desc;
-    desc.abi_version = STRATA_ABI_VERSION;
-    desc.surface = STRATA_SURFACE_HOST_CONTEXT;
-    desc.width = width;
-    desc.height = height;
-    desc.get_proc_address = noProcAddress;  // must be non-NULL; never called in a browser
-    const StrataStatus status = strata_create(&desc, &g.engine);
-    if (status != STRATA_OK) {
-        std::fprintf(stderr, "strata_create failed: %s (%s)\n", strata_status_string(status), strata_last_error());
-        return status;
-    }
-    g.width = width;
-    g.height = height;
-    g.quality = quality;
-    g.reducedMotion = reducedMotion != 0;
-    std::printf("garden3d: Strata %s on %s\n", strata_version_string(), strata_gpu_description(g.engine));
-    return 0;
+void strata_kit_configure(strata_kit::Options& o) {
+    o.name = "garden3d";
+    // Every lantern, the shed lamp and each plant being tended are lit at
+    // every tier, as before the kit: the budget is the engine's maximum.
+    for (strata_kit::Tier& t : o.tiers) t.maxLights = STRATA_MAX_POINT_LIGHTS;
 }
 
-// 0: no shadows (software rendering, weak phones), 1: one small cascade,
-// 2: the full three. The page steps down when frames run slow.
-EMSCRIPTEN_KEEPALIVE void g3_set_quality(int quality) { g.quality = std::clamp(quality, 0, 2); }
-
-EMSCRIPTEN_KEEPALIVE void g3_resize(int width, int height) {
-    if (!g.engine || width <= 0 || height <= 0) return;
-    g.width = width;
-    g.height = height;
-    strata_resize(g.engine, width, height);
+// After the engine is made, and again after a lost WebGL context is restored.
+void strata_kit_engine_ready(strata_kit::Host&) {
+    if (g.bedsSet) setTerrain();
 }
 
-EMSCRIPTEN_KEEPALIVE void g3_set_beds(const float* rows, int count, float x0, float z0, float x1, float z1) {
-    g.beds.assign(rows, rows + static_cast<size_t>(count) * kBedStride);
-    g.bounds[0] = x0;
-    g.bounds[1] = z0;
-    g.bounds[2] = x1;
-    g.bounds[3] = z1;
-    if (g.engine) setTerrain();
-}
-
-EMSCRIPTEN_KEEPALIVE void g3_set_plants(const float* rows, int count) {
-    g.plants.assign(rows, rows + static_cast<size_t>(count) * kPlantStride);
-}
-
-EMSCRIPTEN_KEEPALIVE void g3_set_gardeners(const float* rows, int count) {
-    g.gardeners.assign(rows, rows + static_cast<size_t>(count) * kGardenerStride);
-}
-
-// Where the shed stands (show = 0 hides it).
-EMSCRIPTEN_KEEPALIVE void g3_set_shed(float x, float z, int show) {
-    g.shed = show != 0;
-    g.shedX = x;
-    g.shedZ = z;
-}
-
-EMSCRIPTEN_KEEPALIVE void g3_set_camera(float yaw, float pitch, float dist, float tx, float ty, float tz) {
-    g.yaw = yaw;
-    g.pitch = pitch;
-    g.dist = dist;
-    g.target[0] = tx;
-    g.target[1] = ty;
-    g.target[2] = tz;
-}
-
-// The sun as it really stands over (lat, lon) at unix_seconds.
-EMSCRIPTEN_KEEPALIVE float g3_set_sun(double unixSeconds, double lat, double lon) {
-    StrataSolarPosition sun{};
-    if (strata_solar_position(unixSeconds, lat, lon, &sun) != STRATA_OK) return 0.0f;
-    std::copy(sun.to_sun, sun.to_sun + 3, g.toSun);
-    g.night = std::clamp((2.0f - sun.elevation_degrees) / 10.0f, 0.0f, 1.0f);
-    if (g.engine) strata_set_sun_direction(g.engine, g.toSun);
-    return sun.elevation_degrees;
-}
-
-// The view-projection matrix of the last frame (column-major), for the page
-// to place labels and pick plants with.
-EMSCRIPTEN_KEEPALIVE const float* g3_view_proj() { return g.viewProj; }
-
-EMSCRIPTEN_KEEPALIVE int g3_frame(double seconds) {
-    if (!g.engine || g.width <= 0 || g.height <= 0) return 0;
-
-    const float cp = std::cos(g.pitch);
-    g.eye[0] = g.target[0] + g.dist * cp * std::cos(g.yaw);
-    g.eye[1] = g.target[1] + g.dist * std::sin(g.pitch);
-    g.eye[2] = g.target[2] + g.dist * cp * std::sin(g.yaw);
-    const float up[3] = {0.0f, 1.0f, 0.0f};
-    StrataCamera camera{};
-    strata_camera_look_at(g.eye, g.target, up, 50.0f, static_cast<float>(g.width) / g.height, 0.3f, 400.0f, &camera);
-    strata_set_camera(g.engine, &camera);
-    mul4(camera.projection, camera.view, g.viewProj);
-
-    StrataLighting lighting{};
-    strata_lighting_defaults(STRATA_LIGHTING_SUN, &lighting);
-    lighting.cascade_count = g.quality == 2 ? 3 : g.quality;
-    lighting.shadow_map_size = g.quality == 2 ? 2048 : 1024;
-    lighting.shadow_distance = std::max(40.0f, g.dist * 2.2f);
-    lighting.fog = 1;
-    strata_set_lighting(g.engine, &lighting);
-
-    g.items.clear();
-    g.points.clear();
-    g.lines.clear();
-    std::vector<StrataPointLight> lights;
+void strata_kit_build(strata_kit::Host&, double seconds) {
     buildBeds();
-    buildSurroundings(lights);
-    if (g.shed) buildShed(lights);
+    buildSurroundings();
+    if (g.shed) buildShed();
     for (size_t i = 0; i + kGardenerStride <= g.gardeners.size(); i += kGardenerStride)
         buildGardener(&g.gardeners[i], seconds);
     for (size_t i = 0; i + kPlantStride <= g.plants.size(); i += kPlantStride) {
         const float* p = &g.plants[i];
         buildPlant(p, seconds);
-        if (p[5] > 0.5f && lights.size() < STRATA_MAX_POINT_LIGHTS) {
+        if (p[5] > 0.5f) {
             const float top = kBedTop + plantHeight(p[3]) + 1.5f;
-            lights.push_back({{p[0], top, p[1]}, 6.0f, {1.0f, 0.85f, 0.5f}, 1.2f + 2.0f * g.night, 0u});
+            host().light(p[0], top, p[1], 6.0f, {1.0f, 0.85f, 0.5f}, 1.2f + 2.0f * host().night);
         }
     }
-    if (lights.size() > STRATA_MAX_POINT_LIGHTS) lights.resize(STRATA_MAX_POINT_LIGHTS);
-    strata_set_point_lights(g.engine, lights.data(), static_cast<int32_t>(lights.size()));
-
-    StrataFrameDesc desc{};
-    desc.clear_flags = STRATA_CLEAR_COLOR | STRATA_CLEAR_DEPTH | STRATA_CLEAR_SKY;
-    desc.clear_color[3] = 1.0f;
-    if (strata_begin_frame(g.engine, &desc) != STRATA_OK) {
-        std::fprintf(stderr, "strata_begin_frame: %s\n", strata_last_error());
-        return 0;
-    }
-    strata_submit_primitives(g.engine, g.items.data(), static_cast<int32_t>(g.items.size()));
-    if (!g.lines.empty()) strata_submit_lines(g.engine, g.lines.data(), static_cast<int32_t>(g.lines.size()));
-    if (!g.points.empty()) strata_submit_points(g.engine, g.points.data(), static_cast<int32_t>(g.points.size()));
-    if (strata_end_frame(g.engine) != STRATA_OK) {
-        std::fprintf(stderr, "strata_end_frame: %s\n", strata_last_error());
-        return 0;
-    }
-    strata_present(g.engine);
-    return static_cast<int>(g.items.size());
 }
 
-}  // extern "C"
+// The page's setters. The camera, the sun, the size and the quality are the
+// kit's (sk_*).
+
+STRATA_KIT_EXPORT void g3_set_beds(const float* rows, int count, float x0, float z0, float x1, float z1) {
+    g.beds.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kBedStride);
+    g.bounds[0] = x0;
+    g.bounds[1] = z0;
+    g.bounds[2] = x1;
+    g.bounds[3] = z1;
+    g.bedsSet = true;
+    if (host().engine) setTerrain();
+}
+
+STRATA_KIT_EXPORT void g3_set_plants(const float* rows, int count) {
+    g.plants.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kPlantStride);
+}
+
+STRATA_KIT_EXPORT void g3_set_gardeners(const float* rows, int count) {
+    g.gardeners.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kGardenerStride);
+}
+
+// Where the shed stands (show = 0 hides it).
+STRATA_KIT_EXPORT void g3_set_shed(float x, float z, int show) {
+    g.shed = show != 0;
+    g.shedX = x;
+    g.shedZ = z;
+}
