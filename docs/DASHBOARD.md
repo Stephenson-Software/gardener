@@ -440,21 +440,37 @@ in flight, the batch, the overnight budget left, and each slot's phase.
 The gardeners use only fields `/api/status` already carries (no log or
 transcript text, per RFC 0010). A device appears on the hub once it has
 sent a heartbeat.
-"Find a repo" flies to one. The page starts with three shadow cascades and
-drops to one, then none, while frames average over 50 ms, so a software
-renderer stays usable; `?quality=0|1|2` fixes the level.
+"Find a repo" flies to one. While frames average over 28 ms the page first
+lowers its pixel density towards 1, then steps from three shadow cascades
+to one, then none, so a software renderer or a weak phone stays usable;
+`?quality=0|1|2` fixes the level and `?fps=1` shows what it settled on. A
+browser without WebGL 2 gets a message and a link back here instead of a
+blank page, and a lost WebGL context (common on phones when a tab is
+backgrounded) is rebuilt in place.
 
-The page (`gardener/web/garden3d.html`) owns the data, layout, input and
-labels. The renderer is `garden3d/main.cpp`, which only draws what the
-page hands it. It is built by `garden3d/build.sh` (emsdk 6.0.11 and
-Strata's v0.4.0 WebAssembly release, checked by SHA-256) into
-`gardener/web/garden3d.js` and `.wasm`, which are committed so installing
-gardener needs no toolchain. CI's `garden3d` job rebuilds them and fails
-if the committed files differ, so after editing `main.cpp` (or the
-exported function list) rerun `build.sh` and commit its output. As with
-the garden view, the drawing is verified by rendering it, not by
-assertion; `tests/test_garden3d.py` covers the serving side and that the
-page calls only exported functions.
+The page (`gardener/web/garden3d.html`) owns the data, layout and labels.
+The renderer is `garden3d/main.cpp`, which only draws what the page hands
+it. The shell between them is the Strata web kit (Strata's `docs/WEB.md`,
+"The web kit"): `strata_kit.h` (the WebGL 2 context, resizing, quality
+tiers, the camera, the sun and the frame), `strata-loader.js` (the loading
+screen with real download progress, and the fallback) and `strata-kit.js`
+(sizing, quality stepping, orbit/pinch/keyboard input, projection and
+picking in CSS pixels, context loss, label placement). Until a Strata
+release carries the kit it is vendored in `garden3d/strata-kit/` at the
+Strata commit in `PIN` (`update.sh <sha>` re-vendors it; `build.sh`
+refuses files that don't match `SHA256SUMS`). `garden3d/build.sh` builds
+with emsdk 6.0.11 against Strata's v0.6.0 WebAssembly release (checked by
+SHA-256) into `gardener/web/garden3d.js` and `.wasm`, and copies the two kit
+scripts beside them; all four are committed so installing gardener needs no
+toolchain. CI's `garden3d` job rebuilds them and fails if the committed
+files differ, so after editing `main.cpp` (or the exported function list)
+rerun `build.sh` and commit its output. As with the garden view, the
+drawing is verified by rendering it, not by assertion;
+`tests/test_garden3d.py` covers the serving side and that the page and the
+kit call only exported functions. The kit's own browser test (Strata's
+`web/kit/testing/smoke.cjs`: taps select what a direct pick selects at
+device pixel ratios 1, 2 and 3, and the page survives a lost context) runs
+against `/3d` too.
 
 ## The live view
 

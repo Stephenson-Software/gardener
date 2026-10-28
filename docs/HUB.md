@@ -168,7 +168,7 @@ Devices use these endpoints. Everything except `/healthz` needs a credential.
 | `POST /api/v1/heartbeat` | device token | A live-state snapshot (see "Live heartbeats"), at most 16 KiB. The hub keeps only the latest per device, filed under the token's name, and ignores a beat older than the stored one for the same session. An unknown slot phase or a malformed field gets a 400 naming it. |
 | `GET /api/v1/devices` | device token or operator | Each device's run count, newest run, seconds since it (`quiet` past 36 h), and latest session (`all_errors` when every run in it errored); `you` is the calling token's device name, or null for an operator. `gardener hub status` reads this. |
 | `GET /`, `GET /api/status` | operator | The dashboard |
-| `GET /3d`, `/3d/garden3d.js`, `/3d/garden3d.wasm` | operator | The 3D garden (see the dashboard docs' "The 3D garden"), over the same `/api/status` |
+| `GET /3d`, `/3d/garden3d.js`, `/3d/garden3d.wasm`, `/3d/strata-kit.js`, `/3d/strata-loader.js` | operator | The 3D garden (see the dashboard docs' "The 3D garden"), over the same `/api/status` |
 | `GET /city`, `/city/city.js`, `/city/city.wasm` | operator | Fleet City (see below). A signed-out browser is sent to `/login` |
 | `GET /api/city?nights=` | operator | Fleet City's data: the laid-out city, each repository's numbers and the run events of the last `nights` nights (default 14, at most 60). Never served to a device token |
 

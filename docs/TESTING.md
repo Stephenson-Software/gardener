@@ -292,13 +292,16 @@ the pinned release, and rendering a real PNG headless when
 `GARDENER_STRATA_LIB`/`GARDENER_STRATA_PYTHON` are set (skipped otherwise;
 CI's `city-still` job sets them). The page's input, labels and tap-to-pick
 at DPR 1, 2 and 3 were verified by rendering in Playwright.
-`tests/test_garden3d.py` covers the 3D garden's serving side: the three
-`/3d` URLs and their content types (the `.wasm` really starts with the
-wasm magic), nothing else under `/3d` served, a missing file a 404 rather
-than an error, the 2D page linking to it, the hub refusing all three
-without an operator and serving them with one, and that every `mod._g3_*`
-function the page calls is in `garden3d/build.sh`'s export list and in the
-committed glue. For the gardeners it checks that a local payload names its
+`tests/test_garden3d.py` covers the 3D garden's serving side: the `/3d`
+URLs and their content types (the `.wasm` really starts with the wasm
+magic, and the two Strata web kit scripts are served), nothing else under
+`/3d` served, a missing file a 404 rather than an error, the 2D page
+linking to it, the hub refusing them without an operator and serving them
+with one, that every `mod._*` function the page or the kit's
+`strata-kit.js` calls is in the export list (`garden3d/build.sh`'s
+`KIT_EXPORTS` plus the vendored `build-kit.sh`'s shell exports) and in the
+committed glue, that the served kit scripts are the vendored ones, and that
+the vendored kit matches its `SHA256SUMS` and names a full commit in `PIN`. For the gardeners it checks that a local payload names its
 device and a hub's doesn't, that a heartbeat reaches the hub's
 `/api/status` under the token's device name, and that the page reads no
 log-text field. The drawing itself is verified by rendering, like the 2D
