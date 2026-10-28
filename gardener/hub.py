@@ -78,7 +78,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from gardener import __version__, dashboard, garden, garden3d, merge_allowlist, notify, state
+from gardener import __version__, dashboard, fleetcity, garden, garden3d, merge_allowlist, notify, state
 
 URL_ENV = "GARDENER_HUB_URL"
 TOKEN_ENV = "GARDENER_HUB_TOKEN"
@@ -1036,7 +1036,7 @@ class HubHandler(dashboard._DashboardHandler):
             self._api_get(path, parsed.query, device)
             return
         if operator is None:
-            self._deny(browser=path in ("/", "/index.html", "/3d", "/3d/"))
+            self._deny(browser=path in ("/", "/index.html", "/3d", "/3d/") or path in fleetcity.PAGE_PATHS)
             return
         if path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", dashboard.PAGE_HTML.encode("utf-8"))
@@ -1063,6 +1063,14 @@ class HubHandler(dashboard._DashboardHandler):
                 self._send(404, "text/plain; charset=utf-8", b"the 3D garden is not in this install\n")
             else:
                 self._send(200, *found)
+        elif path == "/api/city":
+            self._city(parsed.query)
+        elif fleetcity.is_asset_path(path):
+            found = fleetcity.asset(path)
+            if found is None:
+                self._send(404, "text/plain; charset=utf-8", b"Fleet City is not in this install\n")
+            else:
+                self._send(200, *found)
         elif path in ("/live", "/api/live"):
             self._send(
                 404, "text/plain; charset=utf-8",
@@ -1070,6 +1078,29 @@ class HubHandler(dashboard._DashboardHandler):
             )
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
+
+    def _city(self, query: str) -> None:
+        """Fleet City's data (RFC 0026), for the operator only: it may name
+        private repositories, so it is never served to a device token."""
+        params = urllib.parse.parse_qs(query)
+        try:
+            nights = int((params.get("nights") or [fleetcity.DEFAULT_NIGHTS])[0])
+        except ValueError:
+            self._json(400, {"error": "nights must be a whole number"})
+            return
+        try:
+            payload = fleetcity.build_city(
+                self.db_path,
+                snapshot=fleetcity.load_snapshot(self.data_dir),
+                garden_repos=union_device_lists(self.db_path)["garden"],
+                live_devices=live_device_states(self.db_path),
+                nights=nights,
+            )
+        except Exception as exc:  # noqa: BLE001 - a poll must get a real 500, never zero bytes
+            print(f"gardener hub: /api/city failed: {exc!r}", file=sys.stderr)
+            self._json(500, {"error": type(exc).__name__})
+            return
+        self._json(200, payload)
 
     def _api_get(self, path: str, query: str, device: Optional[str] = None) -> None:
         params = urllib.parse.parse_qs(query)

@@ -42,3 +42,41 @@ jobs:
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           garden3d/build.sh
           git diff --stat --exit-code -- gardener/web/
+
+  # Fleet City's engine (gardener/web/city.{js,wasm}), committed for the same
+  # reason as the 3D garden's: rebuilt from fleetcity/main.cpp and compared.
+  fleetcity:
+    runs-on: ubuntu-latest
+    env:
+      EMSDK_VERSION: "6.0.11"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install emsdk
+        run: |
+          git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install "$EMSDK_VERSION"
+          "$RUNNER_TEMP/emsdk/emsdk" activate "$EMSDK_VERSION"
+      - name: Rebuild and compare
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          fleetcity/build.sh
+          git diff --stat --exit-code -- gardener/web/
+
+  # The nightly still, drawn headless with Strata's Python binding on Mesa's
+  # software renderer, from a synthetic fleet (tests/city_fixture.py).
+  city-still:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.x"
+      - name: Install Mesa's EGL
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1-mesa-dri
+      - name: Fetch the pinned Strata library and binding
+        run: fleetcity/fetch-strata-python.sh "$RUNNER_TEMP/strata"
+      - name: Render the still
+        env:
+          GARDENER_STRATA_LIB: ${{ runner.temp }}/strata/libstrata-0.6.0-linux-x64.so
+          GARDENER_STRATA_PYTHON: ${{ runner.temp }}/strata/python
+        run: PYTHONPATH=.:tests python3 -m unittest test_fleetcity.TestCityStill -v

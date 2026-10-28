@@ -276,6 +276,22 @@ the union over live devices only (stale and idle excluded), each device's
 state, batch and budget under `live_devices`, and a local dashboard's
 payload unchanged. The page's per-device rendering has no JS test runner
 here; it was verified by rendering a seeded hub with Playwright.
+`tests/test_fleetcity.py` covers Fleet City (`/city`, RFC 0026) with a
+synthetic fleet from `tests/city_fixture.py` (no real repository name is in
+any fixture): the four URLs and the page calling only exported `mod._fc_*`
+functions; the snapshot parser keeping only named fields and refusing a bad
+schema or name; the city join (with and without a snapshot, the colour rule
+each uses, in-flight from live and stale heartbeats only, glow fading over
+six hours, one palette texel per building, a deterministic payload);
+buildings inside their districts with no overlaps, and plots that don't move
+when a repository is added; the hub refusing `/city` and `/api/city` to an
+anonymous caller and to a device token, and, with UserAuth on, sending an
+anonymous `/city` to `/login` (303) while `/api/city` is a plain 401; and
+`hub city-still` exiting 2 without Strata, refusing a library that isn't
+the pinned release, and rendering a real PNG headless when
+`GARDENER_STRATA_LIB`/`GARDENER_STRATA_PYTHON` are set (skipped otherwise;
+CI's `city-still` job sets them). The page's input, labels and tap-to-pick
+at DPR 1, 2 and 3 were verified by rendering in Playwright.
 `tests/test_garden3d.py` covers the 3D garden's serving side: the three
 `/3d` URLs and their content types (the `.wasm` really starts with the
 wasm magic), nothing else under `/3d` served, a missing file a 404 rather
