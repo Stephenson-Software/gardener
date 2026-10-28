@@ -102,7 +102,7 @@ which rejects a zero or negative `--timeout` the same way on `align`/
 negative or `nan` `overnight --hours`, and `digest_hours`, which rejects
 those plus `inf` or any window too large for `hub.digest`'s date
 arithmetic on `hub digest --hours`, and `positive_count`, which rejects a
-zero or negative `status --limit`, and `stale_days_arg`, which rejects a
+zero or negative `status --limit` or `score --limit`, and `stale_days_arg`, which rejects a
 negative `score --stale-days` or one too large for
 `parpt.repos_needing_score`'s cutoff arithmetic while still accepting
 `0`), the coupling between the

@@ -259,8 +259,8 @@ The reply is ten plain lines (`impact: 1 2 1 2`, `impact reason: ...`),
 not JSON: in the first full-garden backfill about a quarter of JSON
 replies were malformed.
 
-- **No flags** — scores up to `--limit` (default 5) garden repos that have
-  never been scored, then the ones whose score is older than
+- **No flags** — scores up to `--limit` (default 5; it must be a positive
+  whole number) garden repos that have never been scored, then the ones whose score is older than
   `--stale-days` (default 30), oldest first. `--stale-days 0` counts every
   scored repo as stale; a negative value is a usage error.
 - **`--repo owner/repo`** (repeatable) — scores exactly these repos, fresh
