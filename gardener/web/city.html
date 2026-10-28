@@ -514,6 +514,21 @@ function makeLabels() {
 function placeLabels() {
   StrataKit.placeLabels(labels.map((l) => ({el: l.el, rank: l.rank, q: project(...l.at())})));
 }
+// The kit's "drawing slowly" bar (StrataLoader.slow) is fixed at the bottom
+// centre, which on a phone is where the card opens as a bottom sheet: while
+// the sheet is open the bar is lifted to sit just above it, and it goes back
+// when the card closes. Wider screens keep the card at the top right and
+// the bar where the kit puts it.
+const phoneSheet = matchMedia("(max-width: 640px)");
+function keepSlowBarClear() {
+  const bar = document.querySelector(".sk-slow");
+  if (!bar) return;
+  if (bar.dataset.bottom == null) bar.dataset.bottom = bar.style.bottom;
+  const card = $("card");
+  const lift = phoneSheet.matches && !card.hidden;
+  const bottom = lift ? `${Math.round(innerHeight - card.getBoundingClientRect().top + 8)}px` : bar.dataset.bottom;
+  if (bar.style.bottom !== bottom) bar.style.bottom = bottom;
+}
 
 /* ---------------------------------------------------------------- input */
 // Orbit, pan, pinch, wheel and the arrow and +/- keys are the kit's; these
@@ -621,7 +636,7 @@ async function start() {
     kit = StrataKit.create({
       module: mod, canvas, camera: cam, limits, reducedMotion, dprCap: 2,
       idleOrbit: {rate: 0.0005}, hitRadius: (isCoarse) => (isCoarse ? 20 : 0),
-      frame, after: placeLabels, pick, idOf, targets, onTap, onHover: hover, onKey, onRestore,
+      frame, after: () => { placeLabels(); keepSlowBarClear(); }, pick, idOf, targets, onTap, onHover: hover, onKey, onRestore,
       onSlow: () => StrataLoader.slow(),
       onFatal: (code, msg) => fatal(msg),
     });
