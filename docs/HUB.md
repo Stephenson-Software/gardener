@@ -151,7 +151,7 @@ session, so upgrading devices before the hub is harmless. The design is RFC
 | Garden view | The union of every device's garden and merge allow-list, as each device last pushed them. These lists are display-only on the hub: they are never sent back to a device, and each device's own lists stay its own. |
 | Currently tending, in flight | From each device's latest heartbeat (see "Live heartbeats"). Each repo is tagged with its device. A **stale** device's repos (no beat for 3 of its intervals) are shown greyed and aren't counted in "in flight", because it may have stopped. |
 | Overnight budget and batch | One block per device under Latest session: **live** shows the device's budget and batch bars and "updated Ns ago"; **stale** shows the same greyed, with "last heard N min ago, may have stopped"; **idle** (ended, or unheard for 50 min) is one line. Age is measured on the hub's clock. |
-| 3D garden (`/3d`) | The same combined garden as the garden view, with the devices' live state in its summary panel. |
+| 3D garden (`/3d`) | The same combined garden as the garden view, with one gardener per device that has sent a heartbeat: named by its token, tending the repo its session is on or resting by the shed, grey-labelled when stale. |
 | Garden cycle bar, live log, `/live` | Not available: they read a device's cursor file, log text and transcripts, which never leave it. The page doesn't render them. Open the dashboard on the dispatching device for those. |
 
 ## API

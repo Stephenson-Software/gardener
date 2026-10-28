@@ -426,9 +426,20 @@ repos in the garden (`in_garden`), with the same health buckets as
 | Bloom | `can_merge` and health thriving or steady |
 | Lantern and falling rain | `in_flight` |
 | A ring spreading from the plant | `last_run` changed since the previous poll |
+| A gardener in a straw hat, one per device, labelled with its name | on the hub, each device's latest heartbeat (`live_devices`, named by the device's token); locally, this device (`device`) |
+| The gardener walking to a plant and watering it | a repo in that device's `in_progress` (several take turns, 45 s each) |
+| The gardener resting by the shed | nothing in flight: the device's session ended, is idle, or is between repos |
+| A grey gardener label ending "stale" | the device's heartbeat is stale; the figure keeps doing what the last beat said, as stale is only a label (RFC 0010) |
 | Sky | the real sun at the viewer's time (`strata_solar_position`, latitude 40°, longitude from the time zone's standard offset), or always 10:30 with "Sky: daytime" |
 
-Clicking or tapping a plant opens its card (a bottom sheet on a phone);
+![The 3D garden on a hub: Walter waters a plant while the phone rests by the shed](img/garden3d-gardeners.png)
+
+Clicking or tapping a plant or a gardener opens its card (a bottom sheet on
+a phone); a gardener's card shows its heartbeat state, command, the repos
+in flight, the batch, the overnight budget left, and each slot's phase.
+The gardeners use only fields `/api/status` already carries (no log or
+transcript text, per RFC 0010). A device appears on the hub once it has
+sent a heartbeat.
 "Find a repo" flies to one. The page starts with three shadow cascades and
 drops to one, then none, while frames average over 50 ms, so a software
 renderer stays usable; `?quality=0|1|2` fixes the level.

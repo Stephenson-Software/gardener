@@ -4,7 +4,8 @@
 // polls /api/status, lays the plants out, handles the pointer and keyboard,
 // and draws the labels and cards as HTML. It hands this module numbers only:
 // one row of PLANT_STRIDE floats per plant, one row of BED_STRIDE per raised
-// bed, an orbit camera and a clock. Every visual property of a plant comes
+// bed, one row of GARDENER_STRIDE per device running gardener, where the
+// shed stands, an orbit camera and a clock. Every visual property of a plant comes
 // from a column of gardener's own run history, as in the 2D garden; the
 // mapping is the page's legend.
 //
@@ -28,6 +29,14 @@ namespace {
 constexpr int kPlantStride = 10;
 // Bed row: x0, z0, x1, z1.
 constexpr int kBedStride = 4;
+// Gardener row (one per device running gardener): x, feet y, z, facing x,
+// facing z (a unit vector), distance walked (drives the gait), mode (see
+// GardenerMode), seed (0..1, picks the shirt), selected.
+constexpr int kGardenerStride = 9;
+
+enum GardenerMode { kResting = 0, kWalking, kTending };
+// A gardener stands about 1.9 units tall: a little over a well-tended plant.
+constexpr float kGardenerScale = 1.25f;
 
 enum Health { kUnplanted = 0, kStruggling, kWilting, kDry, kSteady, kThriving };
 
@@ -52,6 +61,8 @@ const Rgb kStem[6] = {
     {0.30f, 0.27f, 0.08f}, {0.09f, 0.22f, 0.05f}, {0.06f, 0.26f, 0.04f},
 };
 const float kDroop[6] = {0.0f, 0.70f, 0.85f, 0.45f, 0.15f, 0.0f};
+const Rgb kShirts[6] = {{0.10f, 0.22f, 0.55f}, {0.60f, 0.12f, 0.10f}, {0.55f, 0.40f, 0.08f},
+                        {0.30f, 0.12f, 0.45f}, {0.08f, 0.40f, 0.40f}, {0.55f, 0.22f, 0.35f}};
 const Rgb kPetals[4] = {{0.85f, 0.25f, 0.45f}, {0.95f, 0.70f, 0.10f}, {0.55f, 0.30f, 0.85f}, {0.95f, 0.45f, 0.15f}};
 
 struct Garden {
@@ -59,6 +70,9 @@ struct Garden {
     int width = 0, height = 0;
     std::vector<float> plants;
     std::vector<float> beds;
+    std::vector<float> gardeners;
+    bool shed = false;
+    float shedX = 0.0f, shedZ = 0.0f;
     std::vector<StrataRenderItem> items;
     std::vector<StrataPoint> points;
     std::vector<StrataLineVertex> lines;
@@ -199,6 +213,109 @@ void buildPlant(const float* p, double t) {
             g.lines.push_back(v1);
         }
     }
+}
+
+// A gardener: one figure per device running gardener, walking to the plant
+// its session is tending, watering it, or resting by the shed. Strata's
+// primitives don't rotate, so the figure is built from round parts and the
+// facing only places the watering can and the stride.
+void buildGardener(const float* p, double t) {
+    const float x = p[0], y0 = p[1], z = p[2], fx = p[3], fz = p[4], walked = p[5];
+    const int mode = static_cast<int>(p[6]);
+    const float seed = p[7];
+    const bool selected = p[8] > 0.5f;
+    const float sx = -fz, sz = fx;  // to the gardener's right
+    const Rgb shirt = kShirts[static_cast<int>(seed * 6.0f) % 6];
+    const Rgb trousers{0.16f, 0.13f, 0.10f}, skin{0.62f, 0.42f, 0.30f}, straw{0.62f, 0.50f, 0.22f};
+    // A part of the figure, offset from its feet, in figure units.
+    auto part = [&](int kind, float ox, float oy, float oz, float w, float h, float d, Rgb c) {
+        add(kind, x + ox * kGardenerScale, y0 + oy * kGardenerScale, z + oz * kGardenerScale, w * kGardenerScale,
+            h * kGardenerScale, d * kGardenerScale, c);
+    };
+
+    // Walking: the legs take turns lifting and swinging; resting: breathing.
+    const float gait = mode == kWalking && !g.reducedMotion ? walked * 4.2f / kGardenerScale : 0.0f;
+    const float bob = mode == kWalking ? std::fabs(std::sin(gait)) * 0.04f
+                      : (mode == kResting && !g.reducedMotion)
+                          ? static_cast<float>(std::sin(t * 1.3 + seed * 20.0)) * 0.012f
+                          : 0.0f;
+    for (int side = -1; side <= 1; side += 2) {
+        const float swing = mode == kWalking ? std::sin(gait + (side > 0 ? 0.0f : kPi)) : 0.0f;
+        const float lift = std::max(0.0f, swing) * 0.08f, ahead = swing * 0.10f;
+        const float lx = sx * 0.09f * side + fx * ahead, lz = sz * 0.09f * side + fz * ahead;
+        part(STRATA_PRIMITIVE_CYLINDER, lx, 0.30f + lift, lz, 0.13f, 0.28f, 0.13f, trousers);
+        part(STRATA_PRIMITIVE_SPHERE, lx + fx * 0.04f, 0.04f + lift, lz + fz * 0.04f, 0.16f, 0.09f, 0.20f,
+             {0.12f, 0.08f, 0.05f});
+    }
+    part(STRATA_PRIMITIVE_CYLINDER, 0, bob + 0.84f, 0, 0.36f, 0.27f, 0.36f, shirt);
+    part(STRATA_PRIMITIVE_SPHERE, 0, bob + 1.10f, 0, 0.40f, 0.16f, 0.40f, shirt);  // shoulders
+    for (int side = -1; side <= 1; side += 2) {
+        const float swing = mode == kWalking ? std::sin(gait + (side > 0 ? kPi : 0.0f)) * 0.08f : 0.0f;
+        const float ax = sx * 0.23f * side + fx * swing, az = sz * 0.23f * side + fz * swing;
+        part(STRATA_PRIMITIVE_CYLINDER, ax, bob + 0.86f, az, 0.10f, 0.22f, 0.10f, shirt);
+        part(STRATA_PRIMITIVE_SPHERE, ax, bob + 0.62f, az, 0.10f, 0.10f, 0.10f, skin);
+    }
+    part(STRATA_PRIMITIVE_SPHERE, 0, bob + 1.30f, 0, 0.28f, 0.30f, 0.28f, skin);
+    // A wide straw hat, so the figure reads as a gardener from the orbit camera.
+    part(STRATA_PRIMITIVE_CYLINDER, 0, bob + 1.42f, 0, 0.62f, 0.025f, 0.62f, straw);
+    part(STRATA_PRIMITIVE_CYLINDER, 0, bob + 1.50f, 0, 0.30f, 0.07f, 0.30f, straw);
+    part(STRATA_PRIMITIVE_CYLINDER, 0, bob + 1.46f, 0, 0.31f, 0.02f, 0.31f, shirt);  // hat band
+
+    if (mode == kTending) {
+        // Held out in front and tipped: a watering can, its spout, and water.
+        const Rgb tin{0.35f, 0.45f, 0.40f};
+        const float cx = fx * 0.38f + sx * 0.12f, cz = fz * 0.38f + sz * 0.12f, cy = 0.74f;
+        part(STRATA_PRIMITIVE_CYLINDER, cx, cy, cz, 0.24f, 0.12f, 0.24f, tin);
+        part(STRATA_PRIMITIVE_SPHERE, cx, cy + 0.12f, cz, 0.24f, 0.06f, 0.24f, tin);
+        float tipX = cx, tipY = cy, tipZ = cz;
+        for (int i = 1; i <= 3; ++i) {
+            tipX = cx + fx * 0.12f * i;
+            tipZ = cz + fz * 0.12f * i;
+            tipY = cy + 0.05f - 0.03f * i;
+            part(STRATA_PRIMITIVE_SPHERE, tipX, tipY, tipZ, 0.06f, 0.06f, 0.06f, tin);
+        }
+        const int drops = g.reducedMotion ? 1 : 7;
+        for (int i = 0; i < drops; ++i) {
+            const float ph = g.reducedMotion ? 0.5f : static_cast<float>(std::fmod(t * 1.4 + i / 7.0 + seed, 1.0));
+            point(x + (tipX + fx * 0.25f * ph) * kGardenerScale, y0 + (tipY - 0.55f * ph * ph) * kGardenerScale,
+                  z + (tipZ + fz * 0.25f * ph) * kGardenerScale, 3.5f, 0.05f, 0.50f, 0.75f, 1.0f, 0.9f, true);
+        }
+    }
+    if (selected) {
+        for (int i = 0; i < 20; ++i) {
+            const float a0 = i * 2.0f * kPi / 20.0f, a1 = (i + 0.6f) * 2.0f * kPi / 20.0f, r = 0.55f;
+            StrataLineVertex v0{{x + std::cos(a0) * r, y0 + 0.03f, z + std::sin(a0) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
+            StrataLineVertex v1{{x + std::cos(a1) * r, y0 + 0.03f, z + std::sin(a1) * r}, {1.0f, 1.0f, 1.0f, 0.95f}};
+            g.lines.push_back(v0);
+            g.lines.push_back(v1);
+        }
+    }
+}
+
+// The potting shed the gardeners rest at. It stands outside the fence on
+// the near side, its door and bench facing away from the garden, toward
+// where the camera starts.
+void buildShed(std::vector<StrataPointLight>& lights) {
+    const float x = g.shedX, z = g.shedZ;
+    const Rgb plank{0.40f, 0.26f, 0.14f}, dark{0.20f, 0.12f, 0.06f}, roof{0.30f, 0.12f, 0.08f};
+    const float w = 2.4f, d = 1.7f, h = 1.8f, front = z + d * 0.5f;
+    add(STRATA_PRIMITIVE_CUBE, x, h * 0.5f, z, w, h, d, plank);
+    // A stepped gable, ridge along x.
+    for (int i = 0; i < 4; ++i) {
+        const float f = static_cast<float>(i);
+        add(STRATA_PRIMITIVE_CUBE, x, h + 0.08f + f * 0.16f, z, w + 0.4f, 0.16f, d + 0.4f - f * 0.52f, roof);
+    }
+    add(STRATA_PRIMITIVE_CUBE, x - 0.45f, 0.72f, front + 0.02f, 0.7f, 1.44f, 0.05f, dark);  // door
+    add(STRATA_PRIMITIVE_CUBE, x + 0.6f, 1.1f, front + 0.02f, 0.5f, 0.4f, 0.05f, {0.55f, 0.65f, 0.70f});
+    // A bench beside the door and a lamp over it.
+    add(STRATA_PRIMITIVE_CUBE, x + 0.6f, 0.42f, front + 0.3f, 0.95f, 0.08f, 0.32f, plank);
+    add(STRATA_PRIMITIVE_CUBE, x + 0.2f, 0.2f, front + 0.3f, 0.08f, 0.4f, 0.28f, dark);
+    add(STRATA_PRIMITIVE_CUBE, x + 1.0f, 0.2f, front + 0.3f, 0.08f, 0.4f, 0.28f, dark);
+    const float glow = 0.25f + 0.75f * g.night;
+    add(STRATA_PRIMITIVE_SPHERE, x - 0.45f, 1.62f, front + 0.12f, 0.18f, 0.18f, 0.18f,
+        {0.9f * glow, 0.65f * glow, 0.30f * glow});
+    if (g.night > 0.02f && lights.size() < STRATA_MAX_POINT_LIGHTS)
+        lights.push_back({{x - 0.45f, 1.62f, front + 0.3f}, 5.0f, {1.0f, 0.72f, 0.40f}, 1.4f * g.night, 0u});
 }
 
 void buildBeds() {
@@ -390,6 +507,17 @@ EMSCRIPTEN_KEEPALIVE void g3_set_plants(const float* rows, int count) {
     g.plants.assign(rows, rows + static_cast<size_t>(count) * kPlantStride);
 }
 
+EMSCRIPTEN_KEEPALIVE void g3_set_gardeners(const float* rows, int count) {
+    g.gardeners.assign(rows, rows + static_cast<size_t>(count) * kGardenerStride);
+}
+
+// Where the shed stands (show = 0 hides it).
+EMSCRIPTEN_KEEPALIVE void g3_set_shed(float x, float z, int show) {
+    g.shed = show != 0;
+    g.shedX = x;
+    g.shedZ = z;
+}
+
 EMSCRIPTEN_KEEPALIVE void g3_set_camera(float yaw, float pitch, float dist, float tx, float ty, float tz) {
     g.yaw = yaw;
     g.pitch = pitch;
@@ -440,6 +568,9 @@ EMSCRIPTEN_KEEPALIVE int g3_frame(double seconds) {
     std::vector<StrataPointLight> lights;
     buildBeds();
     buildSurroundings(lights);
+    if (g.shed) buildShed(lights);
+    for (size_t i = 0; i + kGardenerStride <= g.gardeners.size(); i += kGardenerStride)
+        buildGardener(&g.gardeners[i], seconds);
     for (size_t i = 0; i + kPlantStride <= g.plants.size(); i += kPlantStride) {
         const float* p = &g.plants[i];
         buildPlant(p, seconds);
