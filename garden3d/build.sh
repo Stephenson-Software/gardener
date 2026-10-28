@@ -7,19 +7,21 @@
 # differ from what the source builds.
 #
 # The shell around the scene is the Strata web kit (docs/WEB.md in Strata,
-# "The web kit"), vendored in garden3d/strata-kit/ at the Strata commit in
-# strata-kit/PIN until a Strata release carries it; strata-kit/update.sh
-# re-vendors it. The engine is Strata's v0.6.0 wasm release, checked against a
-# pinned SHA-256; the kit uses only its C ABI. Needs emsdk 6.0.11 activated
-# (the version Strata's release is built with: everything linked into one
-# .wasm must agree on it and on -fwasm-exceptions).
+# "The web kit"), vendored once in strata-kit/ at the repository's root (Fleet
+# City builds on the same copy) at the Strata commit in strata-kit/PIN until a
+# Strata release carries it; strata-kit/update.sh re-vendors it. The engine is
+# Strata's v0.6.0 wasm release, checked against a pinned SHA-256; the kit uses
+# only its C ABI. Needs emsdk 6.0.11 activated (the version Strata's release is
+# built with: everything linked into one .wasm must agree on it and on
+# -fwasm-exceptions).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
+kit="$repo/strata-kit"
 
 # The vendored kit must be exactly what PIN names (update.sh writes both).
-(cd "$here/strata-kit" && sha256sum -c --quiet SHA256SUMS)
+(cd "$kit" && sha256sum -c --quiet SHA256SUMS)
 
 export KIT_SOURCE="$here/main.cpp"
 export KIT_OUT="$repo/gardener/web"
@@ -31,4 +33,4 @@ export EMSDK_VERSION=6.0.11
 export STRATA_VERSION=0.6.0
 export STRATA_SHA256=9973a0d0850abb0bfc58c20497b500a3d471033d6e04f73fcdb41382221b3016
 
-"$here/strata-kit/build-kit.sh"
+"$kit/build-kit.sh"

@@ -278,8 +278,11 @@ payload unchanged. The page's per-device rendering has no JS test runner
 here; it was verified by rendering a seeded hub with Playwright.
 `tests/test_fleetcity.py` covers Fleet City (`/city`, RFC 0026) with a
 synthetic fleet from `tests/city_fixture.py` (no real repository name is in
-any fixture): the four URLs and the page calling only exported `mod._fc_*`
-functions; the snapshot parser keeping only named fields and refusing a bad
+any fixture): the six URLs (the two Strata web kit scripts are the very
+same files `/3d` serves), and every `mod._*` function the page or the
+kit's `strata-kit.js` calls being in the export list (`fleetcity/build.sh`'s
+`KIT_EXPORTS` plus the vendored `build-kit.sh`'s shell exports) and in the
+committed glue; the snapshot parser keeping only named fields and refusing a bad
 schema or name; the city join (with and without a snapshot, the colour rule
 each uses, in-flight from live and stale heartbeats only, glow fading over
 six hours, one palette texel per building, a deterministic payload);
@@ -291,7 +294,9 @@ anonymous `/city` to `/login` (303) while `/api/city` is a plain 401; and
 the pinned release, and rendering a real PNG headless when
 `GARDENER_STRATA_LIB`/`GARDENER_STRATA_PYTHON` are set (skipped otherwise;
 CI's `city-still` job sets them). The page's input, labels and tap-to-pick
-at DPR 1, 2 and 3 were verified by rendering in Playwright.
+at DPR 1, 2 and 3, and a lost and restored context, are verified by
+rendering: the kit's smoke test (Strata's `web/kit/testing/smoke.cjs`) runs
+against `/city` on a local hub with the synthetic fleet.
 `tests/test_garden3d.py` covers the 3D garden's serving side: the `/3d`
 URLs and their content types (the `.wasm` really starts with the wasm
 magic, and the two Strata web kit scripts are served), nothing else under
@@ -301,7 +306,9 @@ with one, that every `mod._*` function the page or the kit's
 `strata-kit.js` calls is in the export list (`garden3d/build.sh`'s
 `KIT_EXPORTS` plus the vendored `build-kit.sh`'s shell exports) and in the
 committed glue, that the served kit scripts are the vendored ones, and that
-the vendored kit matches its `SHA256SUMS` and names a full commit in `PIN`. For the gardeners it checks that a local payload names its
+the vendored kit matches its `SHA256SUMS` and names a full commit in `PIN`,
+and that there is one vendored kit (`strata-kit/`) both `garden3d/build.sh`
+and `fleetcity/build.sh` build on. For the gardeners it checks that a local payload names its
 device and a hub's doesn't, that a heartbeat reaches the hub's
 `/api/status` under the token's device name, and that the page reads no
 log-text field. The drawing itself is verified by rendering, like the 2D

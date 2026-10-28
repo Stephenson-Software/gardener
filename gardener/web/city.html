@@ -17,6 +17,8 @@
     --bg: #1a1d24;
     --h-good: #59ad69; --h-fair: #cfab3f; --h-poor: #bb5445; --h-unknown: #949499;
     --g-ok: #e8b94a; --g-created: #3fb6d8; --g-error: #e0503f;
+    --sk-loader-bg: var(--bg); --sk-loader-fg: var(--text); --sk-loader-panel: var(--panel);
+    --sk-loader-accent: var(--accent);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -77,12 +79,10 @@
   .pill.live { background: var(--accent); color: var(--panel); border-color: transparent; }
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
   .lbl { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px;
-    padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid var(--panel-border);
-    transition: opacity 160ms; }
+    padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid var(--panel-border); }
   .lbl.district { font-weight: 600; font-size: 13px; }
   .lbl.flying { border-color: var(--accent); }
   .lbl.sel { border-color: var(--text); font-weight: 600; }
-  .lbl.off { opacity: 0; }
   #tip { position: fixed; pointer-events: none; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--panel);
     border: 1px solid var(--panel-border); transform: translate(12px, -50%); white-space: nowrap; z-index: 4; }
   #tip[hidden] { display: none; }
@@ -155,12 +155,18 @@
 <div id="fatal" hidden><div class="panel" style="position:static;max-width:420px">
   <p id="fatal-msg"></p><p><a href="/city">Reload</a> · <a href="/">Open the 2D dashboard</a></p></div></div>
 
+<script src="/city/strata-loader.js"></script>
+<script src="/city/strata-kit.js"></script>
 <script>
 "use strict";
 /* Fleet City (Stephenson-Software RFC 0026). The hub lays the city out
-   (/api/city, gardener/fleetcity.py); this script owns the data, input,
-   labels and timelapse; city.wasm (fleetcity/main.cpp, Strata) only draws
-   and picks. Everything here is the operator's private data. */
+   (/api/city, gardener/fleetcity.py); this script owns the data, labels and
+   timelapse; city.wasm (fleetcity/main.cpp, Strata) only draws and picks.
+   The shell around them (the loading screen and its fallback, the WebGL 2
+   context, sizing, adaptive quality, the orbit camera and its input,
+   projection, label placement, a lost context) is the Strata web kit:
+   strata-loader.js and strata-kit.js, vendored in strata-kit/ and shared
+   with /3d. Everything here is the operator's private data. */
 const POLL_MS = 60000;
 const BUILDING_STRIDE = 7, DISTRICT_STRIDE = 4, BEACON_STRIDE = 7;
 const FADE_S = 6 * 3600, PAD = 0.04, ROOF = 0.08;
@@ -174,10 +180,7 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const coarse = matchMedia("(pointer: coarse)").matches;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window */ } },
-};
+const store = StrataKit.store;
 function fmtAge(iso) {
   if (!iso) return "never";
   const s = (Date.now() - Date.parse(iso)) / 1000;
@@ -191,10 +194,11 @@ function fmtWhen(t) {
 }
 
 /* --------------------------------------------------------------- state */
-let mod = null, city = null, cityKey = "", byId = new Map();
+let mod = null, kit = null, city = null, cityKey = "", byId = new Map();
 let selected = -1, hovered = -1, firstPoll = true;
+// The kit's camera and limits are these objects: writing to them moves it.
 const cam = {yaw: 0.8, pitch: 0.75, dist: 80, tx: 0, ty: 0, tz: 0};
-let maxDist = 300, lastInput = performance.now();
+const limits = {minPitch: 0.12, maxPitch: 1.48, minDist: 4, maxDist: 300};
 let sky = params.get("sky") || store.get("city.sky") || "real";
 $("sky").value = sky;
 // The timelapse: live follows the clock; otherwise t is a moment in the
@@ -261,11 +265,11 @@ function frameCity() {
   // Stand back until a circle round the whole city fits the narrower of
   // the two fields of view: a portrait phone sees less across.
   const radius = Math.max(Math.hypot(x1 - x0, z1 - z0) / 2, 8);
-  const el = $("city-canvas"), aspect = el.clientWidth / Math.max(el.clientHeight, 1);
+  const aspect = canvas.clientWidth / Math.max(canvas.clientHeight, 1);
   const half = Math.atan(Math.tan(22.5 * Math.PI / 180) * Math.min(aspect, 1));
   cam.dist = Math.min(radius / Math.sin(half) * 0.92, 900);
   cam.tx = (x0 + x1) / 2; cam.tz = (z0 + z1) / 2; cam.ty = 0;
-  maxDist = Math.max(cam.dist * 1.6, 40);
+  limits.maxDist = Math.max(cam.dist * 1.6, 40);
 }
 function palettePtr(bytes) {
   if (!palettePtr.ptr || palettePtr.cap < bytes.length) {
@@ -273,7 +277,9 @@ function palettePtr(bytes) {
     palettePtr.cap = bytes.length;
     palettePtr.ptr = mod._malloc(bytes.length);
   }
-  mod.HEAPU8.set(bytes, palettePtr.ptr);
+  // The kit's build exports HEAPF32 but not HEAPU8; a view of the same
+  // memory, made now because memory growth replaces the buffer.
+  new Uint8Array(mod.HEAPF32.buffer).set(bytes, palettePtr.ptr);
   return palettePtr.ptr;
 }
 const byte = (v) => Math.max(0, Math.min(255, Math.round(v * 255)));
@@ -393,7 +399,7 @@ function focusBuilding(id) {
   cam.tx = (b.x0 + b.x1) / 2; cam.tz = (b.z0 + b.z1) / 2; cam.ty = b.h / 2;
   cam.dist = Math.min(cam.dist, 18);
   showCard(id);
-  lastInput = performance.now();
+  if (kit) kit.touch();
 }
 $("find").addEventListener("change", (e) => {
   const q = e.target.value.trim().toLowerCase();
@@ -440,42 +446,44 @@ function syncScrub() {
 }
 
 /* ----------------------------------------------------------- projection */
-function project(x, y, z) {
-  if (!mod) return null;
-  const o = mod._fc_view_proj() >> 2, m = mod.HEAPF32;
-  const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
-  const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
-  const cw = m[o + 3] * x + m[o + 7] * y + m[o + 11] * z + m[o + 15];
-  if (cw <= 0.01) return null;
-  const el = $("city-canvas");
-  return {x: (cx / cw * 0.5 + 0.5) * el.clientWidth, y: (1 - (cy / cw * 0.5 + 0.5)) * el.clientHeight, w: cw};
-}
+const canvas = $("city-canvas");
+function project(x, y, z) { return kit ? kit.project(x, y, z) : null; }
 function roofPoint(b) { return [(b.x0 + b.x1) / 2, PAD + b.h + ROOF, (b.z0 + b.z1) / 2]; }
-// The building under a CSS-pixel point: Strata's ray cast against the
-// district meshes and their per-triangle tags (main.cpp fc_pick). A finger
-// is not a cursor, so on a touch screen a miss tries a ring around it.
-function pick(x, y) {
-  if (!mod || !city) return -1;
-  const el = $("city-canvas"), w = el.clientWidth, h = el.clientHeight;
+// The building under a CSS-pixel point on the canvas, or null: Strata's ray
+// cast against the district meshes and their per-triangle tags (main.cpp
+// fc_pick). A finger is not a cursor, so with a radius (the kit's hit
+// radius, set on a touch screen only) a miss tries rings round the point.
+function pick(x, y, radius) {
+  if (!mod || !city) return null;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
   let id = mod._fc_pick(x, y, w, h);
-  if (id >= 0 || !coarse) return id;
-  for (const r of [10, 20]) {
-    for (let k = 0; k < 8; k++) {
+  for (let r = 10; id < 0 && r <= radius; r += 10) {
+    for (let k = 0; id < 0 && k < 8; k++) {
       const a = k * Math.PI / 4;
       id = mod._fc_pick(x + Math.cos(a) * r, y + Math.sin(a) * r, w, h);
-      if (id >= 0) return id;
     }
   }
-  return -1;
+  return id >= 0 ? byId.get(id) || null : null;
+}
+const idOf = (b) => b.repo;
+// For tools and the kit's smoke test: each roof's centre, in viewport CSS
+// pixels, named as a tap there would select it.
+function targets() {
+  if (!city) return [];
+  const r = canvas.getBoundingClientRect(), out = [];
+  for (const b of city.buildings) {
+    const s = project(...roofPoint(b));
+    if (s) out.push({id: b.repo, x: s.x + r.left, y: s.y + r.top});
+  }
+  return out;
 }
 
 /* --------------------------------------------------------------- labels */
 // District names always; buildings being tended, the selection and the
-// tallest few. Labels that collide hide, but only after the change has held
-// for a moment (HIDE_MS / SHOW_MS), and a shown label keeps priority over a
-// hidden one of the same rank, so a turning camera doesn't make them blink
-// (the same rule as the 3D session village's labels).
-const HIDE_MS = 350, SHOW_MS = 200;
+// tallest few. Placement is the kit's (StrataKit.placeLabels): the
+// selection (rank -1) and the buildings being tended (0) are never hidden,
+// a district (1) steps up once, and labels that collide hide only after the
+// change has held for a moment, so a turning camera doesn't make them blink.
 let labels = [];
 function makeLabels() {
   const host = $("labels"), old = new Map(labels.map((l) => [l.key, l.el]));
@@ -496,134 +504,51 @@ function makeLabels() {
   labels = want.map((l) => {
     let el = old.get(l.key);
     if (el) old.delete(l.key);
-    else { el = document.createElement("div"); el.className = "lbl off"; host.appendChild(el); }
-    el.className = `lbl ${l.cls} ${el._shown ? "" : "off"}`;
-    if (el.textContent !== l.text) { el.textContent = l.text; el._w = null; }
+    else { el = document.createElement("div"); el.className = "lbl sk-label-off"; host.appendChild(el); }
+    el.className = `lbl ${l.cls}` + (el.classList.contains("sk-label-off") ? " sk-label-off" : "");
+    if (el.textContent !== l.text) el.textContent = l.text;
     return Object.assign(l, {el});
   });
   for (const el of old.values()) el.remove();
 }
 function placeLabels() {
-  const now = performance.now(), taken = [];
-  const overlaps = (r) => taken.some((o) => r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0);
-  const items = labels.map((l) => {
-    const q = project(...l.at());
-    return {l, q, depth: q ? q.w : 1e9};
-  });
-  for (const it of items) {
-    const el = it.l.el;
-    if (el._w == null) { el.style.display = ""; el._w = el.offsetWidth || 80; el._h = el.offsetHeight || 18; }
-  }
-  items.sort((a, b) => a.l.rank - b.l.rank || (b.l.el._shown ? 1 : 0) - (a.l.el._shown ? 1 : 0) || a.depth - b.depth);
-  for (const it of items) {
-    const el = it.l.el;
-    if (!it.q) { el.style.display = "none"; el._shown = false; el._pending = 0; continue; }
-    const w = el._w, h = el._h, rank = it.l.rank;
-    const r0 = {x0: it.q.x - w / 2, x1: it.q.x + w / 2, y0: it.q.y - h - 4, y1: it.q.y - 4};
-    const free = !overlaps(r0);
-    const show = free || rank <= 0;
-    if (show !== !!el._shown) {
-      if (!el._pending) el._pending = now;
-      if (now - el._pending >= (show ? SHOW_MS : HIDE_MS) || rank <= 0) { el._shown = show; el._pending = 0; }
-    } else el._pending = 0;
-    if (el._shown) taken.push(r0);
-    el.style.display = "";
-    el.style.left = it.q.x + "px";
-    el.style.top = (it.q.y - 4) + "px";
-    el.classList.toggle("off", !el._shown);
-  }
+  StrataKit.placeLabels(labels.map((l) => ({el: l.el, rank: l.rank, q: project(...l.at())})));
+}
+// The kit's "drawing slowly" bar (StrataLoader.slow) is fixed at the bottom
+// centre, which on a phone is where the card opens as a bottom sheet: while
+// the sheet is open the bar is lifted to sit just above it, and it goes back
+// when the card closes. Wider screens keep the card at the top right and
+// the bar where the kit puts it.
+const phoneSheet = matchMedia("(max-width: 640px)");
+function keepSlowBarClear() {
+  const bar = document.querySelector(".sk-slow");
+  if (!bar) return;
+  if (bar.dataset.bottom == null) bar.dataset.bottom = bar.style.bottom;
+  const card = $("card");
+  const lift = phoneSheet.matches && !card.hidden;
+  const bottom = lift ? `${Math.round(innerHeight - card.getBoundingClientRect().top + 8)}px` : bar.dataset.bottom;
+  if (bar.style.bottom !== bottom) bar.style.bottom = bottom;
 }
 
 /* ---------------------------------------------------------------- input */
-const canvas = $("city-canvas");
-const pointers = new Map();
-let dragMoved = 0, pinchStart = null;
-function clampCam() {
-  cam.pitch = Math.min(Math.max(cam.pitch, 0.12), 1.48);
-  cam.dist = Math.min(Math.max(cam.dist, 4), maxDist);
-}
-function pan(dx, dy) {
-  const k = cam.dist / canvas.clientHeight * 1.1;
-  const sx = -Math.sin(cam.yaw), sz = Math.cos(cam.yaw);
-  const fx = -Math.cos(cam.yaw), fz = -Math.sin(cam.yaw);
-  cam.tx += (-dx * sx + dy * fx) * k;
-  cam.tz += (-dx * sz + dy * fz) * k;
-}
-canvas.addEventListener("pointerdown", (e) => {
-  canvas.setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, {x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey});
-  dragMoved = 0;
-  if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    pinchStart = {d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2};
-  }
-  canvas.classList.add("dragging");
-  lastInput = performance.now();
-});
-canvas.addEventListener("pointermove", (e) => {
-  const p = pointers.get(e.pointerId);
-  if (!p) { if (e.pointerType === "mouse") hover(e.clientX, e.clientY); return; }
-  const dx = e.clientX - p.x, dy = e.clientY - p.y;
-  dragMoved += Math.abs(dx) + Math.abs(dy);
-  p.x = e.clientX; p.y = e.clientY;
-  if (pointers.size === 2 && pinchStart) {
-    const [a, b] = [...pointers.values()];
-    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    cam.dist = pinchStart.dist * pinchStart.d / Math.max(d, 1);
-    pan(mx - pinchStart.mx, my - pinchStart.my);
-    pinchStart.mx = mx; pinchStart.my = my;
-  } else if (p.button === 2 || p.shift) pan(dx, dy);
-  else { cam.yaw += dx * 0.008; cam.pitch += dy * 0.006; }
-  clampCam();
-  lastInput = performance.now();
-});
-function endPointer(e) {
-  const p = pointers.get(e.pointerId);
-  pointers.delete(e.pointerId);
-  if (pointers.size < 2) pinchStart = null;
-  if (!pointers.size) canvas.classList.remove("dragging");
-  if (p && dragMoved < (coarse ? 10 : 6) && e.type === "pointerup") {
-    const id = pick(e.clientX, e.clientY);
-    if (id >= 0) showCard(id); else hideCard();
-  }
-}
-canvas.addEventListener("pointerup", endPointer);
-canvas.addEventListener("pointercancel", endPointer);
-canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-canvas.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  cam.dist *= Math.exp(e.deltaY * 0.0012);
-  clampCam();
-  lastInput = performance.now();
-}, {passive: false});
-canvas.addEventListener("keydown", (e) => {
-  const k = e.key;
-  if (k === "ArrowLeft") cam.yaw -= 0.08;
-  else if (k === "ArrowRight") cam.yaw += 0.08;
-  else if (k === "ArrowUp") cam.pitch += 0.05;
-  else if (k === "ArrowDown") cam.pitch -= 0.05;
-  else if (k === "+" || k === "=") cam.dist *= 0.9;
-  else if (k === "-" || k === "_") cam.dist *= 1.1;
-  else if (k === " ") { if (city) setPlaying(!tl.playing); }
-  else if (k === "Escape") hideCard();
-  else return;
-  e.preventDefault();
-  clampCam();
-  lastInput = performance.now();
-});
-function hover(x, y) {
-  const id = pick(x, y);
-  hovered = id;
+// Orbit, pan, pinch, wheel and the arrow and +/- keys are the kit's; these
+// are what a tap, a hover, space and Escape mean here.
+function onTap(b) { if (b) showCard(b.id); else hideCard(); }
+function hover(b, x, y) {
+  hovered = b ? b.id : -1;
   const tip = $("tip");
-  canvas.classList.toggle("over", id >= 0);
-  if (id < 0) { tip.hidden = true; return; }
-  const b = byId.get(id);
+  canvas.classList.toggle("over", !!b);
+  if (!b) { tip.hidden = true; return; }
   tip.hidden = false;
   tip.style.left = x + "px";
   tip.style.top = y + "px";
   tip.innerHTML = `<span class="dot h-${b.health}"></span>${b.private ? "🔒 " : ""}${esc(b.repo)}`;
 }
-canvas.addEventListener("pointerleave", () => { $("tip").hidden = true; hovered = -1; });
+function onKey(e) {
+  if (e.key === " ") { if (city) setPlaying(!tl.playing); return true; }
+  if (e.key === "Escape") { hideCard(); return true; }
+  return false;
+}
 
 /* ---------------------------------------------------------------- frame */
 function viewerLonLat() {
@@ -632,143 +557,102 @@ function viewerLonLat() {
   return {lon: -std / 4, lat: 40};
 }
 const where = viewerLonLat();
-let lastSun = 0, dpr = 1, beaconPtr = 0, beaconCap = 0;
-// Pixel-density cap, lowered by adaptQuality before shadows are given up:
-// a high-DPI screen at full density is most of the GPU's work.
-let dprCap = 2;
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w; canvas.height = h;
-    if (mod) mod._fc_resize(w, h);
-  }
-}
+let lastSun = 0, beaconPtr = 0, beaconCap = 0;
 function sunTime(t) {
   if (sky === "real") return t;
   const d = new Date(t * 1000); d.setUTCHours(0, 0, 0, 0);
   const solar = sky === "day" ? 10.5 : 22.0;   // local solar time
   return d.getTime() / 1000 + (solar - where.lon / 15) * 3600;
 }
-function frame(now) {
-  if (contextLost) return;
-  resize();
-  const dt = Math.min((now - (frame.last || now)) / 1000, 0.25);
-  frame.last = now;
-  if (!reducedMotion && now - lastInput > 20000 && selected < 0 && !tl.playing) cam.yaw += 0.0005;
-  if (city) {
-    if (tl.live) tl.t = city.now + Math.max(0, (Date.now() / 1000) - city.fetchedAt);
-    else if (tl.playing) {
-      tl.t += dt * tl.rate;
-      if (tl.t >= city.now) { tl.t = city.now; setPlaying(false); }
-    }
-    // Roofs are rewritten when time has moved enough to change a glow.
-    if (Math.abs(tl.t - tl.lastPalette) > (tl.playing ? 120 : 30)) {
-      uploadRoofPalette(tl.t);
-      tl.lastPalette = tl.t;
-      syncScrub();
-    }
-    if (now - lastSun > (tl.playing ? 100 : 30000) || lastSun === 0) {
-      mod._fc_set_sun(sunTime(tl.t), where.lat, where.lon);
-      lastSun = now;
-    }
-    // Beacons only in live mode: they are a device's latest heartbeat.
-    const fly = tl.live ? city.buildings.filter((b) => b.in_flight) : [];
-    if (fly.length * BEACON_STRIDE > beaconCap) {
-      if (beaconPtr) mod._free(beaconPtr);
-      beaconCap = fly.length * BEACON_STRIDE + 8 * BEACON_STRIDE;
-      beaconPtr = mod._malloc(beaconCap * 4);
-    }
-    fly.forEach((b, i) => {
-      const [x, y, z] = roofPoint(b);
-      mod.HEAPF32.set([x, y, z, 0.55, 0.8, 1.0, 1.0], (beaconPtr >> 2) + i * BEACON_STRIDE);
-    });
-    mod._fc_set_beacons(beaconPtr, fly.length);
-  }
+// One frame's data, at page time now (ms); the kit then draws it with its
+// camera. The idle orbit waits while a card is open or the timelapse plays.
+function frame(t, now, dt) {
+  kit.selected = selected >= 0 || tl.playing ? true : null;
   mod._fc_set_selected(selected, hovered);
-  mod._fc_set_camera(cam.yaw, cam.pitch, cam.dist, cam.tx, cam.ty, cam.tz);
-  mod._fc_frame(now / 1000);
-  adaptQuality(now);
-  placeLabels();
-  requestAnimationFrame(frame);
+  if (!city) return;
+  if (tl.live) tl.t = city.now + Math.max(0, (Date.now() / 1000) - city.fetchedAt);
+  else if (tl.playing) {
+    tl.t += dt * tl.rate;
+    if (tl.t >= city.now) { tl.t = city.now; setPlaying(false); }
+  }
+  // Roofs are rewritten when time has moved enough to change a glow.
+  if (Math.abs(tl.t - tl.lastPalette) > (tl.playing ? 120 : 30)) {
+    uploadRoofPalette(tl.t);
+    tl.lastPalette = tl.t;
+    syncScrub();
+  }
+  if (now - lastSun > (tl.playing ? 100 : 30000) || lastSun === 0) {
+    kit.setSun(sunTime(tl.t), where.lat, where.lon);
+    lastSun = now;
+  }
+  // Beacons only in live mode: they are a device's latest heartbeat.
+  const fly = tl.live ? city.buildings.filter((b) => b.in_flight) : [];
+  if (fly.length * BEACON_STRIDE > beaconCap) {
+    if (beaconPtr) mod._free(beaconPtr);
+    beaconCap = fly.length * BEACON_STRIDE + 8 * BEACON_STRIDE;
+    beaconPtr = mod._malloc(beaconCap * 4);
+  }
+  fly.forEach((b, i) => {
+    const [x, y, z] = roofPoint(b);
+    mod.HEAPF32.set([x, y, z, 0.55, 0.8, 1.0, 1.0], (beaconPtr >> 2) + i * BEACON_STRIDE);
+  });
+  mod._fc_set_beacons(beaconPtr, fly.length);
+}
+// After a lost WebGL context comes back, the kit has rebuilt the engine and
+// main.cpp has uploaded the city again with grey palettes: send them anew.
+function onRestore() {
+  if (!city) return;
+  uploadBodyPalette();
+  tl.lastPalette = -1e12;
+  lastSun = 0;
 }
 
-// Start at full quality (or ?quality=0|1|2) and keep frames under about
-// 28 ms (35 fps): first lower the pixel density towards 1, then drop shadow
-// quality (the session village's stepping). ?fps=1 shows what it settled on.
-const forcedQuality = params.get("quality");
-let quality = forcedQuality != null ? Math.min(Math.max(parseInt(forcedQuality, 10) || 0, 0), 2) : (coarse ? 1 : 2);
-const SLOW_MS = 28, WINDOW_MS = 1500, SETTLE_MS = 2500;
-let qStart = 0, qFrames = 0, settleUntil = 0;
-const fpsEl = params.get("fps") === "1" ? document.body.appendChild(Object.assign(document.createElement("div"),
-  {style: "position:fixed;right:8px;top:8px;font:12px monospace;background:#000a;color:#fff;padding:2px 6px;border-radius:4px;z-index:9"})) : null;
-document.addEventListener("visibilitychange", () => { qStart = 0; });
-function adaptQuality(now) {
-  if (!qStart) { qStart = now; qFrames = 0; return; }
-  qFrames++;
-  if (now - qStart < WINDOW_MS) return;
-  const ms = (now - qStart) / qFrames;
-  if (fpsEl) fpsEl.textContent = `${(1000 / ms).toFixed(0)} fps · q${quality} · ${dpr.toFixed(2)}x`;
-  qStart = now; qFrames = 0;
-  if (forcedQuality != null || now < settleUntil || ms <= SLOW_MS) return;
-  if (dpr > 1.01) {
-    dprCap = Math.max(1, dpr * 0.75);
-    console.log("fleetcity: frames are slow (" + ms.toFixed(0) + " ms); pixel density " + dprCap.toFixed(2));
-  } else if (quality > 0) {
-    quality--;
-    mod._fc_set_quality(quality);
-    console.log("fleetcity: frames are slow (" + ms.toFixed(0) + " ms); quality " + quality);
-  } else return;
-  settleUntil = now + SETTLE_MS;
-}
-
+// The kit gave up on a lost context (lost again within a minute, or not
+// back in 5 s): say so and offer a reload rather than draw nothing.
 function fatal(msg) { $("fatal-msg").textContent = msg; $("fatal").hidden = false; }
-// A phone drops a backgrounded tab's WebGL context. The engine's GPU state
-// is gone with it, so say so and offer a reload rather than draw nothing.
-let contextLost = false;
-canvas.addEventListener("webglcontextlost", (e) => {
-  e.preventDefault();
-  contextLost = true;
-  fatal("The browser dropped the 3D view (this happens to background tabs on phones).");
-});
 
 // For captures and the DPR tap test: where a building's roof is on screen,
-// and what a tap there would pick.
+// and what a tap there would pick. (The kit's window.__strataKit has the
+// same by repository name.)
 window.__city = {
-  get ready() { return !!(mod && city); },
+  get ready() { return !!(kit && city); },
   buildings: () => (city ? city.buildings.map((b) => ({id: b.id, repo: b.repo})) : []),
   roofOnScreen(id) { const b = byId.get(id); return b ? project(...roofPoint(b)) : null; },
-  pickAt: (x, y) => pick(x, y),
+  pickAt(x, y) { const b = kit && kit.pickAt(x, y); return b ? b.id : -1; },
   selected: () => selected,
-  setCamera(c) { Object.assign(cam, c); lastInput = performance.now(); },
+  setCamera(c) { Object.assign(cam, c); if (kit) kit.touch(); },
 };
 
 async function start() {
-  if (typeof createFleetCity !== "function") return fatal("Fleet City's engine didn't load.");
   try {
-    mod = await createFleetCity({
-      locateFile: (p) => "/city/" + p,
-      print: (t) => console.log(t),
-      printErr: (t) => console.warn(t),
+    mod = await StrataLoader.load({
+      script: "/city/city.js", factory: "createFleetCity", wasm: "/city/city.wasm", base: "/city/",
+      title: "Fleet City", fallback: {href: "/", text: "Open the 2D dashboard"},
     });
   } catch (e) {
-    return fatal("Fleet City's engine failed to start: " + e);
+    return;  // the loader is showing why, with the link to the 2D dashboard
   }
-  resize();
-  const sel = mod.stringToNewUTF8("#city-canvas");
-  const rc = mod._fc_init(sel, canvas.width, canvas.height, quality, reducedMotion ? 1 : 0, params.get("capture") === "1" ? 1 : 0);
-  mod._free(sel);
-  if (rc !== 0) {
-    return fatal(rc < 0 ? "This browser can't draw WebGL 2, which Fleet City needs."
-                        : "The 3D renderer failed to start (status " + rc + ").");
+  try {
+    kit = StrataKit.create({
+      module: mod, canvas, camera: cam, limits, reducedMotion, dprCap: 2,
+      idleOrbit: {rate: 0.0005}, hitRadius: (isCoarse) => (isCoarse ? 20 : 0),
+      frame, after: () => { placeLabels(); keepSlowBarClear(); }, pick, idOf, targets, onTap, onHover: hover, onKey, onRestore,
+      onSlow: () => StrataLoader.slow(),
+      onFatal: (code, msg) => fatal(msg),
+    });
+  } catch (e) {
+    return StrataLoader.fallback(e.code === "no-webgl2" ? "no-webgl2" : "engine",
+      e.code === "no-webgl2" ? "This browser can't draw WebGL 2, which Fleet City needs."
+                             : "The 3D renderer failed to start (status " + e.status + ").");
   }
-  settleUntil = performance.now() + SETTLE_MS;   // the first frames pay for shader compiles
   await poll();
   setInterval(poll, POLL_MS);
   canvas.focus({preventScroll: true});
-  requestAnimationFrame(frame);
+  kit.start();
+  if (kit.driven) kit.drive(0);
+  StrataLoader.done();
 }
+start();
 </script>
-<script src="/city/city.js" onload="start()" onerror="fatal('Fleet City\'s engine didn\'t load.')"></script>
 </body>
 </html>

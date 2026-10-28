@@ -1,46 +1,36 @@
 #!/usr/bin/env bash
-# Builds Fleet City (fleetcity/main.cpp) into gardener/web/city.{js,wasm},
-# the two files the hub serves at /city/. Both are committed, so gardener
-# itself stays stdlib-only Python with no build step; CI reruns this and
-# fails if the committed files differ from what the source builds.
+# Builds Fleet City (fleetcity/main.cpp) into gardener/web/city.{js,wasm}, and
+# copies the Strata web kit's page scripts (strata-kit.js, strata-loader.js)
+# beside them: the hub serves all four at /city/. All are committed, so
+# gardener itself stays stdlib-only Python with no build step; CI reruns this
+# and fails if the committed files differ from what the source builds.
 #
-# Needs emsdk 6.0.11 activated (the version Strata's release is built with:
-# everything linked into one .wasm must agree on it and on -fwasm-exceptions).
-# Strata comes from its v0.6.0 release, checked against a pinned SHA-256.
+# The shell around the city is the Strata web kit (docs/WEB.md in Strata,
+# "The web kit"), the same vendored copy the 3D garden builds on:
+# strata-kit/ at the repository's root, at the Strata commit in
+# strata-kit/PIN. The two kit scripts are shared with /3d, so this build and
+# garden3d/build.sh write the same bytes to gardener/web/. The engine is
+# Strata's v0.6.0 wasm release, checked against a pinned SHA-256; the kit
+# uses only its C ABI. Needs emsdk 6.0.11 activated (the version Strata's
+# release is built with: everything linked into one .wasm must agree on it
+# and on -fwasm-exceptions).
 set -euo pipefail
-
-STRATA_VERSION=0.6.0
-STRATA_SHA256=9973a0d0850abb0bfc58c20497b500a3d471033d6e04f73fcdb41382221b3016
-EMSDK_VERSION=6.0.11
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
-work="${FLEETCITY_WORK:-$here/.build}"
-mkdir -p "$work"
+kit="$repo/strata-kit"
 
-have="$(emcc --version | head -1 | sed -E 's/.* ([0-9]+\.[0-9]+\.[0-9]+) .*/\1/')"
-if [ "$have" != "$EMSDK_VERSION" ]; then
-  echo "fleetcity: emcc is $have; activate emsdk $EMSDK_VERSION first" >&2
-  exit 1
-fi
+# The vendored kit must be exactly what PIN names (update.sh writes both).
+(cd "$kit" && sha256sum -c --quiet SHA256SUMS)
 
-tarball="$work/strata-$STRATA_VERSION-wasm32-emscripten.tar.gz"
-if [ ! -f "$tarball" ]; then
-  curl -fsSL -o "$tarball.part" \
-    "https://github.com/Preponderous-Software/strata/releases/download/v$STRATA_VERSION/strata-$STRATA_VERSION-wasm32-emscripten.tar.gz"
-  mv "$tarball.part" "$tarball"
-fi
-echo "$STRATA_SHA256  $tarball" | sha256sum -c --quiet -
-rm -rf "$work/strata" && mkdir -p "$work/strata"
-tar xzf "$tarball" -C "$work/strata"
+export KIT_SOURCE="$here/main.cpp"
+export KIT_OUT="$repo/gardener/web"
+export KIT_NAME=city
+export KIT_EXPORT_NAME=createFleetCity
+export KIT_EXPORTS=_fc_set_city,_fc_set_palette,_fc_set_beacons,_fc_set_glows,_fc_set_selected,_fc_pick
+export KIT_WORK="${FLEETCITY_WORK:-$here/.build}"
+export EMSDK_VERSION=6.0.11
+export STRATA_VERSION=0.6.0
+export STRATA_SHA256=9973a0d0850abb0bfc58c20497b500a3d471033d6e04f73fcdb41382221b3016
 
-em++ "$here/main.cpp" "$work/strata/lib/libstrata.a" -I"$work/strata/include" \
-  -std=c++17 -O2 -fwasm-exceptions -Wall -Wextra \
-  -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sALLOW_MEMORY_GROWTH=1 \
-  -sENVIRONMENT=web -sMODULARIZE=1 -sEXPORT_NAME=createFleetCity \
-  -sEXPORTED_FUNCTIONS=_malloc,_free,_fc_init,_fc_resize,_fc_set_quality,_fc_set_city,_fc_set_palette,_fc_set_beacons,_fc_set_glows,_fc_set_selected,_fc_set_camera,_fc_set_sun,_fc_view_proj,_fc_pick,_fc_frame \
-  -sEXPORTED_RUNTIME_METHODS=HEAPF32,HEAPU8,stringToNewUTF8 \
-  -o "$work/city.js"
-
-cp "$work/city.js" "$work/city.wasm" "$repo/gardener/web/"
-ls -l "$repo/gardener/web/city.js" "$repo/gardener/web/city.wasm"
+"$kit/build-kit.sh"

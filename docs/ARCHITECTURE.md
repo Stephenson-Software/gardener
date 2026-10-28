@@ -118,14 +118,17 @@ gardener/
                        garden3d/build.sh builds from garden3d/main.cpp with
                        the Strata engine, and the Strata web kit's
                        web/strata-{kit,loader}.js, vendored in
-                       garden3d/strata-kit/) for both the dashboard and the hub
+                       strata-kit/ and shared with Fleet City) for both the
+                       dashboard and the hub
                        (see Dashboard's "The 3D garden")
     fleetcity.py     — Fleet City (RFC 0026) on the hub: build_city() joins
                        the hub's runs, garden lists and heartbeats with an
                        optional fleet snapshot and lays the city out for
                        /api/city; serves /city (web/city.html plus the
                        committed web/city.{js,wasm} that fleetcity/build.sh
-                       builds from fleetcity/main.cpp); render_still() draws
+                       builds from fleetcity/main.cpp on the same vendored
+                       Strata web kit as /3d, and the kit's two scripts);
+                       render_still() draws
                        it headless for `hub city-still` (see Hub's "Fleet City")
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests, one test_<module>.py per module above
