@@ -67,6 +67,7 @@ from gardener.cli import (
     fetch_issue_counts,
     fetch_open_issue_count,
     find_orphaned_pr,
+    grace_seconds,
     main,
     merge_eligible,
     positive_count,
@@ -949,6 +950,32 @@ class TestStaleDaysArg(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["score", "--stale-days", "0"]).stale_days, 0)
         self.assertEqual(parser.parse_args(["score"]).stale_days, parpt.DEFAULT_STALE_DAYS)
+
+
+class TestGraceSeconds(unittest.TestCase):
+    """`grace_seconds` is `stop -t`'s argparse `type=`: `nan` skipped the
+    grace period, `inf` never escalated to SIGKILL, and a negative value
+    was clamped to an immediate SIGKILL."""
+
+    def test_returns_zero_or_a_positive_value_as_a_float(self):
+        self.assertEqual(grace_seconds("0"), 0.0)
+        self.assertEqual(grace_seconds("2.5"), 2.5)
+
+    def test_raises_argument_type_error_for_a_value_stop_cannot_wait_for(self):
+        for bad in ["-1", "-0.5", "nan", "inf", "-inf", "ten", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                grace_seconds(bad)
+
+    def test_stop_rejects_a_bad_time_at_parse_time(self):
+        parser = build_parser()
+        for seconds in ("-1", "nan", "inf"):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["stop", "-t", seconds, "abc"])
+            self.assertEqual(ctx.exception.code, 2, seconds)
+
+    def test_stop_accepts_zero(self):
+        self.assertEqual(build_parser().parse_args(["stop", "-t", "0", "abc"]).time, 0.0)
 
 
 class TestDigestHours(unittest.TestCase):

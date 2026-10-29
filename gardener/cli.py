@@ -209,6 +209,23 @@ def stale_days_arg(value: str) -> int:
     return days
 
 
+def grace_seconds(value: str) -> float:
+    """argparse `type=` for `stop -t/--time`: a finite number of seconds, 0
+    or more. `sessions.stop` waits until `monotonic() + timeout`, so `nan`
+    never waited and SIGKILLed at once, and `inf` never escalated — a
+    `stop` on a session ignoring SIGTERM hung forever. A negative value was
+    clamped to 0, an immediate SIGKILL, which is the opposite of what
+    `docker stop -t -1` (wait indefinitely) means. `0` stays accepted:
+    SIGTERM then SIGKILL straight away is a deliberate choice."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = -1.0
+    if not 0 <= seconds < float("inf"):
+        raise argparse.ArgumentTypeError(f"must be a finite number of seconds, 0 or more, got: {value!r}")
+    return seconds
+
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2527,7 +2544,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="Stop every running session",
     )
     stop_parser.add_argument(
-        "-t", "--time", type=float, default=sessions.DEFAULT_STOP_TIMEOUT_SECONDS,
+        "-t", "--time", type=grace_seconds, default=sessions.DEFAULT_STOP_TIMEOUT_SECONDS,
         help="Seconds to wait after SIGTERM before escalating to SIGKILL "
              f"(default {sessions.DEFAULT_STOP_TIMEOUT_SECONDS:g})",
     )

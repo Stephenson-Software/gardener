@@ -594,7 +594,9 @@ leaves those running as orphans still holding the repo's clone directory —
 the exact failure that motivated these commands. `stop` collects the
 session pid's descendants from `/proc`, SIGTERMs the whole set deepest
 first, waits `--time` seconds (default 10, matching `docker stop`), and
-SIGKILLs whatever is still alive. Stopping is worth preferring over
+SIGKILLs whatever is still alive. `--time` must be a finite number, `0` or
+more: unlike `docker stop -t -1`, there is no wait-forever value, and a
+negative, `nan` or `inf` value is a usage error. Stopping is worth preferring over
 killing: an `overnight` given the chance to exit cleanly still writes the
 resume cursor that lets the next run pick up where it left off.
 
