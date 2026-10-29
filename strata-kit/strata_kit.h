@@ -52,8 +52,8 @@
 // The kit's own version, separate from the engine's: a page and its wasm are
 // built from one kit, and strata-kit.js checks they agree (sk_kit_version).
 #define STRATA_KIT_VERSION_MAJOR 1
-#define STRATA_KIT_VERSION_MINOR 0
-#define STRATA_KIT_VERSION_STRING "1.0"
+#define STRATA_KIT_VERSION_MINOR 1
+#define STRATA_KIT_VERSION_STRING "1.1"
 
 namespace strata_kit {
 
@@ -114,6 +114,7 @@ struct Host {
     uint32_t pointSeq = 0;
     int32_t lightsDrawn = 0;
     int32_t terrainSamples = 0;  // the host sets this when it uploads terrain
+    int32_t meshes = 0;          // the host sets this when it adds or removes meshes
     int32_t frames = 0;
     int32_t pointsRejected = 0;
 #ifdef __EMSCRIPTEN__
@@ -385,10 +386,11 @@ STRATA_KIT_EXPORT float sk_set_sun(double unixSeconds, double lat, double lon) {
 STRATA_KIT_EXPORT const float* sk_view_proj() { return strata_kit::host().viewProj; }
 
 // What the last frame drew: primitives, points, line segments, point lights,
-// terrain samples, quality, width, height, frames drawn, points rejected.
+// terrain samples, quality, width, height, frames drawn, points rejected,
+// meshes (kit 1.1; as the host set Host::meshes).
 STRATA_KIT_EXPORT const int32_t* sk_stats() {
     strata_kit::Host& h = strata_kit::host();
-    static int32_t s[10];
+    static int32_t s[11];
     s[0] = static_cast<int32_t>(h.items.size());
     s[1] = static_cast<int32_t>(h.points.size());
     s[2] = static_cast<int32_t>(h.lines.size() / 2);
@@ -399,6 +401,7 @@ STRATA_KIT_EXPORT const int32_t* sk_stats() {
     s[7] = h.height;
     s[8] = h.frames;
     s[9] = h.pointsRejected;
+    s[10] = h.meshes;
     return s;
 }
 

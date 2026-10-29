@@ -77,11 +77,21 @@ fi
 exports="_malloc,_free,_sk_init,_sk_restore,_sk_kit_version,_sk_resize,_sk_set_quality,_sk_set_camera,_sk_set_sun,_sk_view_proj,_sk_stats,_sk_frame"
 if [ -n "$KIT_EXPORTS" ]; then exports="$exports,$KIT_EXPORTS"; fi
 
+# The Module properties the glue reads: emsdk 6.0.11's default list
+# (src/settings.js, INCOMING_MODULE_JS_API) plus wasmBinary. Without it the
+# glue drops the bytes strata-loader.js already fetched (Module.wasmBinary)
+# and downloads the .wasm a second time.
+incoming="ENVIRONMENT,arguments,canvas,dynamicLibraries,elementPointerLock,instantiateWasm,locateFile"
+incoming="$incoming,monitorRunDependencies,noExitRuntime,noInitialRun,onAbort,onExit,onRuntimeInitialized,postRun"
+incoming="$incoming,preInit,preRun,print,printErr,setStatus,statusMessage,stderr,stdin,stdout,thisProgram,wasm"
+incoming="$incoming,websocket,wasmBinary"
+
 em++ "$KIT_SOURCE" "$STRATA_LIB" -I"$STRATA_INCLUDE" -I"$KIT_DIR" \
   -std=c++17 -O2 -fwasm-exceptions -Wall -Wextra \
   -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sALLOW_MEMORY_GROWTH=1 \
   -sENVIRONMENT=web -sMODULARIZE=1 -sEXPORT_NAME="$KIT_EXPORT_NAME" \
   -sEXPORTED_FUNCTIONS="$exports" \
+  -sINCOMING_MODULE_JS_API="$incoming" \
   -sEXPORTED_RUNTIME_METHODS=HEAPF32,HEAP32,stringToNewUTF8,UTF8ToString \
   -o "$KIT_WORK/$KIT_NAME.js"
 
