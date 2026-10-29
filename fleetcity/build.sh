@@ -10,7 +10,7 @@
 # strata-kit/ at the repository's root, at the Strata commit in
 # strata-kit/PIN. The two kit scripts are shared with /3d, so this build and
 # garden3d/build.sh write the same bytes to gardener/web/. The engine is
-# Strata's v0.6.0 wasm release, checked against a pinned SHA-256; the kit
+# Strata's v0.7.0 wasm release, checked against a pinned SHA-256; the kit
 # uses only its C ABI. Needs emsdk 6.0.11 activated (the version Strata's
 # release is built with: everything linked into one .wasm must agree on it
 # and on -fwasm-exceptions).
@@ -30,7 +30,7 @@ export KIT_EXPORT_NAME=createFleetCity
 export KIT_EXPORTS=_fc_set_city,_fc_set_palette,_fc_set_beacons,_fc_set_glows,_fc_set_selected,_fc_pick
 export KIT_WORK="${FLEETCITY_WORK:-$here/.build}"
 export EMSDK_VERSION=6.0.11
-export STRATA_VERSION=0.6.0
-export STRATA_SHA256=9973a0d0850abb0bfc58c20497b500a3d471033d6e04f73fcdb41382221b3016
+export STRATA_VERSION=0.7.0
+export STRATA_SHA256=1aab559eb2477f42bfbeae1cd2e3cf70fcb8aa8b28fc8dce16ba1e0ba855049f
 
 "$kit/build-kit.sh"

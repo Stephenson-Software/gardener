@@ -17,6 +17,21 @@
      // ... create the scene with StrataKit.create({module: mod, ...}), then:
      StrataLoader.done();
 
+   A host whose own loader already knows how far it has got (a .NET or
+   Unity-style boot that fetches its own files) shows the same overlay and
+   drives its bar itself:
+
+     if (StrataLoader.show({title: "the game", poster: "/poster.jpg"})) {
+       StrataLoader.progress(0.4, "Loading assemblies");  // 0..1, label optional
+       // ... boot; then:
+       StrataLoader.done();
+     }
+
+   show() takes load()'s display options (title, poster, trailer, fallback,
+   mount) and returns false, with the fallback showing, when WebGL 2 is
+   missing. progress(fraction, label) clamps the fraction to 0..1 and never
+   moves the bar back; the label (or the percentage) replaces the size line.
+
    What it shows, in an overlay it adds to the page (class sk-loader):
 
    - the poster (if any) as a blurred backdrop, and the title;
@@ -73,7 +88,7 @@
 @media (prefers-reduced-motion: reduce){.sk-loader,.sk-loader .sk-fill{transition:none}
   .sk-loader .sk-bar.sk-indeterminate .sk-fill{animation:none;width:100%;opacity:.5}}`;
 
-  let root = null, opts = {}, state = "idle";
+  let root = null, opts = {}, state = "idle", shown = 0;
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -115,12 +130,14 @@
     return root;
   }
 
-  function progress(got, total) {
+  // Sets the bar to `fraction` (0..1), or to indeterminate when it is null,
+  // and the line under it to `text`. Both progress paths draw through here.
+  function setBar(fraction, text) {
     if (!root) return;
     const bar = root.querySelector(".sk-bar"), fill = root.querySelector(".sk-fill");
     if (!bar) return;
-    if (total) {
-      const pct = Math.min(100, Math.round(got / total * 100));
+    if (fraction != null) {
+      const pct = Math.min(100, Math.round(fraction * 100));
       bar.classList.remove("sk-indeterminate");
       fill.style.width = pct + "%";
       bar.setAttribute("aria-valuenow", String(pct));
@@ -128,7 +145,42 @@
       bar.classList.add("sk-indeterminate");
       bar.removeAttribute("aria-valuenow");
     }
-    root.querySelector(".sk-size").textContent = sizeText(got, total);
+    root.querySelector(".sk-size").textContent = text;
+  }
+
+  // load()'s byte progress: `got` of `total` bytes (total 0 when unknown).
+  function byteProgress(got, total) {
+    setBar(total ? got / total : null, sizeText(got, total));
+  }
+
+  // A host's own progress: `fraction` of the way (clamped to 0..1, and never
+  // lower than the last call's), with an optional label for the line under
+  // the bar (else the percentage). Mounts the overlay if show() or load() has
+  // not; does nothing once the shell is done or showing the fallback.
+  function progress(fraction, label) {
+    if (state === "done" || state === "fallback") return;
+    const f = Number(fraction);
+    if (Number.isNaN(f)) return;
+    shown = Math.max(shown, Math.min(1, Math.max(0, f)));
+    if (state === "idle") state = "loading";
+    mount();
+    setBar(shown, label != null && label !== "" ? String(label) : `${Math.round(shown * 100)}%`);
+    const bar = root.querySelector(".sk-bar");
+    if (bar) {
+      if (label) bar.setAttribute("aria-valuetext", String(label));
+      else bar.removeAttribute("aria-valuetext");
+    }
+  }
+
+  // The overlay without load()'s fetch, for a host that boots its own way.
+  // Returns false (the fallback showing) when WebGL 2 is missing.
+  function show(o) {
+    opts = Object.assign({}, o);
+    state = "loading";
+    shown = 0;
+    mount();
+    if (!hasWebGL2()) { fallback("no-webgl2"); return false; }
+    return true;
   }
 
   function hasWebGL2() {
@@ -219,25 +271,25 @@
     let total = (!enc || enc === "identity") && header > 0 ? header : (statedBytes || 0);
     if (!res.body || !res.body.getReader) {
       const buf = await res.arrayBuffer();
-      progress(buf.byteLength, buf.byteLength);
+      byteProgress(buf.byteLength, buf.byteLength);
       return buf;
     }
     const reader = res.body.getReader();
     const chunks = [];
     let got = 0;
-    progress(0, total);
+    byteProgress(0, total);
     for (;;) {
       const {done, value} = await reader.read();
       if (done) break;
       chunks.push(value);
       got += value.byteLength;
       if (total && got > total) total = 0;  // the stated size was wrong: say bytes only
-      progress(got, total);
+      byteProgress(got, total);
     }
     const out = new Uint8Array(got);
     let o = 0;
     for (const c of chunks) { out.set(c, o); o += c.byteLength; }
-    progress(got, got);
+    byteProgress(got, got);
     return out.buffer;
   }
 
@@ -247,8 +299,9 @@
       const keep = [...box.childNodes];
       box.textContent = "";
       const msg = reason === "save-data" ? "Data saver is on."
-        : reason === "low-memory" ? "This device has little memory." : "Motion is reduced on this device.";
-      box.appendChild(el("p", "sk-msg", `${msg} The live view downloads ${opts.bytes ? mb(opts.bytes) + " MB" : "its engine"} and animates.`));
+        : reason === "low-memory" ? "This device has little memory." : "This device asks for reduced motion.";
+      const size = opts.bytes ? `a ${mb(opts.bytes)} MB download` : "a download";
+      box.appendChild(el("p", "sk-msg", `${msg} The live view is ${size} and is animated.`));
       const go = el("button", "", "Start the live view");
       go.type = "button";
       go.addEventListener("click", () => { box.textContent = ""; keep.forEach((n) => box.appendChild(n)); resolve(); });
@@ -267,6 +320,7 @@
   async function load(o) {
     opts = Object.assign({}, o);
     state = "loading";
+    shown = 0;
     mount();
     if (!hasWebGL2()) {
       fallback("no-webgl2");
@@ -311,9 +365,11 @@
   }
 
   // The kit could not go any lower and frames are still slow: offer the clip
-  // (or the fallback link) without taking the live view away.
+  // (or the fallback link) without taking the live view away. Once: a second
+  // call while the bar is up does nothing.
   function slow() {
     if (state === "fallback" || (!opts.trailer && !(opts.fallback && opts.fallback.href))) return;
+    if (document.querySelector(".sk-slow")) return;
     const bar = el("div", "sk-slow");
     bar.setAttribute("role", "status");
     bar.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:max(12px,env(safe-area-inset-bottom));" +
@@ -337,5 +393,5 @@
     document.body.appendChild(bar);
   }
 
-  window.StrataLoader = {load, done, fallback, slow, hasWebGL2, get state() { return state; }};
+  window.StrataLoader = {load, show, progress, done, fallback, slow, hasWebGL2, get state() { return state; }};
 })();

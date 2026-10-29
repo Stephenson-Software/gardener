@@ -45,7 +45,7 @@
    MIT licensed, as Strata. */
 (function () {
   "use strict";
-  const KIT_VERSION = "1.0";
+  const KIT_VERSION = "1.1";
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
@@ -68,6 +68,8 @@
     if (wasmKit && wasmKit.split(".")[0] !== KIT_VERSION.split(".")[0]) {
       console.warn(`strata-kit: page kit ${KIT_VERSION}, wasm kit ${wasmKit}; rebuild one of them`);
     }
+    // A 1.0 wasm's sk_stats has no mesh count (kit 1.1).
+    const statsHaveMeshes = !!wasmKit && (parseInt(wasmKit.split(".")[0], 10) > 1 || parseInt(wasmKit.split(".")[1], 10) >= 1);
 
     const forced = q.get("quality");
     const forcedQuality = forced != null && forced !== "" ? Math.min(Math.max(parseInt(forced, 10) || 0, 0), 2) : null;
@@ -251,6 +253,7 @@
       const s = mod._sk_stats() >> 2, h = mod.HEAP32;
       return {primitives: h[s], points: h[s + 1], lines: h[s + 2], lights: h[s + 3], terrain: h[s + 4],
               quality: h[s + 5], width: h[s + 6], height: h[s + 7], frames: h[s + 8], pointsRejected: h[s + 9],
+              meshes: statsHaveMeshes ? h[s + 10] : 0,
               dpr: kit.dpr, dprCap: kit.dprCap};
     };
     function adaptQuality(now) {
@@ -262,7 +265,7 @@
       if (fpsEl) {
         const st = kit.stats();
         fpsEl.textContent = `${(1000 / ms).toFixed(0)} fps · q${kit.quality} · ${kit.dpr.toFixed(2)}x · ` +
-          `${st.primitives} prims · ${st.points} pts · ${st.lines} lines · ${st.lights} lights · ${st.terrain} ground`;
+          `${st.primitives} prims · ${st.meshes} meshes · ${st.points} pts · ${st.lines} lines · ${st.lights} lights · ${st.terrain} ground`;
       }
       qStart = now; qFrames = 0;
       if (forcedQuality != null || now < settleUntil || ms <= slowMs) return;
