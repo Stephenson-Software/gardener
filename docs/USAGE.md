@@ -61,7 +61,9 @@ gardener update [--check]
   lines, not a second source of truth — `gardener status`'s sqlite db
   remains the one authoritative outcome record. If `--port` is already bound (e.g. a previous
   invocation still running), gardener picks a free one instead of failing
-  and says so on stderr.
+  and says so on stderr. `--port` (here and on `hub serve`) must be 1-65535;
+  `0` is a usage error rather than a request for an OS-chosen port, since
+  the server would never report which port it got.
 - **`gardener update [--check]`** — fast-forwards gardener's *own* checkout
   to `origin`; see [Self-update](#self-update) below. `--check` fetches and
   reports whether an update is available without applying it.

@@ -69,6 +69,7 @@ from gardener.cli import (
     find_orphaned_pr,
     grace_seconds,
     main,
+    port_arg,
     merge_eligible,
     positive_count,
     positive_hours,
@@ -976,6 +977,36 @@ class TestGraceSeconds(unittest.TestCase):
 
     def test_stop_accepts_zero(self):
         self.assertEqual(build_parser().parse_args(["stop", "-t", "0", "abc"]).time, 0.0)
+
+
+class TestPortArg(unittest.TestCase):
+    """`port_arg` is the `--port` type for `dashboard` and `hub serve`: a
+    port outside 0-65535 escaped `find_free_port` as an `OverflowError`
+    traceback, and `0` served on an OS-chosen port while printing `:0`."""
+
+    def test_returns_a_port_in_range(self):
+        self.assertEqual(port_arg("1"), 1)
+        self.assertEqual(port_arg("8765"), 8765)
+        self.assertEqual(port_arg("65535"), 65535)
+
+    def test_raises_argument_type_error_for_a_port_that_cannot_be_served_on(self):
+        for bad in ["0", "-1", "65536", "70000", "8765.5", "http", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                port_arg(bad)
+
+    def test_both_servers_reject_a_bad_port_at_parse_time(self):
+        parser = build_parser()
+        for argv in (["dashboard"], ["hub", "serve"]):
+            for port in ("0", "-1", "70000"):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        parser.parse_args([*argv, "--port", port])
+                self.assertEqual(ctx.exception.code, 2, (argv, port))
+
+    def test_both_servers_default_to_the_dashboard_port(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["dashboard"]).port, dashboard.DEFAULT_PORT)
+        self.assertEqual(parser.parse_args(["hub", "serve"]).port, dashboard.DEFAULT_PORT)
 
 
 class TestDigestHours(unittest.TestCase):

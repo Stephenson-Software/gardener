@@ -226,6 +226,21 @@ def grace_seconds(value: str) -> float:
     return seconds
 
 
+def port_arg(value: str) -> int:
+    """argparse `type=` for `dashboard --port` and `hub serve --port`. A
+    port outside 0-65535 makes `socket.bind` raise `OverflowError`, which
+    `dashboard.find_free_port` (catching only `OSError`) let escape as a
+    traceback; and `0` bound an OS-chosen port while both servers printed
+    `http://127.0.0.1:0`, a URL that reaches nothing."""
+    try:
+        port = int(value)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"must be a port number from 1 to 65535, got: {value!r}")
+    return port
+
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2612,7 +2627,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hub_serve.add_argument("--host", default="127.0.0.1",
                            help="Interface to bind (default 127.0.0.1; 0.0.0.0 in a container)")
-    hub_serve.add_argument("--port", type=int, default=dashboard.DEFAULT_PORT,
+    hub_serve.add_argument("--port", type=port_arg, default=dashboard.DEFAULT_PORT,
                            help=f"Port (default {dashboard.DEFAULT_PORT})")
     hub_serve.add_argument(
         "--data-dir", type=Path, default=None,
@@ -2684,7 +2699,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Serve a local read-only web UI over run history + the active tend/overnight log",
     )
     dashboard_parser.add_argument(
-        "--port", type=int, default=dashboard.DEFAULT_PORT,
+        "--port", type=port_arg, default=dashboard.DEFAULT_PORT,
         help=f"Port to bind on 127.0.0.1 (default {dashboard.DEFAULT_PORT}; picks a free "
              "port instead if this one is already in use)",
     )
