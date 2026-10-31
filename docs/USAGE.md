@@ -604,7 +604,9 @@ resume cursor that lets the next run pick up where it left off.
 
 `gardener kill <session>` sends one signal — `--signal` (default `KILL`,
 accepting `KILL`, `SIGKILL`, or `9`) — to the same process tree, with no
-grace period and no escalation. It then waits up to 2 seconds for the
+grace period and no escalation. Only a real signal is accepted: `0` (which
+only checks the process exists) or a number this system has no signal for
+is a usage error, even when no session matches. It then waits up to 2 seconds for the
 session to exit before reporting. Prefer it only for a session that is
 already wedged.
 

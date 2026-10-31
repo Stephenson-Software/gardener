@@ -2296,20 +2296,45 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 def _parse_signal(name: str) -> int:
     """`KILL`, `SIGKILL`, `9` — all three spellings `docker kill --signal`
-    accepts."""
+    accepts.
+
+    Only real, deliverable signals. A bare number used to be returned
+    unchecked, and a name was looked up with `getattr` on the whole
+    `signal` module: `0` (also reachable as `_DFL`/`_BLOCK`) is the
+    liveness probe, which delivers nothing, and an out-of-range number made
+    `os.kill` fail with `EINVAL`, which `sessions._signal_pids` skips. Both
+    left the session running and `kill` reporting it as possibly stuck in
+    an uninterruptible state."""
     raw = str(name).strip()
     if raw.isdigit():
-        return int(raw)
-    candidate = raw.upper()
-    if not candidate.startswith("SIG"):
-        candidate = "SIG" + candidate
+        number = int(raw)
+        if number in signal.valid_signals():
+            return number
+    else:
+        candidate = raw.upper()
+        if not candidate.startswith("SIG"):
+            candidate = "SIG" + candidate
+        try:
+            return int(signal.Signals[candidate])
+        except KeyError:
+            pass
+    raise ValueError(
+        f"unknown signal '{name}' — pass a name like KILL/TERM/INT or a "
+        "number like 9"
+    )
+
+
+def signal_arg(value: str) -> str:
+    """argparse `type=` for `kill -s/--signal`, so a bad signal is a usage
+    error even when no session matches (`cmd_kill` resolves its targets
+    first). Returns `value` unchanged; `cmd_kill` keeps calling
+    `_parse_signal` itself, the backstop for a Namespace built without
+    argparse."""
     try:
-        return int(getattr(signal, candidate))
-    except AttributeError:
-        raise ValueError(
-            f"unknown signal '{name}' — pass a name like KILL/TERM/INT or a "
-            "number like 9"
-        ) from None
+        _parse_signal(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return value
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
@@ -2579,7 +2604,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="Signal every running session",
     )
     kill_parser.add_argument(
-        "-s", "--signal", default="KILL",
+        "-s", "--signal", type=signal_arg, default="KILL",
         help="Signal to send, by name or number (default KILL)",
     )
     kill_parser.add_argument("--state-dir", type=Path, default=None, help=argparse.SUPPRESS)

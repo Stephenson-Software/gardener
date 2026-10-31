@@ -107,7 +107,11 @@ zero or negative `status --limit` or `score --limit`, and
 too large for `parpt.repos_needing_score`'s cutoff arithmetic while still
 accepting `0`, and `grace_seconds`, which rejects a negative, `nan` or
 `inf` `stop -t/--time` while still accepting `0`, and `port_arg`, which
-rejects a `dashboard`/`hub serve` `--port` outside 1-65535), the coupling between the
+rejects a `dashboard`/`hub serve` `--port` outside 1-65535, and
+`signal_arg`, which rejects a `kill -s/--signal` that is not a real,
+deliverable signal — `0`, an out-of-range number, or a `signal` module
+attribute such as `_DFL` — through the same `_parse_signal` that
+`cmd_kill` still calls itself), the coupling between the
 parser and `docs/USAGE.md` (every long flag argparse actually *shows* must
 appear in the command reference — flags declared `help=argparse.SUPPRESS`,
 i.e. the path/state overrides and the `--random-seed` test hook, are
