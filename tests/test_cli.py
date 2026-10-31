@@ -57,6 +57,7 @@ from gardener.cli import (
     cmd_tend,
     cmd_update,
     _parse_signal,
+    signal_arg,
     _session_target,
     DENIAL_MAX_CHARS,
     DENIAL_PRINT_LIMIT,
@@ -4201,6 +4202,38 @@ class TestParseSignal(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             _parse_signal("NOPE")
         self.assertIn("KILL/TERM/INT", str(ctx.exception))
+
+    def test_rejects_values_that_deliver_no_signal(self):
+        """`0` is the liveness probe and an out-of-range number fails with
+        EINVAL, which `_signal_pids` skips; `_DFL`/`_IGN`/`_BLOCK` are
+        `signal` module attributes, not signals."""
+        for value in ("0", "999", "99999999999", "_DFL", "_IGN", "_BLOCK", "SIG_DFL"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _parse_signal(value)
+
+
+class TestSignalArg(unittest.TestCase):
+    def setUp(self):
+        self.parser = build_parser()
+
+    def test_kill_rejects_a_bad_signal_at_parse_time(self):
+        for value in ("NOPE", "0", "999", "_DFL"):
+            with self.subTest(value=value):
+                with redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as ctx:
+                        self.parser.parse_args(["kill", "--all", "--signal", value])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("unknown signal", err.getvalue())
+
+    def test_raises_an_argparse_error_and_passes_a_good_value_through(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            signal_arg("0")
+        self.assertEqual(signal_arg("KILL"), "KILL")
+
+    def test_kill_keeps_the_spelling_it_was_given(self):
+        self.assertEqual(self.parser.parse_args(["kill", "-s", "sigterm", "abc"]).signal, "sigterm")
+        self.assertEqual(self.parser.parse_args(["kill", "-s", "15", "abc"]).signal, "15")
 
 
 class TestSessionTarget(unittest.TestCase):
