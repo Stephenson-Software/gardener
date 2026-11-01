@@ -35,7 +35,7 @@ logic, `cli.py`'s `cmd_overnight` for the real orchestration) dispatches
 resuming across invocations via a small cursor file when the garden is
 bigger than one budget window. `--strategy round-robin|issue-count|random|parpt`
 (default `random`, see `overnight.DEFAULT_OVERNIGHT_STRATEGY`) picks the
-attempt order, and `--concurrency` (default `2`, see
+attempt order, and `--concurrency` (default `1`, see
 `overnight.DEFAULT_OVERNIGHT_CONCURRENCY`) how many repos share a batch —
 `overnight.py`'s `Strategy` enum and its module docstring's "Repo-selection
 strategies and the resume cursor" section is the source of truth for how

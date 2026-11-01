@@ -189,6 +189,35 @@ def positive_count(value: str) -> int:
     return count
 
 
+def concurrency_arg(value: str) -> int:
+    """argparse `type=` for `overnight --concurrency`. `cmd_overnight`
+    clamped `0` or a negative value to 1, so a typo silently ran a
+    sequential night instead of the batching asked for. The clamp stays as
+    the backstop for a synthetic Namespace that never went through
+    argparse; this only turns the typo into a usage error."""
+    try:
+        return positive_count(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive whole number of repos (1 for sequential), got: {value!r}"
+        )
+
+
+def non_negative_count(value: str) -> int:
+    """argparse `type=` for `overnight --rescore-limit` and
+    `--broken-first-limit`, where `0` documentedly turns the step off. A
+    negative value turned it off too — `repos_needing_score` clamps the
+    slice to 0 and the broken-first step runs only when the limit is
+    `> 0` — so `-5` meant "off" while reading like a count."""
+    try:
+        count = int(value)
+    except ValueError:
+        count = -1
+    if count < 0:
+        raise argparse.ArgumentTypeError(f"must be a whole number, 0 or more, got: {value!r}")
+    return count
+
+
 def stale_days_arg(value: str) -> int:
     """argparse `type=` for `score --stale-days`. A value too large for
     `parpt.repos_needing_score`'s `now - timedelta(days=...)` raised an
@@ -1657,7 +1686,9 @@ def cmd_overnight(args: argparse.Namespace) -> int:
 
     # An absent attribute (a synthetic Namespace, not the real parser) falls
     # back to the default; an explicit 0/negative is still clamped to 1
-    # rather than silently widening to the default.
+    # rather than silently widening to the default. The real parser rejects
+    # those at parse time (`concurrency_arg`), so the clamp only ever sees
+    # a synthetic Namespace.
     requested_concurrency = getattr(args, "concurrency", None)
     if requested_concurrency is None:
         requested_concurrency = overnight.DEFAULT_OVERNIGHT_CONCURRENCY
@@ -2473,7 +2504,7 @@ def build_parser() -> argparse.ArgumentParser:
              f"(default ${TEND_TIMEOUT_ENV} or {TEND_DEFAULT_TIMEOUT_SECONDS})",
     )
     overnight_parser.add_argument(
-        "--concurrency", type=int, default=overnight.DEFAULT_OVERNIGHT_CONCURRENCY,
+        "--concurrency", type=concurrency_arg, default=overnight.DEFAULT_OVERNIGHT_CONCURRENCY,
         help=f"How many repos to tend at once (default "
              f"{overnight.DEFAULT_OVERNIGHT_CONCURRENCY}). Each one dispatches a "
              "`claude -p` session simultaneously via separate OS "
@@ -2506,13 +2537,13 @@ def build_parser() -> argparse.ArgumentParser:
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument(
-        "--broken-first-limit", type=int, default=broken.DEFAULT_BROKEN_FIRST_LIMIT,
+        "--broken-first-limit", type=non_negative_count, default=broken.DEFAULT_BROKEN_FIRST_LIMIT,
         help=(f"With --strategy parpt, how many repos with red CI or a held release "
               f"go first tonight, ahead of RICE and the cycle (default "
               f"{broken.DEFAULT_BROKEN_FIRST_LIMIT}; 0 turns it off)"),
     )
     overnight_parser.add_argument(
-        "--rescore-limit", type=int, default=parpt.DEFAULT_RESCORE_LIMIT,
+        "--rescore-limit", type=non_negative_count, default=parpt.DEFAULT_RESCORE_LIMIT,
         help=f"With --strategy parpt: how many never-scored or stale repos to score "
              f"before ordering (default {parpt.DEFAULT_RESCORE_LIMIT}; 0 = order by the "
              f"scores already stored)",
