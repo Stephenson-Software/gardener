@@ -72,6 +72,8 @@ from gardener.cli import (
     main,
     port_arg,
     merge_eligible,
+    concurrency_arg,
+    non_negative_count,
     positive_count,
     positive_hours,
     positive_seconds,
@@ -919,6 +921,53 @@ class TestPositiveCount(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["score", "--limit", "3"]).limit, 3)
         self.assertEqual(parser.parse_args(["score"]).limit, parpt.DEFAULT_RESCORE_LIMIT)
+
+
+class TestOvernightCountArgs(unittest.TestCase):
+    """`overnight --concurrency` used to be clamped to 1 when 0/negative,
+    and `--rescore-limit`/`--broken-first-limit` treated a negative value
+    as `0` (off) — each a typo that changed the night silently."""
+
+    def test_concurrency_arg_returns_a_positive_value(self):
+        self.assertEqual(concurrency_arg("1"), 1)
+        self.assertEqual(concurrency_arg("3"), 3)
+
+    def test_concurrency_arg_rejects_a_non_positive_or_non_integer_value(self):
+        for bad in ["0", "-1", "1.5", "two", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                concurrency_arg(bad)
+
+    def test_non_negative_count_accepts_zero_and_positive(self):
+        self.assertEqual(non_negative_count("0"), 0)
+        self.assertEqual(non_negative_count("5"), 5)
+
+    def test_non_negative_count_rejects_a_negative_or_non_integer_value(self):
+        for bad in ["-1", "-5", "1.5", "five", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                non_negative_count(bad)
+
+    def test_overnight_rejects_bad_counts_at_parse_time(self):
+        parser = build_parser()
+        for flag, value in (
+            ("--concurrency", "0"),
+            ("--concurrency", "-2"),
+            ("--rescore-limit", "-1"),
+            ("--broken-first-limit", "-1"),
+        ):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["overnight", flag, value])
+            self.assertEqual(ctx.exception.code, 2, (flag, value))
+
+    def test_overnight_accepts_zero_limits_and_keeps_the_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["overnight", "--rescore-limit", "0", "--broken-first-limit", "0",
+                                  "--concurrency", "2"])
+        self.assertEqual((args.rescore_limit, args.broken_first_limit, args.concurrency), (0, 0, 2))
+        args = parser.parse_args(["overnight"])
+        self.assertEqual(args.rescore_limit, parpt.DEFAULT_RESCORE_LIMIT)
+        self.assertEqual(args.broken_first_limit, cli.broken.DEFAULT_BROKEN_FIRST_LIMIT)
+        self.assertEqual(args.concurrency, overnight.DEFAULT_OVERNIGHT_CONCURRENCY)
 
 
 class TestStaleDaysArg(unittest.TestCase):
