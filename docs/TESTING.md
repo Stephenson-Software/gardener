@@ -103,6 +103,10 @@ negative or `nan` `overnight --hours`, and `digest_hours`, which rejects
 those plus `inf` or any window too large for `hub.digest`'s date
 arithmetic on `hub digest --hours`, and `positive_count`, which rejects a
 zero or negative `status --limit` or `score --limit`, and
+`concurrency_arg`, which rejects a zero or negative `overnight
+--concurrency` (formerly clamped to 1 silently), and `non_negative_count`,
+which rejects a negative `overnight --rescore-limit` or
+`--broken-first-limit` while still accepting `0`, and
 `stale_days_arg`, which rejects a negative `score --stale-days` or one
 too large for `parpt.repos_needing_score`'s cutoff arithmetic while still
 accepting `0`, and `grace_seconds`, which rejects a negative, `nan` or

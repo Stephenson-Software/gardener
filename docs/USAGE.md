@@ -324,7 +324,8 @@ first. The exception is `--broken-first-limit` (default 5; `0` turns it
 off): repos with red CI on their default branch, or a release held by
 the release gate in `GARDENER_RELEASE_LEDGER` (env var or `notify.env`),
 go first tonight even if already tended this cycle, unless gardener
-tended them in the last 3 days.
+tended them in the last 3 days. A negative value for either limit is a
+usage error (exit 2), as is a zero or negative `--concurrency`.
 
 ## `gardener doctor` — pre-flight check on gardener's own state
 
