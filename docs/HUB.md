@@ -60,8 +60,8 @@ docker run -d --name gardener-hub -p 127.0.0.1:8765:8765 -v gardener-hub-data:/d
   -e GARDENER_HUB_OPERATOR_BASIC_SHA256='<digest>' gardener-hub
 ```
 
-With no operator credential, the container exits with status 2 instead of
-serving. Measured on a 2-vCPU Linode, it idled at about 16 MiB after twenty
+With no operator credential or a malformed `GARDENER_HUB_DEVICE_TOKENS`, the
+container exits with status 2 instead of serving. Measured on a 2-vCPU Linode, it idled at about 16 MiB after twenty
 dashboard polls, so a 64–128 MiB limit is plenty.
 
 Back up the store with SQLite's online backup, not a file copy (the store

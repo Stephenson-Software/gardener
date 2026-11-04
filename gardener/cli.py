@@ -270,6 +270,23 @@ def port_arg(value: str) -> int:
     return port
 
 
+def device_name_arg(value: str) -> str:
+    """argparse `type=` for `hub token --device`, whose value is printed
+    into a `name:digest` entry for the comma-separated
+    `GARDENER_HUB_DEVICE_TOKENS`. A comma splits that entry and an empty
+    name leaves it `:digest`; `hub.ServerAuth.from_env` refuses either, so
+    pasting one locked every device out of a hub that would no longer
+    start. Surrounding whitespace and control characters parse, but `box `
+    became a second device beside `box` on every page that names one. A
+    colon stays accepted: `from_env` splits on the last one, so it round
+    trips."""
+    if not value or value != value.strip() or "," in value or not value.isprintable():
+        raise argparse.ArgumentTypeError(
+            f"must be a name with no comma, control character or surrounding spaces, got: {value!r}"
+        )
+    return value
+
+
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
 
 # The conventions repo may be private while the target is public: a run
@@ -2731,7 +2748,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Directory holding Strata's Python binding (default: $GARDENER_STRATA_PYTHON)")
     hub_city.set_defaults(func=cmd_hub_city_still)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
-    hub_token.add_argument("--device", required=True,
+    hub_token.add_argument("--device", required=True, type=device_name_arg,
                            help="The name the hub will show this device's runs under")
     hub_token.set_defaults(func=cmd_hub_token)
 

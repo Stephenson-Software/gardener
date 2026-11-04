@@ -1249,7 +1249,11 @@ def serve(
     data_dir: Path,
     env: Mapping[str, str] = os.environ,
 ) -> int:
-    auth = ServerAuth.from_env(env)
+    try:
+        auth = ServerAuth.from_env(env)
+    except ValueError as e:
+        print(f"gardener hub: refusing to start — {e}", file=sys.stderr)
+        return 2
     problems = auth.problems()
     if problems:
         for p in problems:

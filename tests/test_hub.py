@@ -173,6 +173,13 @@ class TestServerAuth(unittest.TestCase):
             self.assertEqual(hub.serve("127.0.0.1", 0, Path(d), env={}), 2)
         self.assertIn("refusing to start", err.getvalue())
 
+    def test_serve_exits_2_rather_than_raising_on_a_malformed_device_token_entry(self):
+        env = dict(_env(), **{hub.DEVICE_TOKENS_ENV: "box:not-a-digest"})
+        with tempfile.TemporaryDirectory() as d, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(hub.serve("127.0.0.1", 0, Path(d), env=env), 2)
+        self.assertIn("refusing to start", err.getvalue())
+        self.assertIn(hub.DEVICE_TOKENS_ENV, err.getvalue())
+
 
 class TestPush(_HubTestCase):
     def test_push_copies_the_outbox_and_marks_it_pushed(self):
@@ -715,6 +722,25 @@ class TestMintToken(unittest.TestCase):
         self.assertEqual(lines[3], f"phone:{hub.token_digest(token)}")
         self.assertEqual(hub.ServerAuth.from_env(
             {hub.DEVICE_TOKENS_ENV: lines[3]}).device_for_token(token), "phone")
+
+    def test_a_name_that_would_break_the_token_list_is_a_usage_error(self):
+        for name in ("", "   ", "a,b", "box ", " box", "two\nlines", "tab\there"):
+            with self.subTest(name=name), redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as caught:
+                    cli.build_parser().parse_args(["hub", "token", "--device", name])
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn("--device", err.getvalue())
+
+    def test_every_accepted_name_round_trips_beside_another_entry(self):
+        for name in ("phone", "my box", "a:b", "télé"):
+            with self.subTest(name=name):
+                args = cli.build_parser().parse_args(["hub", "token", "--device", name])
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(args.func(args), 0)
+                lines = [l.strip() for l in out.getvalue().splitlines()]
+                other = f"box:{'0' * 64}"
+                auth = hub.ServerAuth.from_env({hub.DEVICE_TOKENS_ENV: f"{other},{lines[3]}"})
+                self.assertEqual(auth.device_for_token(lines[1]), name)
 
 
 if __name__ == "__main__":
