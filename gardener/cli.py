@@ -65,6 +65,7 @@ from gardener.dispatch import (
 # GitHub owners can't begin with a dot, and keeping the first character
 # alphanumeric is what rejects `--upload-pack=x/y` and `/leading-slash`.
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/(?!\.\.?$)[A-Za-z0-9.][A-Za-z0-9._-]*$")
+DEVICE_NAME_RE = re.compile(r"[\w.-]+(?: [\w.-]+)*")
 
 # Per-command timeouts for the cache-clone refresh in
 # `clone_or_refresh_target_repo`. The fetch/checkout steps are
@@ -272,17 +273,19 @@ def port_arg(value: str) -> int:
 
 def device_name_arg(value: str) -> str:
     """argparse `type=` for `hub token --device`, whose value is printed
-    into a `name:digest` entry for the comma-separated
-    `GARDENER_HUB_DEVICE_TOKENS`. A comma splits that entry and an empty
-    name leaves it `:digest`; `hub.ServerAuth.from_env` refuses either, so
-    pasting one locked every device out of a hub that would no longer
-    start. Surrounding whitespace and control characters parse, but `box `
-    became a second device beside `box` on every page that names one. A
-    colon stays accepted: `from_env` splits on the last one, so it round
-    trips."""
-    if not value or value != value.strip() or "," in value or not value.isprintable():
+    into a `name:digest` entry to paste, inside quotes, into the
+    comma-separated `GARDENER_HUB_DEVICE_TOKENS`. A comma splits that entry
+    and an empty or blank name leaves it `:digest`;
+    `hub.ServerAuth.from_env` refuses either, so one bad paste kept the hub
+    from starting for every device. An apostrophe ends the quotes in
+    `docs/HUB.md`'s `export` and `docker run` lines, and a trailing space
+    made `box ` a second device beside `box`. So this allows only what is
+    safe at every step rather than listing what isn't. It checks only names
+    being minted: `from_env` keeps accepting whatever it did, so a hub's
+    existing entries still load."""
+    if not DEVICE_NAME_RE.fullmatch(value):
         raise argparse.ArgumentTypeError(
-            f"must be a name with no comma, control character or surrounding spaces, got: {value!r}"
+            f"must be letters, digits, '.', '_' or '-', with single spaces between words, got: {value!r}"
         )
     return value
 

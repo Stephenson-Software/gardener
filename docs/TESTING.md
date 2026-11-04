@@ -339,10 +339,11 @@ queued, every non-`/healthz` route refusing anonymous requests, a device
 token reading `/api/v1/` but not the dashboard, the garden as the union of
 pushed lists, and `/live` named per-device. `TestServerAuth` covers `serve`
 exiting 2 on a missing credential or a malformed device token entry, and
-`TestMintToken` covers `cli.device_name_arg`: a `hub token --device` that
-would break the comma-separated token list is a usage error, and every
-accepted name round trips through `ServerAuth.from_env` beside another
-entry. `TestDeviceHealth` covers
+a mis-pasted raw token never appearing in the error, and `TestMintToken`
+covers `cli.device_name_arg`: a `hub token --device` that would not survive
+being pasted into the quoted, comma-separated token list is a usage error,
+and every accepted name round trips through `ServerAuth.from_env` beside
+another entry. `TestDeviceHealth` covers
 what only the hub can see, with `now` injected: the 36 h quiet flag and its
 boundary, sessions walked per device so two devices' nights don't
 interleave, `all_errors` cleared by one success, `/api/v1/devices` naming

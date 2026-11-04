@@ -180,6 +180,16 @@ class TestServerAuth(unittest.TestCase):
         self.assertIn("refusing to start", err.getvalue())
         self.assertIn(hub.DEVICE_TOKENS_ENV, err.getvalue())
 
+    def test_a_mis_pasted_raw_token_is_never_echoed(self):
+        token = hub.mint_token()
+        for entry in (token, f"phone:{token}"):
+            with self.subTest(entry=entry):
+                env = {hub.DEVICE_TOKENS_ENV: f"box:{'0' * 64},{entry}"}
+                with self.assertRaises(ValueError) as caught:
+                    hub.ServerAuth.from_env(env)
+                self.assertIn("entry 2", str(caught.exception))
+                self.assertNotIn(token[:8], str(caught.exception))
+
 
 class TestPush(_HubTestCase):
     def test_push_copies_the_outbox_and_marks_it_pushed(self):
@@ -724,7 +734,8 @@ class TestMintToken(unittest.TestCase):
             {hub.DEVICE_TOKENS_ENV: lines[3]}).device_for_token(token), "phone")
 
     def test_a_name_that_would_break_the_token_list_is_a_usage_error(self):
-        for name in ("", "   ", "a,b", "box ", " box", "two\nlines", "tab\there"):
+        for name in ("", "   ", "a,b", "box ", " box", "two\nlines", "tab\there",
+                     "dan's phone", "a:b", "$HOME", "double  space"):
             with self.subTest(name=name), redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit) as caught:
                     cli.build_parser().parse_args(["hub", "token", "--device", name])
@@ -732,7 +743,7 @@ class TestMintToken(unittest.TestCase):
                 self.assertIn("--device", err.getvalue())
 
     def test_every_accepted_name_round_trips_beside_another_entry(self):
-        for name in ("phone", "my box", "a:b", "télé"):
+        for name in ("phone", "my box", "box-1.lan", "a_b", "télé"):
             with self.subTest(name=name):
                 args = cli.build_parser().parse_args(["hub", "token", "--device", name])
                 with redirect_stdout(io.StringIO()) as out:

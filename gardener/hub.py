@@ -404,14 +404,17 @@ class ServerAuth:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "ServerAuth":
         tokens: dict[str, str] = {}
-        for entry in (env.get(DEVICE_TOKENS_ENV) or "").split(","):
+        for position, entry in enumerate((env.get(DEVICE_TOKENS_ENV) or "").split(","), start=1):
             entry = entry.strip()
             if not entry:
                 continue
             name, sep, digest = entry.rpartition(":")
             if not sep or not name or len(digest) != 64:
+                # Never the entry's text: `hub token` prints the raw token
+                # right above the digest, so a mis-paste would put a usable
+                # credential in the hub's logs.
                 raise ValueError(
-                    f"{DEVICE_TOKENS_ENV}: expected device:sha256hex entries, got {entry[:40]!r}"
+                    f"{DEVICE_TOKENS_ENV}: entry {position} is not a device:sha256hex pair"
                 )
             tokens[digest.lower()] = name
         userauth = (env.get(USERAUTH_URL_ENV) or "").strip().rstrip("/") or None
