@@ -229,8 +229,8 @@ commands are:
 
 | Command | What it does |
 |---|---|
-| `gardener hub serve [--host H] [--port P] [--data-dir D]` | Runs the hub. Refuses to start without an operator credential. `--host` defaults to `127.0.0.1`; use `0.0.0.0` in a container behind TLS. `--data-dir` defaults to `<state dir>/hub`. |
-| `gardener hub token --device NAME` | Mints a device token, printing the token (for the device's `hub.env`) and the `NAME:sha256` entry for the hub's `GARDENER_HUB_DEVICE_TOKENS`. |
+| `gardener hub serve [--host H] [--port P] [--data-dir D]` | Runs the hub. Refuses to start without an operator credential, or on a `GARDENER_HUB_DEVICE_TOKENS` entry that isn't a `name:digest` pair. `--host` defaults to `127.0.0.1`; use `0.0.0.0` in a container behind TLS. `--data-dir` defaults to `<state dir>/hub`. |
+| `gardener hub token --device NAME` | Mints a device token, printing the token (for the device's `hub.env`) and the `NAME:sha256` entry for the hub's `GARDENER_HUB_DEVICE_TOKENS`. `NAME` may hold letters, digits, `.`, `_`, `-` and single spaces between words; anything else is a usage error, since a printed entry has to survive being pasted into quotes and into that comma-separated list. |
 | `gardener hub sync` | Pushes every run this device hasn't had acknowledged, with no time limit: the backfill after configuring a device, and the retry after an outage. Safe to repeat. |
 | `gardener hub status` | Shows this device's hub URL, device name, and how many runs are queued, then whether the hub holds exactly the runs pushed from here (exits 1 on a mismatch). One request; with the hub unreachable it says so and still answers the local part. |
 | `gardener hub devices [--json] [--data-dir D]` | On the hub: each device's run count, newest run, and latest session, flagged `QUIET` (nothing in 36 h) or `ALL-ERRORS`. See `docs/HUB.md`'s "Watching the devices". |

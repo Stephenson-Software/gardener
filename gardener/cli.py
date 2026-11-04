@@ -65,6 +65,7 @@ from gardener.dispatch import (
 # GitHub owners can't begin with a dot, and keeping the first character
 # alphanumeric is what rejects `--upload-pack=x/y` and `/leading-slash`.
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/(?!\.\.?$)[A-Za-z0-9.][A-Za-z0-9._-]*$")
+DEVICE_NAME_RE = re.compile(r"[\w.-]+(?: [\w.-]+)*")
 
 # Per-command timeouts for the cache-clone refresh in
 # `clone_or_refresh_target_repo`. The fetch/checkout steps are
@@ -268,6 +269,25 @@ def port_arg(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError(f"must be a port number from 1 to 65535, got: {value!r}")
     return port
+
+
+def device_name_arg(value: str) -> str:
+    """argparse `type=` for `hub token --device`, whose value is printed
+    into a `name:digest` entry to paste, inside quotes, into the
+    comma-separated `GARDENER_HUB_DEVICE_TOKENS`. A comma splits that entry
+    and an empty or blank name leaves it `:digest`;
+    `hub.ServerAuth.from_env` refuses either, so one bad paste kept the hub
+    from starting for every device. An apostrophe ends the quotes in
+    `docs/HUB.md`'s `export` and `docker run` lines, and a trailing space
+    made `box ` a second device beside `box`. So this allows only what is
+    safe at every step rather than listing what isn't. It checks only names
+    being minted: `from_env` keeps accepting whatever it did, so a hub's
+    existing entries still load."""
+    if not DEVICE_NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"must be letters, digits, '.', '_' or '-', with single spaces between words, got: {value!r}"
+        )
+    return value
 
 
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "align_repo.md.tmpl"
@@ -2731,7 +2751,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Directory holding Strata's Python binding (default: $GARDENER_STRATA_PYTHON)")
     hub_city.set_defaults(func=cmd_hub_city_still)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
-    hub_token.add_argument("--device", required=True,
+    hub_token.add_argument("--device", required=True, type=device_name_arg,
                            help="The name the hub will show this device's runs under")
     hub_token.set_defaults(func=cmd_hub_token)
 
