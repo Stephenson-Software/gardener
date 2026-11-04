@@ -62,6 +62,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -76,7 +77,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, NamedTuple, Optional, Sequence
 
 from gardener import __version__, dashboard, fleetcity, garden, garden3d, merge_allowlist, notify, state
 
@@ -108,7 +109,24 @@ PUSH_DEADLINE_SECONDS = 20.0
 #: the load on UserAuth from a 4 s poll and how long a revoked session
 #: keeps working here.
 VALIDATE_CACHE_SECONDS = 60.0
+#: How long a refresh exchange's result is handed to any other request
+#: presenting the same old token. Tabs and the 4 s poll race each other, and
+#: a refresh token is single-use: a second exchange of the same one is
+#: reuse, which ends the whole session at UserAuth.
+REFRESH_GRACE_SECONDS = 60.0
+COOKIE_ATTRIBUTES = "Path=/; HttpOnly; Secure; SameSite=Strict"
 SESSION_COOKIE = "gardener_hub_session"
+REFRESH_COOKIE = "gardener_hub_refresh"
+#: Lifetime of the refresh cookie: UserAuth's default refresh lifetime. It
+#: only has to be no shorter than UserAuth's. If it outlives the token, the
+#: exchange is refused and the operator signs in again.
+REFRESH_COOKIE_SECONDS = 30 * 24 * 60 * 60
+#: Statuses that mean UserAuth looked at the credential and refused it.
+#: Anything else (429, a 5xx, a proxy's 404) says nothing about the
+#: session, so it must not sign anyone out.
+REJECTED_STATUSES = (400, 401, 403)
+#: What a token may be before it goes into a Set-Cookie header.
+COOKIE_SAFE_VALUE = re.compile(r"[A-Za-z0-9._~-]+")
 MAX_SUMMARY_CHARS = 64 * 1024
 
 
@@ -454,21 +472,42 @@ class ServerAuth:
         return None
 
 
+class UserAuthUnavailable(Exception):
+    """UserAuth gave no answer about a credential. Unlike a refusal, this
+    says nothing about the session, so nobody is signed out over it."""
+
+
+class SessionTokens(NamedTuple):
+    access: str
+    #: None only if UserAuth did not send one; the session then ends with
+    #: the access token, as it did before refresh existed.
+    refresh: Optional[str]
+
+
 class UserAuthClient:
-    """Signs operators in through a UserAuth service and checks their
-    sessions, caching each `/session/validate` answer for
+    """Signs operators in through a UserAuth service, checks their sessions
+    and renews them, caching each `/session/validate` answer for
     `VALIDATE_CACHE_SECONDS`.
 
-    Contract (UserAuth at 4b93c13): `POST /login` with JSON
+    Contract (UserAuth at c58ab15): `POST /login` with JSON
     `{username, password}` answers `{token, tokenType, expiresAt,
     refreshToken}`; `GET /session/validate` with the token as a Bearer
-    answers `{valid, username, roles, ...}` and refuses a revoked token."""
+    answers `{valid, username, roles, ...}` and refuses a revoked token;
+    `POST /token/refresh` with JSON `{refreshToken}` answers the login shape,
+    and 401 for an unknown, expired or reused token. A refresh token is
+    single-use, and reusing one revokes the whole session. `POST /logout`
+    needs a live access token and ends the session, refresh tokens included."""
 
     def __init__(self, base_url: str, clock: Callable[[], float] = time.monotonic):
         self.base_url = base_url
         self.clock = clock
         self._cache: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
+        #: digest(old refresh token) -> (result, kept until). A None result
+        #: is a refusal, kept so a racing request gets the same answer.
+        self._refreshed: dict[str, tuple[Optional[SessionTokens], float]] = {}
+        #: digest(old refresh token) -> set when its exchange has finished.
+        self._flights: dict[str, threading.Event] = {}
 
     def _call(self, method: str, path: str, body: Optional[dict] = None,
               token: Optional[str] = None) -> Optional[dict]:
@@ -484,18 +523,72 @@ class UserAuthClient:
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
                 return json.loads(resp.read() or b"{}")
-        except urllib.error.HTTPError:
-            return None
+        except urllib.error.HTTPError as e:
+            if e.code in REJECTED_STATUSES:
+                return None
+            print(f"gardener hub: UserAuth {path} answered {e.code}", file=sys.stderr)
+            raise UserAuthUnavailable(path) from e
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
             print(f"gardener hub: UserAuth {path} unreachable: {e}", file=sys.stderr)
-            return None
+            raise UserAuthUnavailable(path) from e
 
-    def login(self, username: str, password: str) -> Optional[str]:
-        answer = self._call("POST", "/login", {"username": username, "password": password})
-        token = answer.get("token") if answer else None
-        return token if isinstance(token, str) and token else None
+    @staticmethod
+    def _tokens(answer: dict) -> Optional[SessionTokens]:
+        access, refresh = answer.get("token"), answer.get("refreshToken")
+        if not isinstance(access, str) or not COOKIE_SAFE_VALUE.fullmatch(access):
+            return None
+        if not isinstance(refresh, str) or not COOKIE_SAFE_VALUE.fullmatch(refresh):
+            refresh = None
+        return SessionTokens(access, refresh)
+
+    def login(self, username: str, password: str) -> Optional[SessionTokens]:
+        try:
+            answer = self._call("POST", "/login", {"username": username, "password": password})
+        except UserAuthUnavailable:
+            return None
+        return self._tokens(answer) if answer else None
+
+    def refresh(self, refresh_token: str) -> Optional[SessionTokens]:
+        """Exchange a refresh token for the session's next tokens, or None if
+        UserAuth refused it. Raises `UserAuthUnavailable` if there is no
+        answer, in which case the token may still be good.
+
+        Only one exchange of a token ever reaches UserAuth: requests that
+        arrive during it wait for its result, and requests that arrive
+        within `REFRESH_GRACE_SECONDS` after it are handed that result."""
+        key = token_digest(refresh_token)
+        with self._lock:
+            now = self.clock()
+            for old in [old for old, (_, until) in self._refreshed.items() if until <= now]:
+                del self._refreshed[old]
+            if key in self._refreshed:
+                return self._refreshed[key][0]
+            flight = self._flights.get(key)
+            leading = flight is None
+            if leading:
+                flight = self._flights[key] = threading.Event()
+        if not leading:
+            flight.wait(REQUEST_TIMEOUT_SECONDS * 2)
+            with self._lock:
+                if key in self._refreshed:
+                    return self._refreshed[key][0]
+            raise UserAuthUnavailable("/token/refresh")
+        try:
+            answer = self._call("POST", "/token/refresh", {"refreshToken": refresh_token})
+            tokens = self._tokens(answer) if answer is not None else None
+            if answer is not None and tokens is None:
+                raise UserAuthUnavailable("/token/refresh")
+            with self._lock:
+                self._refreshed[key] = (tokens, self.clock() + REFRESH_GRACE_SECONDS)
+            return tokens
+        finally:
+            with self._lock:
+                del self._flights[key]
+            flight.set()
 
     def username_for(self, token: str) -> Optional[str]:
+        """The token's username, or None if UserAuth refuses it. Raises
+        `UserAuthUnavailable` if there is no answer."""
         now = self.clock()
         with self._lock:
             hit = self._cache.get(token)
@@ -510,10 +603,29 @@ class UserAuthClient:
             self._cache[token] = (answer["username"], now + VALIDATE_CACHE_SECONDS)
         return answer["username"]
 
-    def logout(self, token: str) -> None:
+    def _revoke(self, token: str) -> bool:
         with self._lock:
             self._cache.pop(token, None)
-        self._call("POST", "/logout", token=token)
+        try:
+            return self._call("POST", "/logout", token=token) is not None
+        except UserAuthUnavailable:
+            return False
+
+    def logout(self, token: Optional[str], refresh_token: Optional[str] = None) -> None:
+        """End the session. `/logout` refuses an expired access token, and a
+        browser restart loses the access cookie altogether, so without a live
+        one the refresh token is exchanged for one to revoke the session with.
+        Otherwise the refresh token would stay usable after signing out."""
+        if token and self._revoke(token):
+            return
+        if not refresh_token:
+            return
+        try:
+            tokens = self.refresh(refresh_token)
+        except UserAuthUnavailable:
+            return
+        if tokens:
+            self._revoke(tokens.access)
 
 
 def store_device_lists(db_path: Path, device: str, lists: Mapping[str, list[str]]) -> None:
@@ -935,6 +1047,17 @@ class HubHandler(dashboard._DashboardHandler):
     data_dir: Optional[Path] = None
     auth: ServerAuth = ServerAuth()
     userauth: Optional[UserAuthClient] = None
+    #: Set-Cookie values to go out with this request's response, whichever
+    #: route writes it.
+    _pending_cookies: Sequence[str] = ()
+    #: UserAuth could not say whether this request's session is good.
+    _auth_unavailable: bool = False
+
+    def end_headers(self) -> None:
+        for cookie in self._pending_cookies:
+            self.send_header("Set-Cookie", cookie)
+        self._pending_cookies = ()
+        super().end_headers()
 
     @property
     def db_path(self) -> Path:
@@ -953,23 +1076,59 @@ class HubHandler(dashboard._DashboardHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _redirect(self, location: str, cookie: Optional[str] = None) -> None:
+    def _redirect(self, location: str) -> None:
         self.send_response(303)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        if cookie is not None:
-            self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
-    def _cookie_token(self) -> Optional[str]:
+    def _cookie(self, wanted: str) -> Optional[str]:
         for part in (self.headers.get("Cookie") or "").split(";"):
             name, _, value = part.strip().partition("=")
-            if name == SESSION_COOKIE and value:
+            if name == wanted and value:
                 return value
         return None
 
+    def _set_session_cookies(self, tokens: SessionTokens) -> None:
+        # The session cookie stays a browser-session cookie: it holds a
+        # short-lived token, and the refresh cookie is what outlives a restart.
+        cookies = [f"{SESSION_COOKIE}={tokens.access}; {COOKIE_ATTRIBUTES}"]
+        if tokens.refresh:
+            cookies.append(
+                f"{REFRESH_COOKIE}={tokens.refresh}; Max-Age={REFRESH_COOKIE_SECONDS}; {COOKIE_ATTRIBUTES}"
+            )
+        self._pending_cookies = cookies
+
+    def _clear_session_cookies(self) -> None:
+        self._pending_cookies = [
+            f"{name}=; Max-Age=0; {COOKIE_ATTRIBUTES}" for name in (SESSION_COOKIE, REFRESH_COOKIE)
+        ]
+
+    def _cookie_operator(self) -> Optional[str]:
+        """The allowlisted operator this request's cookies sign in, renewing
+        the session if its access token is gone or refused."""
+        token = self._cookie(SESSION_COOKIE)
+        refresh = self._cookie(REFRESH_COOKIE)
+        try:
+            username = self.userauth.username_for(token) if token else None
+            if username is None and refresh:
+                tokens = self.userauth.refresh(refresh)
+                if tokens is None:
+                    self._clear_session_cookies()
+                    return None
+                # Before anything else can fail: the old refresh token is
+                # spent, so this response is the only way the browser gets
+                # the new one.
+                self._set_session_cookies(tokens)
+                username = self.userauth.username_for(tokens.access)
+        except UserAuthUnavailable:
+            self._auth_unavailable = True
+            return None
+        return username if username in self.auth.operators else None
+
     def _identify(self) -> tuple[Optional[str], Optional[str]]:
         """(operator, device) for this request; either may be None."""
+        self._auth_unavailable = False
         header = self.headers.get("Authorization") or ""
         scheme, _, credential = header.partition(" ")
         if scheme.lower() == "bearer" and credential:
@@ -980,14 +1139,19 @@ class HubHandler(dashboard._DashboardHandler):
             except (ValueError, UnicodeDecodeError):
                 return None, None
             return self.auth.basic_ok(userpass), None
-        token = self._cookie_token()
-        if token and self.userauth is not None:
-            username = self.userauth.username_for(token)
-            if username and username in self.auth.operators:
-                return username, None
+        if self.userauth is not None:
+            return self._cookie_operator(), None
         return None, None
 
     def _deny(self, browser: bool) -> None:
+        if self._auth_unavailable:
+            # Not a refusal, so not /login: the cookies are left alone and
+            # the same page works again once UserAuth does.
+            if browser:
+                self._send(503, "text/plain; charset=utf-8", b"sign-in is temporarily unavailable\n")
+            else:
+                self._json(503, {"error": "sign-in is temporarily unavailable"})
+            return
         if browser and self.userauth is not None:
             self._redirect("/login")
             return
@@ -1022,13 +1186,10 @@ class HubHandler(dashboard._DashboardHandler):
             self._send(200, "text/html; charset=utf-8", page.encode("utf-8"))
             return
         if path == "/logout":
-            token = self._cookie_token()
-            if token and self.userauth is not None:
-                self.userauth.logout(token)
-            self._redirect(
-                "/login" if self.userauth is not None else "/",
-                f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
-            )
+            if self.userauth is not None:
+                self.userauth.logout(self._cookie(SESSION_COOKIE), self._cookie(REFRESH_COOKIE))
+            self._clear_session_cookies()
+            self._redirect("/login" if self.userauth is not None else "/")
             return
 
         operator, device = self._identify()
@@ -1054,7 +1215,8 @@ class HubHandler(dashboard._DashboardHandler):
                     live_devices=live_device_states(self.db_path),
                     **dashboard._status_query(parsed.query),
                 )
-                payload["hub_user"] = operator if self._cookie_token() else None
+                signed_in = self._cookie(SESSION_COOKIE) or self._cookie(REFRESH_COOKIE)
+                payload["hub_user"] = operator if signed_in else None
             except Exception as exc:  # noqa: BLE001 - a poll must get a real 500, never zero bytes
                 print(f"gardener hub: /api/status failed: {exc!r}", file=sys.stderr)
                 self._json(500, {"error": type(exc).__name__, "detail": str(exc)})
@@ -1146,18 +1308,17 @@ class HubHandler(dashboard._DashboardHandler):
         form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
         username = (form.get("username") or [""])[0].strip()
         password = (form.get("password") or [""])[0]
-        token = None
+        tokens = None
         if username in self.auth.operators and password:
-            token = self.userauth.login(username, password)
-        if not token:
+            tokens = self.userauth.login(username, password)
+        if not tokens:
             # One message for a wrong password and a user not on the
             # allowlist, so the page doesn't reveal which usernames exist.
             page = LOGIN_PAGE.replace("$error", '<p class="err" role="alert">Sign-in failed.</p>')
             self._send(401, "text/html; charset=utf-8", page.encode("utf-8"))
             return
-        self._redirect(
-            "/", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict",
-        )
+        self._set_session_cookies(tokens)
+        self._redirect("/")
 
     def _heartbeat(self) -> None:
         header = self.headers.get("Authorization") or ""
