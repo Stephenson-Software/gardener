@@ -84,12 +84,21 @@ localhost. Device tokens and the operator password travel in headers.
 | `GARDENER_HUB_OPERATORS` | Required with `GARDENER_HUB_USERAUTH_URL`: comma-separated usernames allowed to sign in. UserAuth registration is open, so this list is the authorisation. |
 
 Either operator mode is enough on its own, and both can be enabled
-together. UserAuth sign-in stores the access token in an `HttpOnly;
-Secure; SameSite=Strict` cookie. Each session is re-checked against
-UserAuth's `/session/validate` at most once a minute, so signing out (or
-revoking the session in UserAuth) takes effect within a minute. The
-session lasts as long as UserAuth's access token does; there is no
-refresh.
+together. UserAuth sign-in stores the access token and the refresh token
+in `HttpOnly; Secure; SameSite=Strict` cookies. Each session is re-checked
+against UserAuth's `/session/validate` at most once a minute, so signing
+out (or revoking the session in UserAuth) takes effect within a minute.
+
+The access cookie lasts for the browser session. The refresh cookie lasts
+30 days, and the hub exchanges it whenever the access token is gone or
+refused, so an operator stays signed in across hourly expiry and browser
+restarts for as long as UserAuth keeps honouring the refresh token. If
+UserAuth refuses it, both cookies are cleared and the next page is
+`/login`. If UserAuth can't answer, or answers 429 or a 5xx, the hub
+responds 503 and leaves the cookies alone, so the session resumes when
+UserAuth does. Exchanges are shared in memory for 60 seconds, because
+refresh tokens are single-use and tabs and the dashboard's poll race each
+other, so a UserAuth-enabled hub must run as a single process.
 
 ## Configuring a device
 

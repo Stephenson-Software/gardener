@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import time
 import uuid
 from contextlib import closing, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -53,6 +54,7 @@ class _HubFixture:
             "auth": auth,
             "userauth": hub.UserAuthClient(auth.userauth_url) if auth.userauth_url else None,
         })
+        self.handler_userauth = handler.userauth
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
@@ -68,7 +70,9 @@ class _HubFixture:
         try:
             conn.request(method, path, body=body, headers=headers or {})
             resp = conn.getresponse()
-            return resp.status, dict(resp.getheaders()), resp.read()
+            answer = dict(resp.getheaders())
+            answer["cookies"] = [v for k, v in resp.getheaders() if k.lower() == "set-cookie"]
+            return resp.status, answer, resp.read()
         finally:
             conn.close()
 
@@ -76,6 +80,16 @@ class _HubFixture:
         self.httpd.shutdown()
         self.httpd.server_close()
         self._tmp.cleanup()
+
+
+def _jar(headers):
+    """The Cookie header a browser would send after these Set-Cookies."""
+    pairs = (c.split(";", 1)[0] for c in headers["cookies"])
+    return {"Cookie": "; ".join(pairs)}
+
+
+def _named(headers, name):
+    return next(c for c in headers["cookies"] if c.startswith(name + "="))
 
 
 def _basic(userpass):
@@ -432,11 +446,32 @@ class TestHubReads(_HubTestCase):
 
 
 class _UserAuthStub(BaseHTTPRequestHandler):
-    """Speaks the UserAuth contract `hub.UserAuthClient` documents."""
+    """Speaks the UserAuth contract `hub.UserAuthClient` documents, including
+    single-use refresh tokens whose reuse ends the session."""
 
     users = {"dan": "pw", "stranger": "pw"}
     validate_calls = 0
+    refresh_calls = 0
+    reuse_detected = 0
+    minted = 0
+    #: Access tokens past their expiry, and ones signed out.
+    expired: set = set()
     revoked: set = set()
+    #: refresh token -> username, and the ones already exchanged.
+    live_refresh: dict = {}
+    used_refresh: dict = {}
+    #: Status to answer instead, per path.
+    failing: dict = {}
+    refresh_delay = 0.0
+    malformed_refresh = False
+
+    @classmethod
+    def reset(cls):
+        cls.validate_calls = cls.refresh_calls = cls.reuse_detected = cls.minted = 0
+        cls.expired, cls.revoked = set(), set()
+        cls.live_refresh, cls.used_refresh, cls.failing = {}, {}, {}
+        cls.refresh_delay = 0.0
+        cls.malformed_refresh = False
 
     def log_message(self, *a):
         pass
@@ -449,34 +484,78 @@ class _UserAuthStub(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _issue(self, username):
+        stub = type(self)
+        stub.minted += 1
+        refresh = f"r-{username}-{stub.minted}"
+        stub.live_refresh[refresh] = username
+        return {"token": f"jwt-{username}.{stub.minted}", "tokenType": "Bearer",
+                "expiresAt": "2026-09-26T10:00:00Z", "refreshToken": refresh}
+
+    def _end_sessions_of(self, username):
+        stub = type(self)
+        stub.live_refresh = {t: u for t, u in stub.live_refresh.items() if u != username}
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        if self.path == "/login":
+        stub = type(self)
+        if self.path in self.failing:
+            self._json(self.failing[self.path], {"error": "failing"})
+        elif self.path == "/login":
             creds = json.loads(body)
             if self.users.get(creds.get("username")) == creds.get("password"):
-                self._json(200, {"token": "jwt-" + creds["username"], "tokenType": "Bearer",
-                                 "expiresAt": "2026-09-26T10:00:00Z", "refreshToken": "r"})
+                self._json(200, self._issue(creds["username"]))
             else:
                 self._json(401, {"error": "bad credentials"})
+        elif self.path == "/token/refresh":
+            stub.refresh_calls += 1
+            time.sleep(self.refresh_delay)
+            token = json.loads(body)["refreshToken"]
+            if token in stub.used_refresh:
+                stub.reuse_detected += 1
+                self._end_sessions_of(stub.used_refresh[token])
+                self._json(401, {"error": "invalid refresh token"})
+            elif token not in stub.live_refresh:
+                self._json(401, {"error": "invalid refresh token"})
+            elif self.malformed_refresh:
+                self._json(200, {"token": "evil\r\nSet-Cookie: x=y", "refreshToken": "r"})
+            else:
+                username = stub.live_refresh.pop(token)
+                stub.used_refresh[token] = username
+                self._json(200, self._issue(username))
         elif self.path == "/logout":
-            type(self).revoked.add(self.headers.get("Authorization", "")[7:])
+            token = self.headers.get("Authorization", "")[7:]
+            if not self._good(token):
+                self._json(401, {"error": "invalid"})
+                return
+            stub.revoked.add(token)
+            self._end_sessions_of(self._subject(token))
             self._json(200, {})
 
+    @staticmethod
+    def _subject(token):
+        return token[4:].split(".")[0]
+
+    def _good(self, token):
+        return token.startswith("jwt-") and token not in self.revoked and token not in self.expired
+
     def do_GET(self):
-        if self.path == "/session/validate":
+        if self.path in self.failing:
+            self._json(self.failing[self.path], {"error": "failing"})
+        elif self.path == "/session/validate":
             type(self).validate_calls += 1
             token = self.headers.get("Authorization", "")[7:]
-            if token.startswith("jwt-") and token not in self.revoked:
-                self._json(200, {"valid": True, "username": token[4:], "roles": []})
+            if self._good(token):
+                self._json(200, {"valid": True, "username": self._subject(token), "roles": []})
             else:
                 self._json(401, {"error": "invalid"})
 
 
 class TestUserAuthSignIn(_HubTestCase):
     def setUp(self):
-        _UserAuthStub.validate_calls = 0
-        _UserAuthStub.revoked = set()
+        _UserAuthStub.reset()
         self.ua = ThreadingHTTPServer(("127.0.0.1", 0), _UserAuthStub)
+        self.ua.daemon_threads = True
         threading.Thread(target=self.ua.serve_forever, daemon=True).start()
         self.addCleanup(self.ua.server_close)
         self.addCleanup(self.ua.shutdown)
@@ -500,11 +579,11 @@ class TestUserAuthSignIn(_HubTestCase):
     def test_signing_in_sets_a_session_the_dashboard_accepts(self):
         status, headers, _ = self._login("dan", "pw")
         self.assertEqual(status, 303)
-        cookie = headers["Set-Cookie"]
-        for attr in ("HttpOnly", "Secure", "SameSite=Strict"):
-            self.assertIn(attr, cookie)
-        session = {"Cookie": cookie.split(";", 1)[0]}
-        status, _, body = self.hub.request("GET", "/api/status", session)
+        self.assertEqual(len(headers["cookies"]), 2)
+        for cookie in headers["cookies"]:
+            for attr in ("HttpOnly", "Secure", "SameSite=Strict"):
+                self.assertIn(attr, cookie)
+        status, _, body = self.hub.request("GET", "/api/status", _jar(headers))
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["hub_user"], "dan")
 
@@ -529,21 +608,202 @@ class TestUserAuthSignIn(_HubTestCase):
 
     def test_session_checks_are_cached(self):
         _, headers, _ = self._login("dan", "pw")
-        session = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+        session = _jar(headers)
         for _ in range(3):
             self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 200)
         self.assertEqual(_UserAuthStub.validate_calls, 1)
 
     def test_signing_out_revokes_the_session(self):
         _, headers, _ = self._login("dan", "pw")
-        session = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+        session = _jar(headers)
         status, headers, _ = self.hub.request("GET", "/logout", session)
         self.assertEqual(status, 303)
-        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+        self.assertEqual(len(headers["cookies"]), 2)
+        for cookie in headers["cookies"]:
+            self.assertIn("Max-Age=0", cookie)
         self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 401)
+        self.assertEqual(_UserAuthStub.live_refresh, {})
 
     def test_basic_auth_still_works_alongside_sign_in(self):
         self.assertEqual(self.hub.request("GET", "/api/status", _basic(OPERATOR))[0], 200)
+
+    # -- refresh ---------------------------------------------------------
+
+    def _signed_in(self):
+        return _jar(self._login("dan", "pw")[1])
+
+    def _expire_access(self, session):
+        access = session["Cookie"].split(";")[0].split("=", 1)[1]
+        _UserAuthStub.expired.add(access)
+
+    def test_only_the_refresh_cookie_outlives_the_browser_session(self):
+        _, headers, _ = self._login("dan", "pw")
+        self.assertIn(f"Max-Age={30 * 24 * 3600}", _named(headers, hub.REFRESH_COOKIE))
+        self.assertNotIn("Max-Age", _named(headers, hub.SESSION_COOKIE))
+
+    def test_an_expired_access_token_is_renewed_and_the_new_cookies_are_used(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        status, headers, body = self.hub.request("GET", "/api/status", session)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["hub_user"], "dan")
+        renewed = _jar(headers)
+        self.assertNotEqual(renewed, session)
+        for _ in range(3):
+            status, headers, _ = self.hub.request("GET", "/api/status", renewed)
+            self.assertEqual((status, headers["cookies"]), (200, []))
+        self.assertEqual(_UserAuthStub.refresh_calls, 1)
+
+    def test_a_browser_restart_signs_back_in_from_the_refresh_cookie(self):
+        _, headers, _ = self._login("dan", "pw")
+        reopened = {"Cookie": _named(headers, hub.REFRESH_COOKIE).split(";", 1)[0]}
+        status, headers, _ = self.hub.request("GET", "/", reopened)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(headers["cookies"]), 2)
+
+    def test_a_refused_refresh_signs_out_and_stops_trying(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        _UserAuthStub.live_refresh.clear()
+        status, headers, _ = self.hub.request("GET", "/api/status", session)
+        self.assertEqual(status, 401)
+        self.assertEqual(len(headers["cookies"]), 2)
+        for cookie in headers["cookies"]:
+            self.assertIn("Max-Age=0", cookie)
+        status, headers, _ = self.hub.request("GET", "/", session)
+        self.assertEqual((status, headers.get("Location")), (303, "/login"))
+
+    def test_an_outage_at_validate_leaves_the_session_alone(self):
+        session = self._signed_in()
+        _UserAuthStub.failing["/session/validate"] = 503
+        for path, code in (("/api/status", 503), ("/", 503)):
+            status, headers, _ = self.hub.request("GET", path, session)
+            self.assertEqual((status, headers["cookies"]), (code, []))
+            self.assertNotIn("Location", headers)
+        self.assertEqual(_UserAuthStub.refresh_calls, 0)
+        _UserAuthStub.failing.clear()
+        self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 200)
+
+    def test_an_outage_or_rate_limit_at_refresh_leaves_the_session_alone(self):
+        for failure in (503, 429, 500):
+            with self.subTest(failure):
+                session = self._signed_in()
+                self._expire_access(session)
+                _UserAuthStub.failing["/token/refresh"] = failure
+                status, headers, _ = self.hub.request("GET", "/api/status", session)
+                self.assertEqual((status, headers["cookies"]), (503, []))
+                del _UserAuthStub.failing["/token/refresh"]
+                self.hub.handler_userauth._refreshed.clear()
+                self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 200)
+
+    def test_userauth_being_unreachable_is_an_outage_not_a_refusal(self):
+        client = hub.UserAuthClient("http://127.0.0.1:9")
+        with self.assertRaises(hub.UserAuthUnavailable):
+            client.username_for("jwt-dan")
+        with self.assertRaises(hub.UserAuthUnavailable):
+            client.refresh("r")
+
+    def test_tokens_issued_during_an_outage_still_reach_the_browser(self):
+        # The old refresh token is spent the moment the exchange lands, so
+        # failing the check of the new access token must not lose them.
+        session = self._signed_in()
+        self._expire_access(session)
+        real = hub.UserAuthClient.username_for
+        calls = []
+
+        def flaky(client, token):
+            calls.append(token)
+            if len(calls) > 1:
+                raise hub.UserAuthUnavailable("/session/validate")
+            return real(client, token)
+
+        with patch.object(hub.UserAuthClient, "username_for", flaky):
+            status, headers, _ = self.hub.request("GET", "/api/status", session)
+        self.assertEqual(status, 503)
+        self.assertEqual(len(headers["cookies"]), 2)
+        self.assertEqual(self.hub.request("GET", "/api/status", _jar(headers))[0], 200)
+
+    def test_racing_requests_exchange_the_refresh_token_once(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        _UserAuthStub.refresh_delay = 0.2
+        results = []
+
+        def poll():
+            results.append(self.hub.request("GET", "/api/status", session))
+
+        threads = [threading.Thread(target=poll) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([r[0] for r in results], [200] * 8)
+        self.assertEqual((_UserAuthStub.refresh_calls, _UserAuthStub.reuse_detected), (1, 0))
+        self.assertEqual(len({_named(r[1], hub.REFRESH_COOKIE) for r in results}), 1)
+
+    def test_a_straggler_with_the_old_cookies_gets_the_same_successor(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        first = self.hub.request("GET", "/api/status", session)
+        second = self.hub.request("GET", "/api/status", session)
+        self.assertEqual((first[0], second[0]), (200, 200))
+        self.assertEqual(first[1]["cookies"], second[1]["cookies"])
+        self.assertEqual((_UserAuthStub.refresh_calls, _UserAuthStub.reuse_detected), (1, 0))
+
+    def test_the_grace_ends_and_the_next_exchange_reaches_userauth(self):
+        now = [0.0]
+        client = hub.UserAuthClient(
+            f"http://127.0.0.1:{self.ua.server_address[1]}", clock=lambda: now[0])
+        _UserAuthStub.live_refresh["r-dan-x"] = "dan"
+        tokens = client.refresh("r-dan-x")
+        now[0] = hub.REFRESH_GRACE_SECONDS - 1
+        self.assertEqual(client.refresh("r-dan-x"), tokens)
+        self.assertEqual(_UserAuthStub.refresh_calls, 1)
+        now[0] = hub.REFRESH_GRACE_SECONDS + 1
+        self.assertIsNone(client.refresh("r-dan-x"))
+        self.assertEqual(_UserAuthStub.refresh_calls, 2)
+        self.assertEqual(client._refreshed.keys(), {hub.token_digest("r-dan-x")})
+
+    def test_a_waiting_request_sees_the_leaders_outage_as_an_outage(self):
+        client = hub.UserAuthClient(f"http://127.0.0.1:{self.ua.server_address[1]}")
+        _UserAuthStub.failing["/token/refresh"] = 503
+        client._flights[hub.token_digest("r")] = done = threading.Event()
+        done.set()
+        with self.assertRaises(hub.UserAuthUnavailable):
+            client.refresh("r")
+
+    def test_signing_out_with_an_expired_access_token_still_ends_the_session(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        self.assertEqual(self.hub.request("GET", "/logout", session)[0], 303)
+        self.assertEqual(_UserAuthStub.live_refresh, {})
+        self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 401)
+
+    def test_signing_out_after_a_browser_restart_still_ends_the_session(self):
+        _, headers, _ = self._login("dan", "pw")
+        reopened = {"Cookie": _named(headers, hub.REFRESH_COOKIE).split(";", 1)[0]}
+        self.assertEqual(self.hub.request("GET", "/logout", reopened)[0], 303)
+        self.assertEqual(_UserAuthStub.live_refresh, {})
+
+    def test_a_session_from_before_refresh_lasts_until_its_token_expires(self):
+        session = {"Cookie": f"{hub.SESSION_COOKIE}=jwt-dan.old"}
+        self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 200)
+        fresh = {"Cookie": f"{hub.SESSION_COOKIE}=jwt-dan.expired"}
+        _UserAuthStub.expired.add("jwt-dan.expired")
+        self.assertEqual(self.hub.request("GET", "/api/status", fresh)[0], 401)
+        self.assertEqual(_UserAuthStub.refresh_calls, 0)
+
+    def test_a_refresh_token_of_someone_off_the_allowlist_gets_nothing(self):
+        _UserAuthStub.live_refresh["r-stranger-1"] = "stranger"
+        session = {"Cookie": f"{hub.REFRESH_COOKIE}=r-stranger-1"}
+        self.assertEqual(self.hub.request("GET", "/api/status", session)[0], 401)
+
+    def test_a_malformed_token_never_reaches_a_response_header(self):
+        session = self._signed_in()
+        self._expire_access(session)
+        _UserAuthStub.malformed_refresh = True
+        status, headers, _ = self.hub.request("GET", "/api/status", session)
+        self.assertEqual((status, headers["cookies"]), (503, []))
 
 
 class TestDeviceHealth(_HubTestCase):
