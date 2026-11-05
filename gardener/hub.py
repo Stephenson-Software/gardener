@@ -789,6 +789,16 @@ class InvalidHeartbeat(ValueError):
     pass
 
 
+def _bindable_text(value: str) -> bool:
+    """False for a lone surrogate from a JSON `\\ud800` escape, which SQLite's
+    bind refuses with `UnicodeEncodeError`, not a `sqlite3.Error`."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def heartbeat_from_wire(body: object) -> dict:
     """A pushed heartbeat reduced to exactly the fields RFC 0010 §1 lists,
     or `InvalidHeartbeat` naming the bad one.
@@ -806,7 +816,7 @@ def heartbeat_from_wire(body: object) -> dict:
         value = obj.get(name)
         if value is None and not required:
             return None
-        if not isinstance(value, str) or not value or len(value) > limit:
+        if not isinstance(value, str) or not value or len(value) > limit or not _bindable_text(value):
             raise InvalidHeartbeat(f"{name} must be a string of 1-{limit} characters")
         return value
 
@@ -857,7 +867,7 @@ def heartbeat_from_wire(body: object) -> dict:
         if not isinstance(slot, dict):
             raise InvalidHeartbeat("each slot must be an object")
         phase = slot.get("phase")
-        if phase not in SLOT_PHASES:
+        if not isinstance(phase, str) or phase not in SLOT_PHASES:
             raise InvalidHeartbeat(f"slot phase {phase!r} is unknown to this hub; upgrade the hub")
         cleaned_slots.append({
             "repo": repo(slot.get("repo"), "slot repo"),
@@ -952,6 +962,30 @@ class InvalidRun(ValueError):
     pass
 
 
+class NotJson(ValueError):
+    pass
+
+
+def json_from_wire(raw: bytes) -> object:
+    """A pushed body as parsed JSON, or `NotJson`.
+
+    `json.JSONDecodeError` alone is not enough: bytes that aren't valid
+    Unicode raise `UnicodeDecodeError`, and deep nesting `RecursionError`,
+    and either one reaching the handler's thread closes the connection
+    with no response at all."""
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        raise NotJson("body is not JSON") from None
+
+
+#: The largest magnitude a pushed run's number may have: 31 years of
+#: `duration_ms`, so no real run is near it. Not SQLite's own 64-bit limit,
+#: because `SUM()` raises on overflow: two rows that each fit a bind would
+#: then fail `state.repo_stats` and 500 /api/status on every poll.
+MAX_RUN_NUMBER = 10**12
+
+
 def run_from_wire(row: object, device: str) -> state.Run:
     """A pushed row as a `Run`, or `InvalidRun` naming the bad field.
 
@@ -972,6 +1006,8 @@ def run_from_wire(row: object, device: str) -> state.Run:
             raise InvalidRun(f"{name} must be a non-empty string")
         if len(value) > limit:
             raise InvalidRun(f"{name} is longer than {limit} characters")
+        if not _bindable_text(value):
+            raise InvalidRun(f"{name} is not valid text")
         return value
 
     def number(name: str, kind: type) -> Optional[float]:
@@ -980,6 +1016,11 @@ def run_from_wire(row: object, device: str) -> state.Run:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise InvalidRun(f"{name} must be a number")
+        # `not <=` so NaN fails too. An Infinity in a stored cost would reach
+        # /api/status as a bare token no JSON parser accepts, and stop the
+        # page for every operator on every poll until the row was deleted.
+        if not abs(value) <= MAX_RUN_NUMBER:
+            raise InvalidRun(f"{name} must be a finite number of at most {MAX_RUN_NUMBER}")
         return kind(value)
 
     run_uuid = text("run_uuid")
@@ -1292,14 +1333,18 @@ class HubHandler(dashboard._DashboardHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib method name
         path = urllib.parse.urlparse(self.path).path
-        if path == "/login" and self.userauth is not None:
-            self._login()
-        elif path == "/api/v1/runs":
-            self._push()
-        elif path == "/api/v1/heartbeat":
-            self._heartbeat()
-        else:
-            self._json(404, {"error": "not found"})
+        try:
+            if path == "/login" and self.userauth is not None:
+                self._login()
+            elif path == "/api/v1/runs":
+                self._push()
+            elif path == "/api/v1/heartbeat":
+                self._heartbeat()
+            else:
+                self._json(404, {"error": "not found"})
+        except Exception as exc:  # noqa: BLE001 - a client must get a real 500, never zero bytes
+            print(f"gardener hub: POST {path} failed: {exc!r}", file=sys.stderr)
+            self._json(500, {"error": type(exc).__name__})
 
     def _login(self) -> None:
         raw = self._read_body()
@@ -1335,11 +1380,8 @@ class HubHandler(dashboard._DashboardHandler):
             self._json(413, {"error": f"a heartbeat must be at most {HEARTBEAT_MAX_BYTES} bytes"})
             return
         try:
-            beat = heartbeat_from_wire(json.loads(self.rfile.read(length) or b"null"))
-        except json.JSONDecodeError:
-            self._json(400, {"error": "body is not JSON"})
-            return
-        except InvalidHeartbeat as e:
+            beat = heartbeat_from_wire(json_from_wire(self.rfile.read(length) or b"null"))
+        except (NotJson, InvalidHeartbeat) as e:
             self._json(400, {"error": str(e)})
             return
         try:
@@ -1361,9 +1403,9 @@ class HubHandler(dashboard._DashboardHandler):
         if raw is None:
             return
         try:
-            body = json.loads(raw)
-        except json.JSONDecodeError:
-            self._json(400, {"error": "body is not JSON"})
+            body = json_from_wire(raw)
+        except NotJson as e:
+            self._json(400, {"error": str(e)})
             return
         rows = body.get("runs") if isinstance(body, dict) else None
         if not isinstance(rows, list):

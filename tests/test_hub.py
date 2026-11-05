@@ -260,6 +260,109 @@ class TestPush(_HubTestCase):
         self.assertIn("upgrade the hub", result.error)
         self.assertEqual(state.pending_push_summary(db_path=self.db_path)[0], 1)
 
+    def _post(self, path, body):
+        """The status and error of a raw POST. A body that escapes the
+        handler closes the connection, which fails the test here."""
+        status, _, answer = self.hub.request(
+            "POST", path, {"Authorization": f"Bearer {DEVICE_TOKEN}"}, body
+        )
+        return status, json.loads(answer).get("error")
+
+    @staticmethod
+    def _wire_row(raw_field):
+        """One otherwise-valid run with `raw_field` spliced in as JSON text,
+        for the values `json.dumps` can't be asked to write."""
+        row = json.dumps({
+            "run_uuid": str(uuid.uuid4()), "repo": "owner/a", "mode": "tend",
+            "timestamp": "2026-09-26T01:00:00+00:00", "outcome": "tend",
+        })
+        return ('{"runs": [' + row[:-1] + ", " + raw_field + "}]}").encode("utf-8")
+
+    def test_a_body_that_cannot_be_decoded_is_a_400_not_a_dropped_connection(self):
+        for path in ("/api/v1/runs", "/api/v1/heartbeat"):
+            for body in (b'{"runs": "\xff"}', b"[" * 15000):
+                with self.subTest(path=path, body=body[:12]):
+                    self.assertEqual(self._post(path, body), (400, "body is not JSON"))
+
+    def test_a_number_the_store_cant_hold_is_a_400_naming_the_field(self):
+        for raw_field, field in (
+            ('"exit_code": 1e999', "exit_code"),
+            ('"exit_code": NaN', "exit_code"),
+            (f'"exit_code": {2 ** 70}', "exit_code"),
+            (f'"duration_ms": {-(2 ** 70)}', "duration_ms"),
+            (f'"cost_usd": 1{"0" * 400}', "cost_usd"),
+        ):
+            with self.subTest(raw_field=raw_field[:24]):
+                status, error = self._post("/api/v1/runs", self._wire_row(raw_field))
+                self.assertEqual(status, 400)
+                self.assertIn(field, error)
+        self.assertEqual(self.hub_rows(), [])
+
+    def test_a_non_finite_cost_is_refused_rather_than_breaking_the_dashboard(self):
+        # Stored, this reached /api/status as the bare token Infinity, and
+        # the page's res.json() threw on every poll from then on.
+        for raw_field in ('"cost_usd": Infinity', '"cost_usd": -Infinity',
+                          '"cost_usd": 1e999', '"cost_usd": NaN'):
+            with self.subTest(raw_field=raw_field):
+                status, error = self._post("/api/v1/runs", self._wire_row(raw_field))
+                self.assertEqual(status, 400)
+                self.assertIn("cost_usd", error)
+        self.assertEqual(self.hub_rows(), [])
+
+    def test_text_sqlite_cant_bind_is_a_400_naming_the_field(self):
+        status, error = self._post(
+            "/api/v1/runs", self._wire_row(r'"gap_summary": "lone \ud800 surrogate"')
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("gap_summary", error)
+        self.assertEqual(self.hub_rows(), [])
+
+    def test_the_largest_accepted_numbers_still_leave_the_dashboard_working(self):
+        # Refusing only what a bind can't hold was not enough: SUM() raises
+        # on overflow, so two such rows made /api/status a 500 on every poll.
+        for _ in range(2):
+            status, _body = self._post("/api/v1/runs", self._wire_row(
+                f'"exit_code": -9, "duration_ms": {hub.MAX_RUN_NUMBER}, "cost_usd": {hub.MAX_RUN_NUMBER}'
+            ))
+            self.assertEqual(status, 200)
+        self.assertEqual(len(self.hub_rows()), 2)
+        self.assertEqual(self.hub.request("GET", "/api/status", _basic(OPERATOR))[0], 200)
+
+    def test_a_number_just_past_the_bound_is_refused(self):
+        status, error = self._post(
+            "/api/v1/runs", self._wire_row(f'"duration_ms": {hub.MAX_RUN_NUMBER + 1}')
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("duration_ms", error)
+
+    @staticmethod
+    def _beat(**extra):
+        beat = {"session": {"id": "s"}, "seq": 1, "interval_seconds": 30}
+        beat.update(extra)
+        return beat
+
+    def test_a_heartbeat_with_text_sqlite_cant_bind_is_a_400(self):
+        # json.dumps writes the escape back out, so this is a lone surrogate
+        # on the wire and session.id reaches store_heartbeat's bind.
+        status, error = self._post(
+            "/api/v1/heartbeat", json.dumps(self._beat(session={"id": "\ud800"})).encode("utf-8")
+        )
+        self.assertEqual((status, "id" in error), (400, True))
+
+    def test_a_heartbeat_with_an_unhashable_phase_is_a_400(self):
+        for phase in ([], {}):
+            with self.subTest(phase=phase):
+                body = json.dumps(self._beat(slots=[{"phase": phase, "repo": "owner/a"}]))
+                status, error = self._post("/api/v1/heartbeat", body.encode("utf-8"))
+                self.assertEqual((status, "phase" in error), (400, True))
+
+    def test_an_unexpected_failure_is_a_500_not_a_dropped_connection(self):
+        with patch.object(hub.state, "insert_runs", side_effect=RuntimeError("boom")), \
+                redirect_stderr(io.StringIO()) as err:
+            status, error = self._post("/api/v1/runs", self._wire_row('"exit_code": 0'))
+        self.assertEqual((status, error), (500, "RuntimeError"))
+        self.assertIn("boom", err.getvalue())
+
     def test_an_unknown_token_is_refused(self):
         self.record()
         result = hub.push_pending(hub.HubConfig(self.hub.url, "wrong"), db_path=self.db_path)
