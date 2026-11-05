@@ -336,9 +336,11 @@ pre-RFC-0007 history and being a no-op the second time. On the hub side
 it covers idempotency (a re-sent batch stores nothing twice), a token
 storing every row under its own device name whatever the row claims, an unknown outcome refused and left
 queued, a malformed body answered with a 400 rather than a dropped connection
-(undecodable bytes, deep nesting, numbers SQLite can't hold, a lone surrogate),
-a non-finite cost refused before it can reach `/api/status` as bare
-`Infinity`, every non-`/healthz` route refusing anonymous requests, a device
+(undecodable bytes, deep nesting, an oversized number, a lone surrogate, an
+unhashable slot phase), an unexpected failure answered with a 500, a
+non-finite cost refused before it can reach `/api/status` as bare `Infinity`,
+the largest accepted numbers leaving `/api/status` working, every
+non-`/healthz` route refusing anonymous requests, a device
 token reading `/api/v1/` but not the dashboard, the garden as the union of
 pushed lists, and `/live` named per-device. `TestServerAuth` covers `serve`
 exiting 2 on a missing credential or a malformed device token entry, and
