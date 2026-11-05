@@ -952,6 +952,28 @@ class InvalidRun(ValueError):
     pass
 
 
+class NotJson(ValueError):
+    pass
+
+
+def json_from_wire(raw: bytes) -> object:
+    """A pushed body as parsed JSON, or `NotJson`.
+
+    `json.JSONDecodeError` alone is not enough: bytes that aren't valid
+    Unicode raise `UnicodeDecodeError`, and deep nesting `RecursionError`,
+    and either one reaching the handler's thread closes the connection
+    with no response at all."""
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        raise NotJson("body is not JSON") from None
+
+
+#: The largest magnitude a pushed number may have: what SQLite's INTEGER
+#: holds. Past it a bind raises `OverflowError`, not a `sqlite3.Error`.
+MAX_STORED_NUMBER = 2**63 - 1
+
+
 def run_from_wire(row: object, device: str) -> state.Run:
     """A pushed row as a `Run`, or `InvalidRun` naming the bad field.
 
@@ -972,6 +994,12 @@ def run_from_wire(row: object, device: str) -> state.Run:
             raise InvalidRun(f"{name} must be a non-empty string")
         if len(value) > limit:
             raise InvalidRun(f"{name} is longer than {limit} characters")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate from a JSON \ud800 escape, which SQLite's
+            # bind refuses with an error `sqlite3.Error` doesn't cover.
+            raise InvalidRun(f"{name} is not valid text") from None
         return value
 
     def number(name: str, kind: type) -> Optional[float]:
@@ -980,7 +1008,17 @@ def run_from_wire(row: object, device: str) -> state.Run:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise InvalidRun(f"{name} must be a number")
-        return kind(value)
+        refused = InvalidRun(f"{name} must be a finite number that fits in 64 bits")
+        try:
+            converted = kind(value)
+        except (OverflowError, ValueError):
+            raise refused from None
+        # Written so NaN fails too. An Infinity in a stored cost would reach
+        # /api/status as a bare token no JSON parser accepts, and stop the
+        # page for every operator on every poll until the row was deleted.
+        if not abs(converted) <= MAX_STORED_NUMBER:
+            raise refused
+        return converted
 
     run_uuid = text("run_uuid")
     try:
@@ -1335,11 +1373,8 @@ class HubHandler(dashboard._DashboardHandler):
             self._json(413, {"error": f"a heartbeat must be at most {HEARTBEAT_MAX_BYTES} bytes"})
             return
         try:
-            beat = heartbeat_from_wire(json.loads(self.rfile.read(length) or b"null"))
-        except json.JSONDecodeError:
-            self._json(400, {"error": "body is not JSON"})
-            return
-        except InvalidHeartbeat as e:
+            beat = heartbeat_from_wire(json_from_wire(self.rfile.read(length) or b"null"))
+        except (NotJson, InvalidHeartbeat) as e:
             self._json(400, {"error": str(e)})
             return
         try:
@@ -1361,9 +1396,9 @@ class HubHandler(dashboard._DashboardHandler):
         if raw is None:
             return
         try:
-            body = json.loads(raw)
-        except json.JSONDecodeError:
-            self._json(400, {"error": "body is not JSON"})
+            body = json_from_wire(raw)
+        except NotJson as e:
+            self._json(400, {"error": str(e)})
             return
         rows = body.get("runs") if isinstance(body, dict) else None
         if not isinstance(rows, list):
