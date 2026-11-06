@@ -235,7 +235,7 @@ never in this repository: the tests and the pictures in these docs use a
 synthetic fleet (`tests/city_fixture.py`).
 
 The renderer is `fleetcity/main.cpp`, built by `fleetcity/build.sh`
-(emsdk 6.0.11 and Strata v0.6.0's WebAssembly release, SHA-256 pinned)
+(emsdk 6.0.11 and Strata v0.7.0's WebAssembly release, SHA-256 pinned)
 into the committed `gardener/web/city.{js,wasm}`; CI's `fleetcity` job
 rebuilds them and fails on any difference. Each district is one mesh for
 the bodies and one unlit mesh for the roofs, a per-triangle tag table maps

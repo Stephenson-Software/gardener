@@ -60,6 +60,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -230,29 +231,45 @@ def _request(
     if not config.token:
         raise HubError(f"{URL_ENV} is set but {TOKEN_ENV} is not")
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        config.url + path,
-        data=data,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {config.token}",
-            "Content-Type": "application/json",
-            # Some fronts refuse urllib's default user agent outright.
-            "User-Agent": f"gardener/{__version__}",
-        },
-    )
     try:
+        # Built in here: a URL with no scheme raises from the constructor.
+        req = urllib.request.Request(
+            config.url + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {config.token}",
+                "Content-Type": "application/json",
+                # Some fronts refuse urllib's default user agent outright.
+                "User-Agent": f"gardener/{__version__}",
+            },
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
-        detail = e.read(500).decode("utf-8", "replace").strip()
+        try:
+            detail = e.read(500).decode("utf-8", "replace").strip()
+        except (OSError, http.client.HTTPException):
+            detail = "(the error body could not be read)"
         raise HubError(f"{method} {path} → HTTP {e.code}: {detail}", status=e.code) from e
-    except (urllib.error.URLError, OSError) as e:
+    except (ValueError, http.client.InvalidURL) as e:
+        # Never `e`, and no userinfo: http.client quotes a bad header value,
+        # which is the token, and a URL's password when it reads as a port.
+        where = config.url.rpartition("@")[2]
+        raise HubError(
+            f"{method} {path} failed: no request could be built for {where!r}. Check "
+            f"{URL_ENV} (it needs its http:// or https://), {TOKEN_ENV}, and any proxy setting"
+        ) from e
+    except (OSError, http.client.HTTPException) as e:
         raise HubError(f"{method} {path} failed: {e}") from e
     try:
-        return json.loads(raw or b"{}")
-    except json.JSONDecodeError as e:
+        answer = json.loads(raw or b"{}")
+    except (ValueError, RecursionError) as e:
+        # ValueError covers JSONDecodeError and bytes that aren't text.
         raise HubError(f"{method} {path} answered with invalid JSON") from e
+    if not isinstance(answer, dict):
+        raise HubError(f"{method} {path} answered with JSON that isn't an object")
+    return answer
 
 
 @dataclass
@@ -311,7 +328,12 @@ def push_pending(
         except HubError as e:
             result.error = str(e)
             break
-        held = [u for u in answer.get("held", []) if isinstance(u, str)]
+        # Only uuids from this batch count: anything else would mark nothing
+        # yet satisfy the check below, and `hub sync` has no deadline to end
+        # that loop.
+        listed = answer.get("held")
+        listed = {u for u in listed if isinstance(u, str)} if isinstance(listed, list) else set()
+        held = [r.run_uuid for r in batch if r.run_uuid in listed]
         try:
             state.mark_pushed(held, state.now_iso(), db_path=db_path)
         except (sqlite3.Error, OSError) as e:
@@ -352,21 +374,35 @@ def push_after_record(db_path: Optional[Path] = None) -> None:
 
 def fetch_devices(config: HubConfig) -> dict:
     """The hub's per-device summary (`device_summaries`), plus `you`: the
-    device the hub files this token's runs under. For `hub status`."""
-    return _request(config, "GET", "/api/v1/devices")
+    device the hub files this token's runs under. For `hub status`.
+    Raises `HubError` on any failure, including an answer it can't read."""
+    answer = _request(config, "GET", "/api/v1/devices")
+    devices = answer.get("devices")
+    if not isinstance(devices, list) or not all(isinstance(d, dict) for d in devices):
+        raise HubError("GET /api/v1/devices answered with an unreadable device list")
+    return answer
+
+
+def _is_wire_run(row: object) -> bool:
+    """Whether `row` has the text fields `cmd_status` formats. A hub always
+    sends these; the check is for whatever is answering in its place."""
+    if not isinstance(row, dict):
+        return False
+    return (all(isinstance(row.get(k), str) for k in ("repo", "timestamp", "mode", "outcome"))
+            and all(isinstance(row.get(k), (str, type(None))) for k in ("device", "gap_summary")))
 
 
 def fetch_runs(config: HubConfig, repo: Optional[str] = None, limit: int = 20) -> list[state.Run]:
-    """The hub's newest runs across every device, for `status --all-devices`."""
+    """The hub's newest runs across every device, for `status --all-devices`.
+    Raises `HubError` on any failure, including an answer it can't read."""
     query = {"limit": str(limit)}
     if repo:
         query["repo"] = repo
     answer = _request(config, "GET", "/api/v1/runs?" + urllib.parse.urlencode(query))
-    return [
-        state.Run(**{k: row.get(k) for k in WIRE_FIELDS})
-        for row in answer.get("runs", [])
-        if isinstance(row, dict)
-    ]
+    rows = answer.get("runs")
+    if not isinstance(rows, list) or not all(_is_wire_run(row) for row in rows):
+        raise HubError("GET /api/v1/runs answered with an unreadable run list")
+    return [state.Run(**{k: row.get(k) for k in WIRE_FIELDS}) for row in rows]
 
 
 def fetch_latest_success(config: HubConfig, repo: str, mode: str) -> Optional[datetime]:
