@@ -421,6 +421,131 @@ class TestPush(_HubTestCase):
         self.assertEqual(len(self.hub_rows()), 3)
 
 
+class _FrontHandler(BaseHTTPRequestHandler):
+    """What a misconfigured proxy might answer in place of a hub: a 200 with
+    `server.body`, promising `server.length` bytes of it."""
+
+    def log_message(self, *args):
+        pass
+
+    def _answer(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = self.server.body
+        self.send_response(200)
+        self.send_header("Content-Length", str(self.server.length or len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _answer
+
+
+class TestUnusableHub(_HubTestCase):
+    """Every caller of `_request` is written against one promise: a hub that
+    can't be used is a `HubError`. `hub sync`, `hub status` and `status
+    --all-devices` catch nothing else, and `main()` has no catch-all."""
+
+    NOT_A_URL = "gardener.example.com"
+
+    def setUp(self):
+        super().setUp()
+        self.front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
+        self.front.body, self.front.length = b"{}", None
+        threading.Thread(target=self.front.serve_forever, daemon=True).start()
+        self.addCleanup(self.front.server_close)
+        self.addCleanup(self.front.shutdown)
+        self.front_config = hub.HubConfig(
+            f"http://127.0.0.1:{self.front.server_address[1]}", DEVICE_TOKEN
+        )
+
+    def _run_cli(self, *argv):
+        args = cli.build_parser().parse_args(list(argv))
+        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            code = args.func(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_200_that_is_not_a_json_object_is_a_hub_error(self):
+        for body in (b"[]", b"null", b"5", b'"ok"', b"<html>", b"\xff\xfe\xff"):
+            with self.subTest(body=body):
+                self.front.body = body
+                with self.assertRaises(hub.HubError):
+                    hub._request(self.front_config, "GET", "/api/v1/devices")
+
+    def test_a_truncated_answer_is_a_hub_error(self):
+        self.front.body, self.front.length = b"{", 100
+        with self.assertRaises(hub.HubError):
+            hub._request(self.front_config, "GET", "/api/v1/devices")
+
+    def test_requests_that_cannot_be_built_are_hub_errors(self):
+        for config in (
+            hub.HubConfig(self.NOT_A_URL, "x"),
+            hub.HubConfig("http://a b", "x"),
+            hub.HubConfig(self.front_config.url, "not latin-1 ’"),
+        ):
+            with self.subTest(url=config.url, token=config.token):
+                with self.assertRaises(hub.HubError):
+                    hub._request(config, "GET", "/api/v1/devices")
+
+    def test_a_token_that_cannot_be_sent_stays_out_of_the_error(self):
+        config = hub.HubConfig(self.front_config.url, "secret\nsecret")
+        with self.assertRaises(hub.HubError) as caught:
+            hub._request(config, "GET", "/api/v1/devices")
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_a_scheme_less_url_says_what_is_wrong(self):
+        with self.assertRaises(hub.HubError) as caught:
+            hub._request(hub.HubConfig(self.NOT_A_URL, "x"), "GET", "/api/v1/devices")
+        self.assertIn(self.NOT_A_URL, str(caught.exception))
+        self.assertIn("https://", str(caught.exception))
+
+    def test_push_pending_raises_nothing_and_keeps_the_run_queued(self):
+        run = self.record()
+        for label, config, body in (
+            ("no scheme", hub.HubConfig(self.NOT_A_URL, "x"), b"{}"),
+            ("array", self.front_config, b"[]"),
+            ("held is not a list", self.front_config, b'{"held": 5}'),
+        ):
+            with self.subTest(label):
+                self.front.body = body
+                result = hub.push_pending(config, db_path=self.db_path)
+                self.assertTrue(result.error)
+                self.assertEqual(result.remaining, 1)
+        self.assertEqual(state.pending_push(db_path=self.db_path)[0].run_uuid, run.run_uuid)
+
+    def test_fetch_runs_refuses_a_run_list_it_cannot_read(self):
+        self.front.body = b'{"runs": 5}'
+        with self.assertRaises(hub.HubError):
+            hub.fetch_runs(self.front_config)
+
+    def test_fetch_devices_refuses_a_device_list_it_cannot_read(self):
+        for body in (b'{"devices": 5}', b'{"devices": [1]}'):
+            with self.subTest(body=body):
+                self.front.body = body
+                with self.assertRaises(hub.HubError):
+                    hub.fetch_devices(self.front_config)
+
+    def test_hub_sync_on_a_scheme_less_url_exits_1_with_the_error(self):
+        self.record()
+        os.environ[hub.URL_ENV], os.environ[hub.TOKEN_ENV] = self.NOT_A_URL, "x"
+        code, out, err = self._run_cli("hub", "sync")
+        self.assertEqual(code, 1)
+        self.assertIn("1 still queued", out)
+        self.assertIn(self.NOT_A_URL, err)
+
+    def test_hub_status_on_a_scheme_less_url_still_answers_locally(self):
+        self.record()
+        os.environ[hub.URL_ENV], os.environ[hub.TOKEN_ENV] = self.NOT_A_URL, "x"
+        code, out, _ = self._run_cli("hub", "status")
+        self.assertEqual(code, 0)
+        self.assertIn("queued: 1 run(s)", out)
+        self.assertIn("on hub: unknown, the hub could not be asked", out)
+
+    def test_status_all_devices_on_a_scheme_less_url_exits_1_with_the_error(self):
+        os.environ[hub.URL_ENV], os.environ[hub.TOKEN_ENV] = self.NOT_A_URL, "x"
+        code, _, err = self._run_cli("status", "--all-devices")
+        self.assertEqual(code, 1)
+        self.assertIn("could not read the hub", err)
+
+
 class TestHubStatusCommand(_HubTestCase):
     def _status(self):
         args = cli.build_parser().parse_args(["hub", "status"])

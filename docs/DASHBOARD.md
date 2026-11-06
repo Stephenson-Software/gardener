@@ -461,7 +461,7 @@ repository's root, at the Strata commit in `PIN` (`update.sh <sha>`
 re-vendors it; both build scripts refuse files that don't match
 `SHA256SUMS`). The hub's Fleet City builds on the same copy, so `/3d` and
 `/city` serve the same two kit scripts. `garden3d/build.sh` builds
-with emsdk 6.0.11 against Strata's v0.6.0 WebAssembly release (checked by
+with emsdk 6.0.11 against Strata's v0.7.0 WebAssembly release (checked by
 SHA-256) into `gardener/web/garden3d.js` and `.wasm`, and copies the two kit
 scripts beside them; all four are committed so installing gardener needs no
 toolchain. CI's `garden3d` job rebuilds them and fails if the committed

@@ -331,8 +331,13 @@ speaking the contract `hub.UserAuthClient` documents. It covers the
 device side: `hub.env`/env precedence, the outbox draining oldest first
 in batches, the dispatch-path deadline leaving the rest queued, an
 unreachable hub never raising and keeping the run queued, recording a run
-pushing it through `cli._safe_record_run`, and `hub sync` backfilling a
-pre-RFC-0007 history and being a no-op the second time. On the hub side
+pushing it through `cli._safe_record_run`, `hub sync` backfilling a
+pre-RFC-0007 history and being a no-op the second time, and
+(`TestUnusableHub`, against a loopback stand-in for a misconfigured proxy)
+a scheme-less URL, an unsendable token, a truncated answer, or a 200 that
+isn't the JSON object expected all arriving as a `HubError` with the token
+kept out of it, so `hub sync`, `hub status` and `status --all-devices`
+report them rather than a traceback. On the hub side
 it covers idempotency (a re-sent batch stores nothing twice), a token
 storing every row under its own device name whatever the row claims, an unknown outcome refused and left
 queued, a malformed body answered with a 400 rather than a dropped connection
