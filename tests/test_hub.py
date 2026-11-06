@@ -422,8 +422,9 @@ class TestPush(_HubTestCase):
 
 
 class _FrontHandler(BaseHTTPRequestHandler):
-    """What a misconfigured proxy might answer in place of a hub: a 200 with
-    `server.body`, promising `server.length` bytes of it."""
+    """What a misconfigured proxy might answer in place of a hub:
+    `server.status` with `server.body`, promising `server.length` bytes of
+    it, or with a chunked body that is broken from the start."""
 
     def log_message(self, *args):
         pass
@@ -431,7 +432,12 @@ class _FrontHandler(BaseHTTPRequestHandler):
     def _answer(self):
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         body = self.server.body
-        self.send_response(200)
+        self.send_response(self.server.status)
+        if self.server.broken_chunks:
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"not-a-chunk-size\r\n")
+            return
         self.send_header("Content-Length", str(self.server.length or len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -449,7 +455,8 @@ class TestUnusableHub(_HubTestCase):
     def setUp(self):
         super().setUp()
         self.front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
-        self.front.body, self.front.length = b"{}", None
+        self.front.status, self.front.body, self.front.length = 200, b"{}", None
+        self.front.broken_chunks = False
         threading.Thread(target=self.front.serve_forever, daemon=True).start()
         self.addCleanup(self.front.server_close)
         self.addCleanup(self.front.shutdown)
@@ -464,8 +471,8 @@ class TestUnusableHub(_HubTestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_a_200_that_is_not_a_json_object_is_a_hub_error(self):
-        for body in (b"[]", b"null", b"5", b'"ok"', b"<html>", b"\xff\xfe\xff"):
-            with self.subTest(body=body):
+        for body in (b"[]", b"null", b"5", b'"ok"', b"<html>", b"\xff\xfe\xff", b"[" * 200_000):
+            with self.subTest(body=body[:10]):
                 self.front.body = body
                 with self.assertRaises(hub.HubError):
                     hub._request(self.front_config, "GET", "/api/v1/devices")
@@ -474,6 +481,18 @@ class TestUnusableHub(_HubTestCase):
         self.front.body, self.front.length = b"{", 100
         with self.assertRaises(hub.HubError):
             hub._request(self.front_config, "GET", "/api/v1/devices")
+
+    def test_an_error_whose_body_cannot_be_read_keeps_its_status(self):
+        self.front.status, self.front.broken_chunks = 404, True
+        with self.assertRaises(hub.HubError) as caught:
+            hub._request(self.front_config, "POST", "/api/v1/heartbeat", {})
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_a_password_in_the_url_stays_out_of_the_error(self):
+        config = hub.HubConfig("https://user:s3cret@hub.example.com", "x")
+        with self.assertRaises(hub.HubError) as caught:
+            hub._request(config, "GET", "/api/v1/devices")
+        self.assertNotIn("s3cret", str(caught.exception))
 
     def test_requests_that_cannot_be_built_are_hub_errors(self):
         for config in (
@@ -511,15 +530,46 @@ class TestUnusableHub(_HubTestCase):
                 self.assertEqual(result.remaining, 1)
         self.assertEqual(state.pending_push(db_path=self.db_path)[0].run_uuid, run.run_uuid)
 
+    def test_push_pending_counts_only_uuids_from_the_batch(self):
+        first, second = self.record(), self.record()
+        for label, listed in (
+            ("another run's uuid", ["not-in-this-batch"] * 2),
+            ("one uuid twice", [first.run_uuid] * 2),
+            ("a lone surrogate", ["\ud800"]),
+        ):
+            with self.subTest(label):
+                self.front.body = json.dumps({"held": listed}).encode()
+                # The deadline only bounds a regression, which would loop.
+                result = hub.push_pending(
+                    self.front_config, db_path=self.db_path, deadline_seconds=2)
+                self.assertIn("runs in the batch", result.error or "")
+        self.assertEqual(
+            [r.run_uuid for r in state.pending_push(db_path=self.db_path)], [second.run_uuid]
+        )
+
     def test_fetch_runs_refuses_a_run_list_it_cannot_read(self):
-        self.front.body = b'{"runs": 5}'
-        with self.assertRaises(hub.HubError):
-            hub.fetch_runs(self.front_config)
+        good = {"repo": "owner/a", "timestamp": "t", "mode": "tend", "outcome": "tend"}
+        for rows in (5, None, [1], [{}], [{**good, "gap_summary": 5}], [{**good, "device": {}}]):
+            with self.subTest(rows=rows):
+                self.front.body = json.dumps({"runs": rows}).encode()
+                with self.assertRaises(hub.HubError):
+                    hub.fetch_runs(self.front_config)
+        self.front.body = json.dumps({"runs": [good]}).encode()
+        self.assertEqual(hub.fetch_runs(self.front_config)[0].repo, "owner/a")
 
     def test_fetch_devices_refuses_a_device_list_it_cannot_read(self):
         for body in (b'{"devices": 5}', b'{"devices": [1]}'):
             with self.subTest(body=body):
                 self.front.body = body
+                with self.assertRaises(hub.HubError):
+                    hub.fetch_devices(self.front_config)
+
+    def test_an_object_that_is_not_a_hub_answer_is_not_read_as_an_empty_one(self):
+        for body in (b"", b"{}", b'{"status": "ok"}'):
+            with self.subTest(body=body):
+                self.front.body = body
+                with self.assertRaises(hub.HubError):
+                    hub.fetch_runs(self.front_config)
                 with self.assertRaises(hub.HubError):
                     hub.fetch_devices(self.front_config)
 

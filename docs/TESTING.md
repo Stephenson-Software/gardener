@@ -336,8 +336,10 @@ pre-RFC-0007 history and being a no-op the second time, and
 (`TestUnusableHub`, against a loopback stand-in for a misconfigured proxy)
 a scheme-less URL, an unsendable token, a truncated answer, or a 200 that
 isn't the JSON object expected all arriving as a `HubError` with the token
-kept out of it, so `hub sync`, `hub status` and `status --all-devices`
-report them rather than a traceback. On the hub side
+and any URL password kept out of it, so `hub sync`, `hub status` and
+`status --all-devices` report them rather than a traceback, and a push
+counting only uuids from its own batch, so an answer listing others can't
+loop it. On the hub side
 it covers idempotency (a re-sent batch stores nothing twice), a token
 storing every row under its own device name whatever the row claims, an unknown outcome refused and left
 queued, a malformed body answered with a 400 rather than a dropped connection
