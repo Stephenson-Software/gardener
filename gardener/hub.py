@@ -550,23 +550,46 @@ class UserAuthClient:
         headers = {"Content-Type": "application/json", "User-Agent": f"gardener/{__version__}"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(
-            self.base_url + path,
-            data=json.dumps(body).encode("utf-8") if body is not None else None,
-            method=method,
-            headers=headers,
-        )
         try:
+            # Built in here: a URL with no scheme raises from the constructor.
+            req = urllib.request.Request(
+                self.base_url + path,
+                data=json.dumps(body).encode("utf-8") if body is not None else None,
+                method=method,
+                headers=headers,
+            )
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-                return json.loads(resp.read() or b"{}")
+                raw = resp.read()
         except urllib.error.HTTPError as e:
             if e.code in REJECTED_STATUSES:
                 return None
             print(f"gardener hub: UserAuth {path} answered {e.code}", file=sys.stderr)
             raise UserAuthUnavailable(path) from e
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        except (ValueError, http.client.InvalidURL) as e:
+            # Never `e`, and no userinfo: http.client quotes a bad header value,
+            # which is the token, and a URL's password when it reads as a port.
+            where = self.base_url.rpartition("@")[2]
+            print(
+                f"gardener hub: no request to UserAuth {path} could be built for {where!r}. "
+                f"Check {USERAUTH_URL_ENV} (it needs its http:// or https://)",
+                file=sys.stderr,
+            )
+            raise UserAuthUnavailable(path) from e
+        except (OSError, http.client.HTTPException) as e:
             print(f"gardener hub: UserAuth {path} unreachable: {e}", file=sys.stderr)
             raise UserAuthUnavailable(path) from e
+        try:
+            answer = json.loads(raw or b"{}")
+        except (ValueError, RecursionError) as e:
+            # ValueError covers JSONDecodeError and bytes that aren't text.
+            print(f"gardener hub: UserAuth {path} answered with invalid JSON", file=sys.stderr)
+            raise UserAuthUnavailable(path) from e
+        # None is a refusal to every caller, so a 200 of `null` must not
+        # return as one: it says nothing about the credential.
+        if not isinstance(answer, dict):
+            print(f"gardener hub: UserAuth {path} answered with JSON that isn't an object", file=sys.stderr)
+            raise UserAuthUnavailable(path)
+        return answer
 
     @staticmethod
     def _tokens(answer: dict) -> Optional[SessionTokens]:
@@ -635,9 +658,14 @@ class UserAuthClient:
             with self._lock:
                 self._cache.pop(token, None)
             return None
+        username = answer["username"]
+        if not isinstance(username, str):
+            # Callers look this up in a frozenset, so a list would raise there.
+            print("gardener hub: UserAuth /session/validate named no usable username", file=sys.stderr)
+            raise UserAuthUnavailable("/session/validate")
         with self._lock:
-            self._cache[token] = (answer["username"], now + VALIDATE_CACHE_SECONDS)
-        return answer["username"]
+            self._cache[token] = (username, now + VALIDATE_CACHE_SECONDS)
+        return username
 
     def _revoke(self, token: str) -> bool:
         with self._lock:
