@@ -369,8 +369,9 @@ is refused), identical failure pages for a wrong password and an unknown
 user, one `/session/validate` per cache window, sign-out revoking, and
 (`TestUnusableUserAuth`, against the same loopback stand-in for a
 misconfigured proxy) a truncated answer, a 200 that isn't a JSON object
-(`null` included, which would otherwise read as a refusal), a username that
-isn't a string, or a URL that can't make a request all arriving as
+(`null` included, which would otherwise read as a refusal), a validate
+answer with no `valid` verdict or no usable username, or a URL that can't
+make a request all arriving as
 `UserAuthUnavailable`, so the page is a 503 that leaves the cookies alone,
 with the token and any URL password kept out of the log.
 Each security check was mutation-probed: removing it fails a test here.

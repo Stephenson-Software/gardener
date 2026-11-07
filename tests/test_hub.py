@@ -445,6 +445,17 @@ class _FrontHandler(BaseHTTPRequestHandler):
     do_GET = do_POST = _answer
 
 
+def _start_front(test):
+    """A `_FrontHandler` server answering 200 `{}` for `test`'s duration."""
+    front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
+    front.status, front.body, front.length = 200, b"{}", None
+    front.broken_chunks = False
+    threading.Thread(target=front.serve_forever, daemon=True).start()
+    test.addCleanup(front.server_close)
+    test.addCleanup(front.shutdown)
+    return front
+
+
 class TestUnusableHub(_HubTestCase):
     """Every caller of `_request` is written against one promise: a hub that
     can't be used is a `HubError`. `hub sync`, `hub status` and `status
@@ -454,12 +465,7 @@ class TestUnusableHub(_HubTestCase):
 
     def setUp(self):
         super().setUp()
-        self.front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
-        self.front.status, self.front.body, self.front.length = 200, b"{}", None
-        self.front.broken_chunks = False
-        threading.Thread(target=self.front.serve_forever, daemon=True).start()
-        self.addCleanup(self.front.server_close)
-        self.addCleanup(self.front.shutdown)
+        self.front = _start_front(self)
         self.front_config = hub.HubConfig(
             f"http://127.0.0.1:{self.front.server_address[1]}", DEVICE_TOKEN
         )
@@ -1096,13 +1102,7 @@ class TestUnusableUserAuth(_HubTestCase):
     NOT_JSON = (b"<html>", b"\xff\xfe\xff", b"[" * 200_000)
 
     def setUp(self):
-        self.front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
-        self.front.daemon_threads = True
-        self.front.status, self.front.body, self.front.length = 200, b"{}", None
-        self.front.broken_chunks = False
-        threading.Thread(target=self.front.serve_forever, daemon=True).start()
-        self.addCleanup(self.front.server_close)
-        self.addCleanup(self.front.shutdown)
+        self.front = _start_front(self)
         self.url = f"http://127.0.0.1:{self.front.server_address[1]}"
         self.client = hub.UserAuthClient(self.url)
         self.hub_env = _env(**{hub.USERAUTH_URL_ENV: self.url, hub.OPERATORS_ENV: "dan"})
@@ -1136,13 +1136,23 @@ class TestUnusableUserAuth(_HubTestCase):
         self._assert_unavailable(self.client.username_for, self.TOKEN)
 
     def test_a_username_that_is_not_a_string_is_an_outage(self):
-        for username in (["dan"], {"dan": 1}, 5, True):
+        for username in (["dan"], {"dan": 1}, 5, True, [], "", 0, False, None):
             with self.subTest(username=username):
                 self.front.body = json.dumps({"valid": True, "username": username}).encode()
                 self._assert_unavailable(self.client.username_for, self.TOKEN)
                 self.assertEqual(self.client._cache, {})
                 status, headers, _ = self._status_with_session()
                 self.assertEqual((status, headers["cookies"]), (503, []))
+
+    def test_an_object_that_says_nothing_about_the_token_is_an_outage(self):
+        for body in (b"", b"{}", b'{"error": "bad gateway"}', b'{"valid": "yes", "username": "dan"}'):
+            with self.subTest(body=body):
+                self.front.body = body
+                self._assert_unavailable(self.client.username_for, self.TOKEN)
+
+    def test_valid_false_is_still_a_refusal(self):
+        self.front.body = b'{"valid": false, "username": "dan"}'
+        self.assertIsNone(self.client.username_for(self.TOKEN))
 
     def test_an_unusable_answer_leaves_the_session_alone(self):
         for body, length in ((b"[1]", None), (b"null", None), (b"\xff\xfe\xff", None), (b"{", 100)):

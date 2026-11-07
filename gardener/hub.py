@@ -571,7 +571,8 @@ class UserAuthClient:
             where = self.base_url.rpartition("@")[2]
             print(
                 f"gardener hub: no request to UserAuth {path} could be built for {where!r}. "
-                f"Check {USERAUTH_URL_ENV} (it needs its http:// or https://)",
+                f"Check {USERAUTH_URL_ENV} (it needs its http:// or https://), any proxy "
+                "setting, and the request's cookies",
                 file=sys.stderr,
             )
             raise UserAuthUnavailable(path) from e
@@ -654,14 +655,16 @@ class UserAuthClient:
             if hit and hit[1] > now:
                 return hit[0]
         answer = self._call("GET", "/session/validate", token=token)
-        if not answer or answer.get("valid") is not True or not answer.get("username"):
+        if answer is None or answer.get("valid") is False:
             with self._lock:
                 self._cache.pop(token, None)
             return None
-        username = answer["username"]
-        if not isinstance(username, str):
-            # Callers look this up in a frozenset, so a list would raise there.
-            print("gardener hub: UserAuth /session/validate named no usable username", file=sys.stderr)
+        username = answer.get("username")
+        # Anything else says nothing about the token, and reading it as a
+        # refusal would spend the refresh token. Callers look the username up
+        # in a frozenset, so a list would also raise there.
+        if answer.get("valid") is not True or not isinstance(username, str) or not username:
+            print("gardener hub: UserAuth /session/validate gave no usable answer", file=sys.stderr)
             raise UserAuthUnavailable("/session/validate")
         with self._lock:
             self._cache[token] = (username, now + VALIDATE_CACHE_SECONDS)
