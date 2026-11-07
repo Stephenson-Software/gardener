@@ -94,9 +94,12 @@ The access cookie lasts for the browser session. The refresh cookie lasts
 refused, so an operator stays signed in across hourly expiry and browser
 restarts for as long as UserAuth keeps honouring the refresh token. If
 UserAuth refuses it, both cookies are cleared and the next page is
-`/login`. If UserAuth can't answer, or answers 429 or a 5xx, the hub
-responds 503 and leaves the cookies alone, so the session resumes when
-UserAuth does. Exchanges are shared in memory for 60 seconds, because
+`/login`. If UserAuth can't answer, answers 429 or a 5xx, or answers with
+something the hub can't use, the hub responds 503 and leaves the cookies
+alone, so the session resumes when UserAuth does. The one exception is an
+exchange that UserAuth completed but whose answer never reached the hub
+intact: the browser's token is then spent, so the next attempt counts as
+reuse and ends the session. Exchanges are shared in memory for 60 seconds, because
 refresh tokens are single-use and tabs and the dashboard's poll race each
 other, so a UserAuth-enabled hub must run as a single process.
 

@@ -445,6 +445,17 @@ class _FrontHandler(BaseHTTPRequestHandler):
     do_GET = do_POST = _answer
 
 
+def _start_front(test):
+    """A `_FrontHandler` server answering 200 `{}` for `test`'s duration."""
+    front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
+    front.status, front.body, front.length = 200, b"{}", None
+    front.broken_chunks = False
+    threading.Thread(target=front.serve_forever, daemon=True).start()
+    test.addCleanup(front.server_close)
+    test.addCleanup(front.shutdown)
+    return front
+
+
 class TestUnusableHub(_HubTestCase):
     """Every caller of `_request` is written against one promise: a hub that
     can't be used is a `HubError`. `hub sync`, `hub status` and `status
@@ -454,12 +465,7 @@ class TestUnusableHub(_HubTestCase):
 
     def setUp(self):
         super().setUp()
-        self.front = ThreadingHTTPServer(("127.0.0.1", 0), _FrontHandler)
-        self.front.status, self.front.body, self.front.length = 200, b"{}", None
-        self.front.broken_chunks = False
-        threading.Thread(target=self.front.serve_forever, daemon=True).start()
-        self.addCleanup(self.front.server_close)
-        self.addCleanup(self.front.shutdown)
+        self.front = _start_front(self)
         self.front_config = hub.HubConfig(
             f"http://127.0.0.1:{self.front.server_address[1]}", DEVICE_TOKEN
         )
@@ -1082,6 +1088,111 @@ class TestUserAuthSignIn(_HubTestCase):
         _UserAuthStub.malformed_refresh = True
         status, headers, _ = self.hub.request("GET", "/api/status", session)
         self.assertEqual((status, headers["cookies"]), (503, []))
+
+
+class TestUnusableUserAuth(_HubTestCase):
+    """`UserAuthClient` is written against one promise: a UserAuth that gives
+    no usable answer is `UserAuthUnavailable`, never a refusal and never
+    another exception. `HubHandler` catches nothing else, so anything that
+    gets past it drops the request's connection, and a refusal clears the
+    cookies of a session that may still be good."""
+
+    TOKEN = "jwt-dan.1"
+    NOT_OBJECTS = (b"[]", b"[1]", b"null", b"0", b"5", b'"ok"', b"false")
+    NOT_JSON = (b"<html>", b"\xff\xfe\xff", b"[" * 200_000)
+
+    def setUp(self):
+        self.front = _start_front(self)
+        self.url = f"http://127.0.0.1:{self.front.server_address[1]}"
+        self.client = hub.UserAuthClient(self.url)
+        self.hub_env = _env(**{hub.USERAUTH_URL_ENV: self.url, hub.OPERATORS_ENV: "dan"})
+        super().setUp()
+
+    def _assert_unavailable(self, call, *args):
+        with redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(hub.UserAuthUnavailable):
+                call(*args)
+        return err.getvalue()
+
+    def _status_with_session(self):
+        with redirect_stderr(io.StringIO()):
+            return self.hub.request(
+                "GET", "/api/status", {"Cookie": f"{hub.SESSION_COOKIE}={self.TOKEN}"})
+
+    def test_a_200_that_is_not_a_json_object_is_an_outage(self):
+        for body in self.NOT_OBJECTS + self.NOT_JSON:
+            with self.subTest(body=body[:10]):
+                self.front.body = body
+                self._assert_unavailable(self.client.username_for, self.TOKEN)
+                self._assert_unavailable(self.client.refresh, f"r-{body[:10]!r}")
+
+    def test_a_truncated_answer_is_an_outage(self):
+        self.front.body, self.front.length = b"{", 100
+        self._assert_unavailable(self.client.username_for, self.TOKEN)
+        self._assert_unavailable(self.client.refresh, "r")
+
+    def test_a_broken_chunked_answer_is_an_outage(self):
+        self.front.broken_chunks = True
+        self._assert_unavailable(self.client.username_for, self.TOKEN)
+
+    def test_a_username_that_is_not_a_string_is_an_outage(self):
+        for username in (["dan"], {"dan": 1}, 5, True, [], "", 0, False, None):
+            with self.subTest(username=username):
+                self.front.body = json.dumps({"valid": True, "username": username}).encode()
+                self._assert_unavailable(self.client.username_for, self.TOKEN)
+                self.assertEqual(self.client._cache, {})
+                status, headers, _ = self._status_with_session()
+                self.assertEqual((status, headers["cookies"]), (503, []))
+
+    def test_an_object_that_says_nothing_about_the_token_is_an_outage(self):
+        for body in (b"", b"{}", b'{"error": "bad gateway"}', b'{"valid": "yes", "username": "dan"}'):
+            with self.subTest(body=body):
+                self.front.body = body
+                self._assert_unavailable(self.client.username_for, self.TOKEN)
+
+    def test_valid_false_is_still_a_refusal(self):
+        self.front.body = b'{"valid": false, "username": "dan"}'
+        self.assertIsNone(self.client.username_for(self.TOKEN))
+
+    def test_an_unusable_answer_leaves_the_session_alone(self):
+        for body, length in ((b"[1]", None), (b"null", None), (b"\xff\xfe\xff", None), (b"{", 100)):
+            with self.subTest(body=body):
+                self.front.body, self.front.length = body, length
+                status, headers, _ = self._status_with_session()
+                self.assertEqual((status, headers["cookies"]), (503, []))
+                self.assertNotIn("Location", headers)
+
+    def test_an_unusable_answer_at_refresh_leaves_the_session_alone(self):
+        for body in (b"null", b"[1]"):
+            with self.subTest(body=body):
+                self.front.body = body
+                with redirect_stderr(io.StringIO()):
+                    status, headers, _ = self.hub.request(
+                        "GET", "/api/status", {"Cookie": f"{hub.REFRESH_COOKIE}=r-{len(body)}"})
+                self.assertEqual((status, headers["cookies"]), (503, []))
+
+    def test_signing_in_against_an_unusable_answer_fails_like_a_bad_password(self):
+        for body in (b"[1]", b"null", b"\xff\xfe\xff"):
+            with self.subTest(body=body):
+                self.front.body = body
+                with redirect_stderr(io.StringIO()):
+                    self.assertIsNone(self.client.login("dan", "pw"))
+
+    def test_a_url_that_cannot_make_a_request_is_an_outage(self):
+        for url in ("userauth.example.com", "http://a b"):
+            with self.subTest(url=url):
+                self._assert_unavailable(hub.UserAuthClient(url).username_for, self.TOKEN)
+
+    def test_the_token_stays_out_of_the_log(self):
+        for token in ("s3cret\nline", "s3cret ’"):
+            with self.subTest(token=token):
+                logged = self._assert_unavailable(self.client.username_for, token)
+                self.assertNotIn("s3cret", logged)
+
+    def test_a_password_in_the_url_stays_out_of_the_log(self):
+        client = hub.UserAuthClient("http://user:s3cret@userauth.example.com")
+        logged = self._assert_unavailable(client.username_for, self.TOKEN)
+        self.assertNotIn("s3cret", logged)
 
 
 class TestDeviceHealth(_HubTestCase):

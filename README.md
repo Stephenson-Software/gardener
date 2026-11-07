@@ -323,7 +323,8 @@ the [Code of Conduct](CODE_OF_CONDUCT.md).
     PYTHONPATH=. python3 -m unittest discover -s tests -v
 
 A passing run ends with `OK`. None of the automated tests hit the network,
-invoke a real `claude`/`git`/`gh` process, or mutate a real repo. See
+invoke a real `claude`/`gh` process, run `git` outside a throwaway tmp repo,
+or mutate a real repo. See
 **[docs/TESTING.md](docs/TESTING.md)** for exactly what each test module
 covers and for the manual/end-to-end verification steps required before
 trusting a change to the dispatch layer.
