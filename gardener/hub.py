@@ -445,6 +445,16 @@ def mint_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _requestable_url(url: str) -> bool:
+    """Whether `UserAuthClient._call` could ever build a request for `url`."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port  # raises on a port that is not a number
+    except ValueError:
+        return False
+    return parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+
+
 @dataclass
 class ServerAuth:
     """The hub's credentials, read once from the environment at start."""
@@ -483,6 +493,12 @@ class ServerAuth:
         out = []
         if self.userauth_url and not self.operators:
             out.append(f"{USERAUTH_URL_ENV} is set but {OPERATORS_ENV} is empty: nobody could sign in")
+        if self.userauth_url and not _requestable_url(self.userauth_url):
+            # Never the URL itself: it may carry a password in its userinfo.
+            out.append(
+                f"{USERAUTH_URL_ENV} is not an http:// or https:// URL with a host: "
+                "no request to UserAuth could ever be made, so nobody could sign in"
+            )
         if not self.operator_basic_digest and not self.userauth_url:
             out.append(
                 f"no operator credential: set {OPERATOR_BASIC_ENV} and/or "
