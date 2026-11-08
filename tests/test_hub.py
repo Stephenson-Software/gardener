@@ -172,6 +172,37 @@ class TestServerAuth(unittest.TestCase):
         auth = hub.ServerAuth.from_env({hub.USERAUTH_URL_ENV: "http://userauth:9998"})
         self.assertTrue(any(hub.OPERATORS_ENV in p for p in auth.problems()))
 
+    def test_a_userauth_url_that_can_never_make_a_request_is_refused(self):
+        for url in ("userauth.example.com", "userauth:9998", "ftp://userauth.example.com",
+                    "http://", "https://:9998", "http://userauth:port", "http://[::1"):
+            with self.subTest(url=url):
+                problems = hub.ServerAuth.from_env({
+                    hub.USERAUTH_URL_ENV: url, hub.OPERATORS_ENV: "dan",
+                }).problems()
+                self.assertTrue(any("http:// or https://" in p for p in problems), problems)
+
+    def test_the_refusal_never_echoes_the_userauth_url(self):
+        problems = hub.ServerAuth.from_env({
+            hub.USERAUTH_URL_ENV: "user:s3cret@userauth.example.com", hub.OPERATORS_ENV: "dan",
+        }).problems()
+        self.assertTrue(problems)
+        self.assertFalse(any("s3cret" in p for p in problems), problems)
+
+    def test_a_requestable_userauth_url_is_accepted(self):
+        for url in ("http://userauth:9998", "https://userauth.example.com/base/",
+                    "HTTPS://userauth.example.com", "http://[::1]:9998"):
+            with self.subTest(url=url):
+                self.assertEqual(hub.ServerAuth.from_env({
+                    hub.USERAUTH_URL_ENV: url, hub.OPERATORS_ENV: "dan",
+                }).problems(), [])
+
+    def test_serve_exits_2_on_a_scheme_less_userauth_url(self):
+        env = dict(_env(), **{hub.USERAUTH_URL_ENV: "userauth.example.com", hub.OPERATORS_ENV: "dan"})
+        with tempfile.TemporaryDirectory() as d, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(hub.serve("127.0.0.1", 0, Path(d), env=env), 2)
+        self.assertIn("refusing to start", err.getvalue())
+        self.assertIn(hub.USERAUTH_URL_ENV, err.getvalue())
+
     def test_either_operator_mode_alone_is_enough(self):
         self.assertEqual(hub.ServerAuth.from_env(_env()).problems(), [])
         self.assertEqual(hub.ServerAuth.from_env({
