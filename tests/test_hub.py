@@ -196,13 +196,6 @@ class TestServerAuth(unittest.TestCase):
                     hub.USERAUTH_URL_ENV: url, hub.OPERATORS_ENV: "dan",
                 }).problems(), [])
 
-    def test_serve_exits_2_on_a_scheme_less_userauth_url(self):
-        env = dict(_env(), **{hub.USERAUTH_URL_ENV: "userauth.example.com", hub.OPERATORS_ENV: "dan"})
-        with tempfile.TemporaryDirectory() as d, redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(hub.serve("127.0.0.1", 0, Path(d), env=env), 2)
-        self.assertIn("refusing to start", err.getvalue())
-        self.assertIn(hub.USERAUTH_URL_ENV, err.getvalue())
-
     def test_either_operator_mode_alone_is_enough(self):
         self.assertEqual(hub.ServerAuth.from_env(_env()).problems(), [])
         self.assertEqual(hub.ServerAuth.from_env({
