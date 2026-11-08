@@ -351,7 +351,10 @@ non-`/healthz` route refusing anonymous requests, a device
 token reading `/api/v1/` but not the dashboard, the garden as the union of
 pushed lists, and `/live` named per-device. `TestServerAuth` covers `serve`
 exiting 2 on a missing credential or a malformed device token entry, and
-a mis-pasted raw token never appearing in the error, and `TestMintToken`
+a mis-pasted raw token never appearing in the error. It also covers a
+UserAuth URL that could never be requested (no `http://` or `https://`,
+no host, a port that is not a number) being refused at start without the
+URL, which may hold a password, appearing in the error. `TestMintToken`
 covers `cli.device_name_arg`: a `hub token --device` that would not survive
 being pasted into the quoted, comma-separated token list is a usage error,
 and every accepted name round trips through `ServerAuth.from_env` beside
