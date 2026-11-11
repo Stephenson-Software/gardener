@@ -41,6 +41,10 @@ constexpr int kBuildingStride = 7;
 constexpr int kDistrictStride = 4;
 // Beacon row (a building being tended right now): x, y, z, r, g, b, strength.
 constexpr int kBeaconStride = 7;
+// Weather row (RFC 0032): x, z (the plot's centre), roof y, kind (1 drizzle,
+// 2 rain, 3 storm), intensity 0..1, lightning (0 or 1).
+constexpr int kWeatherStride = 6;
+constexpr int kDrizzle = 1, kRain = 2, kStorm = 3;
 constexpr float kRoof = 0.08f;   // roof slab thickness
 constexpr float kInset = 0.06f;  // roof inset from the walls
 constexpr float kPad = 0.04f;    // district pavement height
@@ -76,6 +80,10 @@ struct City {
     std::vector<float> districts;
     std::vector<float> beacons;
     std::vector<float> glows;
+    std::vector<float> weather;
+    // The rain and storm cloud meshes (at most two). Kept out of meshIds:
+    // they are not buildings, and fc_pick looks through them.
+    std::vector<uint32_t> cloudIds;
     float bounds[4] = {-10, -10, 10, 10};
     int selected = -1, hovered = -1;
     bool citySet = false;
@@ -170,6 +178,8 @@ void rebuild() {
 // The district of each building, parallel to c.buildings.
 std::vector<int> gDistrictOf;
 
+void rebuildClouds();
+
 // The ground, then one body mesh and one roof mesh per district, in
 // district order: 1 + 2 * districts meshes, far under STRATA_MAX_MESHES.
 void rebuildMeshes() {
@@ -204,6 +214,122 @@ void rebuildMeshes() {
     for (size_t d = 0; d < nd; ++d) {
         addMesh(bodies[d], c.bodyTexture, 0);
         addMesh(roofs[d], c.roofTexture, STRATA_MESH_UNLIT);
+    }
+    // strata_clear_meshes took the clouds too.
+    c.cloudIds.clear();
+    rebuildClouds();
+}
+
+// RFC 0032 §3: how far a cell's cloud and rain reach from the plot's centre
+// (a plot is about 1.7 across): a storm covers its neighbours too, so a
+// flood reads from across the city. The same numbers as fleetweather.py.
+float weatherSpread(int kind) { return kind == kStorm ? 2.6f : kind == kRain ? 1.25f : 0.9f; }
+float cloudBase(const float* w) {
+    return w[2] + (static_cast<int>(w[3]) == kStorm ? 1.6f : 2.2f + 1.0f * w[4]);
+}
+
+// Rain and storm clouds as translucent slabs: one mesh per kind, so weather
+// costs Strata two meshes whatever the fleet. Soft points blend additively
+// and cannot draw a dark cloud; a slab can.
+void rebuildClouds() {
+    StrataEngine* e = engine();
+    if (!e) return;
+    for (uint32_t id : c.cloudIds) strata_remove_mesh(e, id);
+    c.cloudIds.clear();
+    if (strata_abi_minor() < 11) return;  // no STRATA_MESH_TRANSLUCENT before 1.11
+    const struct {
+        int kind;
+        float rgb[3], alpha;
+    } kinds[2] = {{kRain, {0.30f, 0.32f, 0.36f}, 0.55f}, {kStorm, {0.06f, 0.06f, 0.08f}, 0.82f}};
+    for (const auto& k : kinds) {
+        MeshData m;
+        for (size_t i = 0; i + kWeatherStride <= c.weather.size(); i += kWeatherStride) {
+            const float* w = &c.weather[i];
+            if (static_cast<int>(w[3]) != k.kind) continue;
+            const float r = weatherSpread(k.kind), y = cloudBase(w), q = std::clamp(w[4], 0.0f, 1.0f);
+            box(m, w[0] - r, y, w[1] - r, w[0] + r, y + 0.5f + 0.6f * q, w[1] + r, k.rgb, 0, 0, true);
+            box(m, w[0] - r * 0.6f, y + 0.4f, w[1] - r * 0.7f, w[0] + r * 0.7f, y + 1.1f + 0.8f * q, w[1] + r * 0.5f,
+                k.rgb, 0, 0, true);
+        }
+        if (m.indices.empty()) continue;
+        StrataTexturedMesh tm{};
+        tm.mesh.positions = m.positions.data();
+        tm.mesh.normals = m.normals.data();
+        tm.mesh.colors = m.colors.data();
+        tm.mesh.indices = m.indices.data();
+        tm.mesh.vertex_count = static_cast<int32_t>(m.vertices());
+        tm.mesh.index_count = static_cast<int32_t>(m.indices.size());
+        tm.mesh.color[0] = tm.mesh.color[1] = tm.mesh.color[2] = 1.0f;
+        tm.mesh.color[3] = k.alpha;
+        tm.uvs = m.uvs.data();
+        tm.flags = STRATA_MESH_TRANSLUCENT;
+        uint32_t id = 0;
+        if (strata_add_textured_mesh(e, &tm, &id) == STRATA_OK)
+            c.cloudIds.push_back(id);
+        else
+            std::fprintf(stderr, "fleetcity: clouds: %s\n", strata_last_error());
+    }
+}
+
+// A small deterministic hash in 0..1, so each raindrop keeps its place.
+float hash01(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return static_cast<float>(x & 0xffffffU) / static_cast<float>(0x1000000);
+}
+
+// This frame's weather: wisps over drizzle, falling streaks under every
+// cloud, and lightning where a cell has it. Rain is left out at the lowest
+// quality tier; with reduced motion it stands still and lightning glows
+// steadily instead of flashing.
+void buildWeather(strata_kit::Host& h, double seconds) {
+    const bool rain = h.quality > 0;
+    const double t = h.reducedMotion ? 0.0 : seconds;
+    int lit = 0;
+    for (size_t i = 0; i + kWeatherStride <= c.weather.size(); i += kWeatherStride) {
+        const float* w = &c.weather[i];
+        const int kind = static_cast<int>(w[3]);
+        const float q = std::clamp(w[4], 0.0f, 1.0f), r = weatherSpread(kind), base = cloudBase(w);
+        const uint32_t seed = static_cast<uint32_t>(i) * 977u;
+        if (kind == kDrizzle)
+            for (int k = 0; k < 4; ++k)
+                h.point(w[0] + (hash01(seed + k) - 0.5f) * 1.8f, base + hash01(seed + 40 + k) * 0.7f,
+                        w[1] + (hash01(seed + 80 + k) - 0.5f) * 1.8f, 10.0f + 18.0f * q, 1.3f + 1.4f * q,
+                        {0.5f, 0.5f, 0.53f}, 0.55f + 0.35f * q);
+        if (rain && kind >= kDrizzle && kind <= kStorm) {
+            const int drops = kind == kDrizzle ? 5 : static_cast<int>(6 + 70 * q * q) * (kind == kStorm ? 4 : 1);
+            const float floor = kind == kStorm ? 0.3f : w[2] + 0.2f;
+            const float fall = std::max(0.5f, base - floor);
+            const float slant = kind == kStorm ? 0.35f * q : 0.08f;
+            const float len = 0.35f + 0.9f * q, speed = kind == kStorm ? 9.0f : 6.0f;
+            for (int k = 0; k < drops; ++k) {
+                const uint32_t s = seed + 1000u + static_cast<uint32_t>(k) * 3u;
+                const float x = w[0] + (hash01(s) * 2.0f - 1.0f) * r, z = w[1] + (hash01(s + 1) * 2.0f - 1.0f) * r;
+                const float y = base - std::fmod(hash01(s + 2) * fall + static_cast<float>(t) * speed, fall);
+                h.line(x, y, z, x + slant * len, y - len, z, {0.62f, 0.74f, 0.95f}, 0.35f + 0.45f * q);
+            }
+        }
+        if (w[5] > 0.5f) {
+            // A flash about every four seconds, staggered per cell, lasting
+            // a sixth of a second; steady and dim with reduced motion.
+            const double phase = std::fmod(t + hash01(seed + 7) * 4.0, 4.0);
+            const bool flash = h.reducedMotion || phase < 0.17;
+            if (!flash) continue;
+            const float glow = h.reducedMotion ? 0.35f : 1.0f;
+            float x = w[0], y = base, z = w[1];
+            for (int k = 0; k < 12 && y > w[2] + 0.15f; ++k) {
+                const uint32_t s = seed + 5000u + static_cast<uint32_t>(k) * 3u;
+                const float nx = x + (hash01(s) - 0.5f) * 0.7f, nz = z + (hash01(s + 1) - 0.5f) * 0.7f;
+                const float ny = std::max(w[2] + 0.12f, y - 0.3f - 0.4f * hash01(s + 2));
+                h.line(x, y, z, nx, ny, nz, {0.92f, 0.94f, 1.0f}, glow);
+                x = nx, y = ny, z = nz;
+            }
+            h.point(w[0], base, w[1], 40.0f, 4.5f, {0.8f, 0.85f, 1.0f}, 0.55f * glow);
+            if (lit++ < 8) h.light(w[0], w[2] + 3.0f, w[1], 9.0f, {0.75f, 0.8f, 1.0f}, 6.0f * glow, 3);
+        }
     }
 }
 
@@ -316,6 +442,7 @@ void strata_kit_engine_ready(strata_kit::Host&) {
     c.bodyTexture = c.roofTexture = 0;
     c.meshIds.clear();
     c.meshTags.clear();
+    c.cloudIds.clear();  // died with the old engine
     if (c.citySet) rebuildMeshes();
 }
 
@@ -357,6 +484,7 @@ void strata_kit_build(strata_kit::Host& h, double seconds) {
             }
         });
     }
+    buildWeather(h, seconds);
     if (const Building* b = findBuilding(c.hovered)) outline(*b, 0.85f, 0.9f, 1.0f, 0.55f);
     if (const Building* b = findBuilding(c.selected)) outline(*b, 1.0f, 1.0f, 1.0f, 0.95f);
 }
@@ -410,6 +538,14 @@ STRATA_KIT_EXPORT void fc_set_glows(const float* rows, int count) {
     c.glows.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kBeaconStride);
 }
 
+// Weather over the city (RFC 0032; kWeatherStride floats each: x, z, roof y,
+// kind, intensity, lightning). Rebuilds the two cloud meshes; an empty list
+// clears the sky.
+STRATA_KIT_EXPORT void fc_set_weather(const float* rows, int count) {
+    c.weather.assign(rows, rows + static_cast<size_t>(std::max(count, 0)) * kWeatherStride);
+    if (c.citySet) rebuildClouds();
+}
+
 STRATA_KIT_EXPORT void fc_set_selected(int selected, int hovered) {
     c.selected = selected;
     c.hovered = hovered;
@@ -433,9 +569,21 @@ STRATA_KIT_EXPORT int fc_pick(float cssX, float cssY, float cssW, float cssH) {
         for (int k = 0; k < 4; ++k) w[r] += inv[k * 4 + r] * clip[k];
     if (std::fabs(w[3]) < 1e-9f) return -1;
     const float dir[3] = {w[0] / w[3] - h.eye[0], w[1] / w[3] - h.eye[1], w[2] / w[3] - h.eye[2]};
-    StrataRayHit hit{};
-    if (strata_raycast_meshes(h.engine, h.eye, dir, 1.0e6f, &hit) != STRATA_OK || hit.mesh_id == 0) return -1;
-    for (size_t i = 0; i < c.meshIds.size(); ++i)
-        if (c.meshIds[i] == hit.mesh_id) return tagOf(c.meshTags[i], static_cast<uint32_t>(hit.triangle));
+    // A cloud is not a building: a ray that hits one goes on from just past
+    // it (a slab has two faces, and two kinds of cloud may overlap).
+    float origin[3] = {h.eye[0], h.eye[1], h.eye[2]};
+    const float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (!(len > 0.0f)) return -1;
+    for (int tries = 0; tries < 9; ++tries) {
+        StrataRayHit hit{};
+        if (strata_raycast_meshes(h.engine, origin, dir, 1.0e6f, &hit) != STRATA_OK || hit.mesh_id == 0) return -1;
+        if (std::find(c.cloudIds.begin(), c.cloudIds.end(), hit.mesh_id) != c.cloudIds.end()) {
+            for (int k = 0; k < 3; ++k) origin[k] = hit.point[k] + dir[k] / len * 0.01f;
+            continue;
+        }
+        for (size_t i = 0; i < c.meshIds.size(); ++i)
+            if (c.meshIds[i] == hit.mesh_id) return tagOf(c.meshTags[i], static_cast<uint32_t>(hit.triangle));
+        return -1;
+    }
     return -1;
 }

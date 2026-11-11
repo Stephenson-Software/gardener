@@ -80,7 +80,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping, NamedTuple, Optional, Sequence
 
-from gardener import __version__, dashboard, fleetcity, garden, garden3d, merge_allowlist, notify, state
+from gardener import __version__, dashboard, fleetcity, fleetweather, garden, garden3d, merge_allowlist, notify, state
 
 URL_ENV = "GARDENER_HUB_URL"
 TOKEN_ENV = "GARDENER_HUB_TOKEN"
@@ -1171,6 +1171,8 @@ class HubHandler(dashboard._DashboardHandler):
     data_dir: Optional[Path] = None
     auth: ServerAuth = ServerAuth()
     userauth: Optional[UserAuthClient] = None
+    #: Fleet City's weather (RFC 0032): off unless the environment turns it on.
+    weather: Optional["fleetweather.Forecaster"] = None
     #: Set-Cookie values to go out with this request's response, whichever
     #: route writes it.
     _pending_cookies: Sequence[str] = ()
@@ -1389,6 +1391,13 @@ class HubHandler(dashboard._DashboardHandler):
             print(f"gardener hub: /api/city failed: {exc!r}", file=sys.stderr)
             self._json(500, {"error": type(exc).__name__})
             return
+        if self.weather is not None and self.weather.config.enabled:
+            try:
+                sample, status = self.weather.sample(self.data_dir)
+            except Exception as exc:  # noqa: BLE001 - weather is decoration; the city still answers
+                print(f"gardener hub: weather failed: {exc!r}", file=sys.stderr)
+                sample, status = None, type(exc).__name__
+            payload["weather"] = fleetweather.cells_payload(payload, sample, status)
         self._json(200, payload)
 
     def _api_get(self, path: str, query: str, device: Optional[str] = None) -> None:
@@ -1558,6 +1567,12 @@ def serve(
     HubHandler.data_dir = data_dir
     HubHandler.auth = auth
     HubHandler.userauth = UserAuthClient(auth.userauth_url) if auth.userauth_url else None
+    weather = fleetweather.Config.from_env(env)
+    weather_problem = weather.problem()
+    if weather.enabled and weather_problem:
+        print(f"gardener hub: NOTE — Fleet City weather is on but {weather_problem}; the city stays clear",
+              file=sys.stderr)
+    HubHandler.weather = fleetweather.Forecaster(weather)
     httpd = ThreadingHTTPServer((host, port), HubHandler)
     modes = [m for m, on in (("basic", auth.operator_basic_digest), ("UserAuth", auth.userauth_url)) if on]
     print(

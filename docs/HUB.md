@@ -270,6 +270,56 @@ PNG. It needs the Linux library and the binding, both SHA-pinned:
 build time and installs `libegl1` and `libgl1-mesa-dri`. Posting the
 picture is the deployment's job, like the digest's.
 
+### Weather (RFC 0032)
+
+![Fleet City with weather on a synthetic fleet: rain over a third of the buildings and one storm](img/fleet-city-weather-page.png)
+
+With weather on, the city also shows how much each repository is **used**,
+from trace: one weather cell over each building whose program reported in
+the last five minutes. The thresholds are per minute and are in the legend:
+
+| Cell | Rule |
+|---|---|
+| clear | no events |
+| drizzle | under 1 a minute |
+| rain | 1 a minute up to 60 |
+| storm | 60 a minute or more (trace's FloodGuard threshold), or any event trace tagged `flood` |
+
+Intensity is `log10(1 + rate) / log10(1 + 600)`: ten a second is full
+strength. Rain is drawn only while the page is **Live** (it is the sky now,
+not the timelapse's), it drops out at the lowest quality tier, and with
+reduced motion it stands still. The card shows a building's weather and
+rate; the summary counts the cells. The rain and storm clouds are two
+translucent meshes whatever the fleet size, and a click goes through them to
+the building underneath. Lightning is drawn for a cell whose sample carries
+`errors`, but nothing fills that yet (trace has no error events), so it never
+appears on a live hub.
+
+It is **off** unless the hub's environment turns it on:
+
+| Variable | Meaning |
+|---|---|
+| `GARDENER_HUB_WEATHER=1` | turn weather on |
+| `GARDENER_HUB_TRACE_URL` | trace's base URL (`http://trace:8080` on the gateway's network) |
+| `GARDENER_HUB_TRACE_READER` | `user:password` of a trace **reader** credential (trace's `trace.reader.basic-sha256`): it reads `GET /api/metrics/window` and nothing else |
+
+and `programs.json` is in the data directory beside `city.json`: which
+repository each trace program belongs to, `{"Program": "owner/repo"}` or
+`{"Program": ["owner/a", "owner/b"]}`. A program it does not name never
+rains; a program naming several repositories rains on each, and several
+programs on one repository add up. The hub reads trace at most once a minute
+however many pages are open, and every failure (trace down, a refused
+credential, no `programs.json`) is a clear sky with the reason in
+`/api/city`'s `weather.status` and in the page's summary, never an error.
+Only per-program counts come back from trace: no install id, server or tag.
+
+`gardener hub city-still` draws the same weather when it is on, and
+`--weather-sample FILE` draws it from a sample in the RFC's shape
+(`{"window_seconds": 300, "repos": {"owner/name": {"events": 120, "flood": 0}}}`)
+without reading trace, which is how CI and the picture below were made:
+
+![The still with a flood: one dark storm over one building, drizzle and rain elsewhere](img/fleet-city-weather.png)
+
 ## Orphaned-PR check
 
 Before a `tend`, gardener looks for an open PR that an earlier `tend` opened

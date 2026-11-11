@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
@@ -2151,7 +2152,7 @@ def cmd_hub_city_still(args: argparse.Namespace) -> int:
     digest timer to attach to the owner's private digest. Exits 0 with the
     PNG written, 2 when Strata's binding or library is missing or isn't the
     pinned release, 1 when rendering fails."""
-    from gardener import fleetcity
+    from gardener import fleetcity, fleetweather
 
     data_dir = args.data_dir or state.default_state_dir() / "hub"
     db_path = data_dir / "gardener.sqlite3"
@@ -2161,9 +2162,23 @@ def cmd_hub_city_still(args: argparse.Namespace) -> int:
         garden_repos=hub.union_device_lists(db_path)["garden"],
         nights=max(1, int(args.hours // 24) + 1),
     )
+    weather = None
+    if args.weather_sample is not None:
+        try:
+            weather = fleetweather.parse_sample(json.loads(args.weather_sample.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print(f"gardener hub city-still: --weather-sample: {exc}", file=sys.stderr)
+            return 2
+    else:
+        forecaster = fleetweather.Forecaster(fleetweather.Config.from_env(os.environ))
+        if forecaster.config.enabled:
+            weather, status = forecaster.sample(data_dir)
+            if weather is None:
+                print(f"gardener hub city-still: no weather: {status}", file=sys.stderr)
     try:
         result = fleetcity.render_still(city, args.out, width=args.width, height=args.height, hours=args.hours,
-                                        lib_path=args.strata_lib, binding_dir=args.strata_python)
+                                        lib_path=args.strata_lib, binding_dir=args.strata_python,
+                                        weather=weather)
     except fleetcity.StillUnavailable as exc:
         print(f"gardener hub city-still: {exc}", file=sys.stderr)
         return 2
@@ -2173,6 +2188,8 @@ def cmd_hub_city_still(args: argparse.Namespace) -> int:
     lit = result["lit"]
     print(f"Fleet City: {result['repos']} repos; last {args.hours:g} h: {lit['ok']} tended, "
           f"{lit['created']} created, {lit['error']} errored")
+    if result.get("weather"):
+        print(fleetweather.describe_summary(result["weather"]))
     return 0
 
 
@@ -2756,6 +2773,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="libstrata-0.6.0-linux-x64.so (default: $GARDENER_STRATA_LIB)")
     hub_city.add_argument("--strata-python", default=None,
                           help="Directory holding Strata's Python binding (default: $GARDENER_STRATA_PYTHON)")
+    hub_city.add_argument("--weather-sample", type=Path, default=None, metavar="JSON",
+                          help="Draw weather from this sample (RFC 0032 shape) instead of reading trace "
+                               "(which happens only when GARDENER_HUB_WEATHER is on)")
     hub_city.set_defaults(func=cmd_hub_city_still)
     hub_token = hub_sub.add_parser("token", help="Mint a device token and its hub-side digest")
     hub_token.add_argument("--device", required=True, type=device_name_arg,

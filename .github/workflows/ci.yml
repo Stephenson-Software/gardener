@@ -79,4 +79,4 @@ jobs:
         env:
           GARDENER_STRATA_LIB: ${{ runner.temp }}/strata/libstrata-0.6.0-linux-x64.so
           GARDENER_STRATA_PYTHON: ${{ runner.temp }}/strata/python
-        run: PYTHONPATH=.:tests python3 -m unittest test_fleetcity.TestCityStill -v
+        run: PYTHONPATH=.:tests python3 -m unittest test_fleetcity.TestCityStill test_fleetweather.TestStillWeather -v

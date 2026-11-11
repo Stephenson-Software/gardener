@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from gardener import state
+from gardener import fleetweather, state
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -498,12 +498,16 @@ def render_still(
     hours: float = 24,
     lib_path: Optional[str] = None,
     binding_dir: Optional[str] = None,
+    weather: Optional[dict] = None,
 ) -> dict:
     """Draws the city headless (EGL, no display) at dusk with every roof a
     run lit in the last `hours`, and saves it as a PNG. Labels name the
-    districts (owners) only, never a repository. Returns a small summary
-    for the caption."""
+    districts (owners) only, never a repository. `weather`, a sample in
+    RFC 0032's shape (`fleetweather`), adds clouds, rain and storms over the
+    buildings it names. Returns a small summary for the caption."""
     strata, lib = _load_strata(lib_path, binding_dir)
+    cells = fleetweather.forecast(city, weather) if weather else {}
+    sky = fleetweather.sky(cells, len(city["buildings"]))
     at = city["now"]
     glow = glow_levels(city, at, fade_seconds=int(hours * 3600))
     body_px, roof_px = palettes(city, glow)
@@ -534,6 +538,8 @@ def render_still(
                            texture=body_tex)
                 e.add_mesh(roofs["p"], roofs["i"], normals=roofs["n"], colors=roofs["c"], uvs=roofs["uv"],
                            texture=roof_tex, flags=strata.MESH_UNLIT)
+        if cells:
+            fleetweather.add_cloud_meshes(e, strata, city, cells, _box)
         yaw, pitch, dist = 0.8, 0.66, span * 1.3
         centre = ((x0 + x1) / 2, 0.0, (z0 + z1) / 2)
         eye = (centre[0] + dist * math.cos(pitch) * math.cos(yaw), dist * math.sin(pitch),
@@ -546,11 +552,14 @@ def render_still(
         lighting.shadow_map_size = 2048
         lighting.shadow_distance = dist * 2.5
         lighting.fog = 1
+        if weather:
+            fleetweather.lighting_for(lighting, sky["overcast"])
+            e.set_point_lights(fleetweather.point_lights(strata, city, cells))
         e.set_lighting(lighting)
         lit = {"ok": 0, "created": 0, "error": 0}
         for kind, _ in glow.values():
             lit[("ok", "created", "error")[kind]] += 1
-        e.begin_frame(clear_color=(0.02, 0.03, 0.06, 1), clear_flags=strata.CLEAR_COLOR | strata.CLEAR_DEPTH
+        e.begin_frame(clear_color=fleetweather.clear_colour(sky["overcast"]), clear_flags=strata.CLEAR_COLOR | strata.CLEAR_DEPTH
                       | strata.CLEAR_SKY)
         # A soft glow over every lit roof, so a night's runs read at a glance.
         by_id = {b["id"]: b for b in city["buildings"]}
@@ -563,6 +572,8 @@ def render_still(
                 flags=strata.POINT_SOFT))
         if glows:
             e.submit_points(glows)
+        if cells:
+            fleetweather.draw(e, strata, city, cells)
         texts = []
         keep = []
         vp = _view_proj(lib, eye, centre, width, height, dist)
@@ -581,6 +592,9 @@ def render_still(
             "height: " + ("commits, 90 days" if city["height_by"] == "commits" else "gardener runs, 90 days")
             + "   colour: " + ("dashboard score" if city["colour_by"] == "score" else "last gardener success")
             + "   roofs: amber tended, cyan created, red errored")
+        if weather:
+            legend = _ascii(fleetweather.describe(cells) + "   rain: trace usage   storm: flood"
+                           + ("   bolt: errors" if any(c["lightning"] for c in cells.values()) else ""))
         keep += [caption, legend]
         texts.append(strata.Text(x=16, y=16, pixel_size=16, flags=strata.TEXT_SHADOW, color=(1, 1, 1, 1),
                                  utf8=caption))
@@ -591,7 +605,8 @@ def render_still(
         out.parent.mkdir(parents=True, exist_ok=True)
         e.save_screenshot_png(out)
         gpu = e.gpu_description()
-    return {"repos": len(city["buildings"]), "lit": lit, "gpu": gpu, "path": str(out)}
+    return {"repos": len(city["buildings"]), "lit": lit, "gpu": gpu, "path": str(out),
+            "weather": fleetweather.summary(cells) if weather else None}
 
 
 def _view_proj(lib, eye, centre, width, height, dist):
