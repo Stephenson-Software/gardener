@@ -2036,7 +2036,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         runs = state.list_runs(db_path=args.state_db, repo=args.repo, limit=args.limit)
     if not runs:
-        print("no runs recorded yet")
+        if args.repo:
+            # An empty filtered result is not an empty history: list_runs
+            # matches the recorded owner/name exactly, case included, and
+            # GitHub's names are case-insensitive.
+            print(f"no runs recorded for {args.repo!r} "
+                  "(--repo matches the owner/name a run was recorded under exactly, case included)")
+        else:
+            print("no runs recorded yet")
         return 0
     device_col = f"{'device':<14} " if all_devices else ""
     header = f"{'timestamp':<20} {device_col}{'repo':<32} {'mode':<11} {'outcome':<10} summary"

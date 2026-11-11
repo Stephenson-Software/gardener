@@ -38,6 +38,9 @@ gardener update [--check]
 - **`gardener status [--repo owner/repo]`** — reads gardener's local
   SQLite run history (`~/.local/state/gardener/gardener.sqlite3` by
   default) and prints it: target repo, timestamp, mode, outcome summary.
+  `--repo` matches the owner/name a run was recorded under exactly, case
+  included; when nothing matches, the output names the filter rather than
+  reporting an empty history.
 - **`gardener dashboard [--port N]`** — serves a small web page (default
   `http://127.0.0.1:8765`, binds loopback-only — see `dashboard.py`'s
   module docstring, there is no authentication) with the same run history
