@@ -1528,6 +1528,21 @@ class TestCmdStatus(unittest.TestCase):
         self.assertIn("owner/one", output)
         self.assertNotIn("owner/two", output)
 
+    def test_unmatched_repo_filter_names_the_filter_not_an_empty_history(self):
+        # #251: runs exist, just not under this exact (case-sensitive)
+        # spelling, so "no runs recorded yet" would be false.
+        state.record_run(
+            state.Run(repo="Owner/One", mode="tend", outcome="pr_opened", timestamp=state.now_iso()),
+            db_path=self.state_db,
+        )
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            result = cmd_status(self._args(repo="owner/one"))
+        self.assertEqual(result, 0)
+        output = out.getvalue()
+        self.assertNotIn("no runs recorded yet", output)
+        self.assertIn("no runs recorded for 'owner/one'", output)
+        self.assertIn("case included", output)
+
 
 class TestCmdTailTranscript(unittest.TestCase):
     """cmd_tail_transcript is a thin pass-through to
