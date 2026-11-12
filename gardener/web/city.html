@@ -131,6 +131,7 @@
     <dt>Roof light</dt><dd><span class="dot g-0"></span>a run · <span class="dot g-1"></span>dev loop created ·
       <span class="dot g-2"></span>errored; fades over 6 hours</dd>
     <dt>Beacon</dt><dd>being tended right now (a device's latest heartbeat)</dd>
+    <dt id="legend-weather-term" hidden>Weather</dt><dd id="legend-weather" hidden></dd>
     <dt>🔒</dt><dd>a private repository: this page is for the operator only</dd>
   </dl>
   <p class="sub" style="margin:6px 0 0">Drag to orbit, pinch or scroll to zoom, two fingers or right-drag to pan;
@@ -168,7 +169,9 @@
    strata-loader.js and strata-kit.js, vendored in strata-kit/ and shared
    with /3d. Everything here is the operator's private data. */
 const POLL_MS = 60000;
-const BUILDING_STRIDE = 7, DISTRICT_STRIDE = 4, BEACON_STRIDE = 7;
+const BUILDING_STRIDE = 7, DISTRICT_STRIDE = 4, BEACON_STRIDE = 7, WEATHER_STRIDE = 6;
+// Weather kinds, as fleetweather.py's CLEAR..STORM (RFC 0032).
+const WEATHER_NAME = ["clear", "drizzle", "rain", "storm"];
 const FADE_S = 6 * 3600, PAD = 0.04, ROOF = 0.08;
 // Linear RGB, as fleetcity.py's HEALTH_COLOURS / GLOW_COLOURS.
 const HEALTH_RGB = [[0.30, 0.30, 0.32], [0.50, 0.09, 0.06], [0.62, 0.40, 0.05], [0.10, 0.42, 0.14]];
@@ -238,6 +241,7 @@ function applyCity(data) {
   }
   firstPoll = false;
   uploadBodyPalette();
+  applyWeather();
   tl.lastPalette = -1e12;
   if (tl.live) tl.t = data.now;
   renderHud();
@@ -246,6 +250,42 @@ function applyCity(data) {
     const b = city.buildings.find((x) => x.repo === (selectedRepo || ""));
     if (b) showCard(b.id); else hideCard();
   }
+}
+
+// Weather over the city (RFC 0032): trace's recent usage per building, as
+// /api/city's `weather.cells` ([id, kind, intensity, lightning, per minute]).
+// Only present when the hub has weather turned on. It is the sky *now*, so
+// it is drawn while the page is live and cleared while the timelapse is
+// scrubbed or playing.
+let weather = new Map();
+function applyWeather() {
+  weather = new Map();
+  const w = city && city.weather;
+  for (const row of (w && Array.isArray(w.cells) ? w.cells : [])) {
+    if (Array.isArray(row) && byId.has(row[0])) weather.set(row[0], row);
+  }
+  uploadWeather();
+}
+function uploadWeather() {
+  if (!mod || !city) return;
+  const cells = tl.live ? [...weather.values()] : [];
+  const rows = new Float32Array(Math.max(1, cells.length) * WEATHER_STRIDE);
+  cells.forEach(([id, kind, intensity, lightning], i) => {
+    const b = byId.get(id);
+    rows.set([(b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, PAD + b.h + ROOF, kind, intensity, lightning ? 1 : 0], i * WEATHER_STRIDE);
+  });
+  const p = mod._malloc(rows.byteLength);
+  mod.HEAPF32.set(rows, p >> 2);
+  mod._fc_set_weather(p, cells.length);
+  mod._free(p);
+}
+function weatherText() {
+  const w = city && city.weather;
+  if (!w) return "";
+  if (w.status !== "ok") return `weather unavailable: ${w.status}`;
+  const n = [0, 0, 0, 0];
+  for (const [, kind] of weather.values()) n[kind]++;
+  return [3, 2, 1].filter((k) => n[k]).map((k) => `${n[k]} ${WEATHER_NAME[k]}`).join(" · ") || "clear skies";
 }
 
 function uploadCity(first) {
@@ -344,7 +384,8 @@ function renderHud() {
   $("counts").innerHTML = `<span><b>${city.buildings.length}</b> repos · ${city.districts.length} districts</span>`
     + [3, 2, 1, 0].filter((k) => counts[k]).map((k) => `<span><span class="dot h-${k}"></span>${counts[k]} ${HEALTH_NAME[k]}</span>`).join("")
     + (priv ? `<span>🔒 ${priv} private</span>` : "")
-    + (flying.length ? `<span><span class="pill live">tending ${flying.length}</span></span>` : "");
+    + (flying.length ? `<span><span class="pill live">tending ${flying.length}</span></span>` : "")
+    + (city.weather ? `<span>☁ ${esc(weatherText())}</span>` : "");
   $("sources").textContent = city.sources.snapshot
     ? `fleet snapshot ${city.sources.snapshot.slice(0, 10)} · runs live from the hub`
     : "the hub's repos only (no fleet snapshot) · runs live";
@@ -356,6 +397,13 @@ function renderHud() {
     ? "dashboard practice score: <span class='dot h-3'></span>≥ 80 <span class='dot h-2'></span>50–79 <span class='dot h-1'></span>&lt; 50"
     : "gardener's last success: <span class='dot h-3'></span>&lt; 3 d <span class='dot h-2'></span>&lt; 10 d <span class='dot h-1'></span>older or never")
     + " <span class='dot h-0'></span>unknown";
+  const w = city.weather;
+  $("legend-weather-term").hidden = $("legend-weather").hidden = !w;
+  if (w) {
+    const mins = Math.round((w.window_seconds || 300) / 60);
+    $("legend-weather").textContent = `trace usage in the last ${mins} minutes, live only: drizzle under 1 a minute, `
+      + "rain from 1, a storm from 60 a minute (trace's flood threshold) or any flood-tagged event";
+  }
   $("repo-list").innerHTML = city.buildings.map((b) => `<option value="${esc(b.repo)}">`).join("");
   $("city-canvas").setAttribute("aria-label", `Fleet City: ${city.buildings.length} repositories in `
     + `${city.districts.length} districts. ` + [3, 2, 1, 0].filter((k) => counts[k]).map((k) => `${counts[k]} ${HEALTH_NAME[k]}`).join(", ")
@@ -386,6 +434,8 @@ function showCard(id) {
     ["Last success", esc(fmtAge(b.last_success))],
   ];
   if (g) rows.push(["Roof", `${EVENT_NAME[g[0]]}, ${Math.round(g[1] * 100)}%`]);
+  const wx = weather.get(id);
+  if (city.weather) rows.push(["Weather", wx ? `${WEATHER_NAME[wx[1]]} · ${esc(wx[4])}/min` : "clear"]);
   const recent = city.events.filter((e) => e[0] === id).slice(-5).reverse();
   if (recent.length) rows.push(["Recent", recent.map((e) => `${EVENT_NAME[e[2]]} ${esc(fmtWhen(e[1]))}`).join("<br>")]);
   $("card-body").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
@@ -423,6 +473,7 @@ function setLive(on) {
   $("play").textContent = tl.playing ? "❚❚" : "▶";
   $("play").setAttribute("aria-label", tl.playing ? "Pause the timelapse" : "Play the timelapse");
   tl.lastPalette = -1e12; lastSun = 0;
+  uploadWeather();
 }
 function setPlaying(on) {
   if (on && tl.live) { tl.live = false; tl.t = windowStart(); }

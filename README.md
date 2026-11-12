@@ -78,6 +78,25 @@ it*. See [Usage](#usage) below for the full command set.
   without anyone needing to notice new commits and `git pull` by hand. See
   [Self-update](docs/USAGE.md#self-update).
 
+### Fleet City weather
+
+The hub's Fleet City (`/city`) can show how much each repository is
+**used**, as weather over its building (RFC 0032, off by default): drizzle
+and rain for ordinary trace usage, a storm for a flood. Both stills below
+were drawn headless by `gardener hub city-still`'s renderer from the
+synthetic fleet in `tests/city_fixture.py` (every name in them is made up).
+
+| Clear sky | Storm |
+|---|---|
+| ![Fleet City under a clear sky: no trace usage in the window, so no clouds over any building](docs/images/fleet-city-weather-clear.png) | ![Fleet City during a flood: one dark storm cloud with heavy rain over one acme building, drizzle and light rain over a few others](docs/images/fleet-city-weather-storm.png) |
+| *No usage in the last five minutes: no clouds.* | *The flood-shaped fixture at its peak (~600 events a minute on one repository): one storm, 5 rain, 10 drizzle.* |
+
+To redraw them, with Strata's Python binding fetched by
+`fleetcity/fetch-strata-python.sh` and `GARDENER_STRATA_LIB` /
+`GARDENER_STRATA_PYTHON` set, run `python tests/weather_fixture.py <dir>`
+and copy `weather-clear.png` and `weather-flood.png`. See
+[Weather](docs/HUB.md#weather-rfc-0032) in the hub docs.
+
 ## Installation
 
 ### First Time Setup
