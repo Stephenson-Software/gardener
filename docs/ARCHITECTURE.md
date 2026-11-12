@@ -130,13 +130,17 @@ gardener/
                        Strata web kit as /3d, and the kit's two scripts);
                        render_still() draws
                        it headless for `hub city-still` (see Hub's "Fleet City")
+    fleetweather.py  — weather over Fleet City (RFC 0032): reads trace's
+                       usage window with a reader credential at most once a
+                       minute, maps programs to repositories from the hub's
+                       programs.json, and classifies one weather cell per
+                       building for /api/city and the still; off unless
+                       GARDENER_HUB_WEATHER is on (see Hub's "Weather")
     prompts/align_repo.md.tmpl — the prompt template dispatched to Claude
   tests/             — unit tests, one test_<module>.py per module above
-                       that has runtime logic (state, cli parsing/templating/
-                       notify-severity, mocked dispatch, dev_loop,
-                       merge_allowlist, garden, overnight, conventions,
-                       repo_lock, notify, transcript, run_log, sessions,
-                       dashboard, live, selfupdate, usage, trace_client)
+                       that has runtime logic (every module but __init__.py
+                       and __main__.py; see docs/TESTING.md for what each
+                       one covers)
   examples/harnesses/ — reference `command` agent harnesses (see
                        docs/HARNESSES.md); not imported by gardener
 ```
