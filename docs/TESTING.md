@@ -307,6 +307,26 @@ CI's `city-still` job sets them). The page's input, labels and tap-to-pick
 at DPR 1, 2 and 3, and a lost and restored context, are verified by
 rendering: the kit's smoke test (Strata's `web/kit/testing/smoke.cjs`) runs
 against `/city` on a local hub with the synthetic fleet.
+`tests/test_fleetweather.py` covers weather over Fleet City (RFC 0032),
+with the same synthetic fleet and the flood-shaped series in
+`tests/weather_fixture.py`: the cell rules (no events clear, a trickle
+drizzle, steady use rain, the FloodGuard rate or any flood event a storm,
+ten a second full intensity, errors striking lightning even under a clear
+sky); a repository not in the city left out; the `programs.json` parser
+(one repository or several, refusing anything not `owner/name`) and a
+missing or broken file read as no map; trace's window answer parsed down
+to its counts, an answer that isn't a window refused, the read sending the
+reader credential to `/api/metrics/window` through a stub opener (never the
+network), and every failure a short reason that never contains the
+credential; the configuration problems `Config.problem` reports; programs
+summed onto repositories; the hub's `Forecaster` reading trace at most once
+a minute, remembering a failure for that long, and never reading when off;
+the `--weather-sample` parser; the real hub's `/api/city` adding no
+`weather` when off, one row per building with weather when on, and a clear
+sky with the reason when trace is down or there is no map; and `hub
+city-still` exiting 2 on a bad sample file and, when Strata's binding is
+set up (skipped otherwise, like Fleet City's still test), drawing the flood
+as one storm.
 `tests/test_garden3d.py` covers the 3D garden's serving side: the `/3d`
 URLs and their content types (the `.wasm` really starts with the wasm
 magic, and the two Strata web kit scripts are served), nothing else under
