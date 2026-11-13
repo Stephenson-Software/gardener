@@ -434,6 +434,8 @@ repos in the garden (`in_garden`), with the same health buckets as
 
 ![The 3D garden on a hub: Walter waters a plant while the phone rests by the shed](img/garden3d-gardeners.png)
 
+<img src="img/garden3d-gardeners-phone.png" alt="The same garden on a phone, the resting gardener's card open as a bottom sheet" width="260">
+
 Clicking or tapping a plant or a gardener opens its card (a bottom sheet on
 a phone); a gardener's card shows its heartbeat state, command, the repos
 in flight, the batch, the overnight budget left, and each slot's phase.
