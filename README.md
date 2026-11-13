@@ -88,7 +88,7 @@ synthetic fleet in `tests/city_fixture.py` (every name in them is made up).
 
 | Clear sky | Storm |
 |---|---|
-| ![Fleet City under a clear sky: no trace usage in the window, so no clouds over any building](docs/images/fleet-city-weather-clear.png) | ![Fleet City during a flood: one dark storm cloud with heavy rain over one acme building, drizzle and light rain over a few others](docs/images/fleet-city-weather-storm.png) |
+| ![Fleet City under a clear sky: no trace usage in the window, so no clouds over any building](docs/img/fleet-city-weather-clear.png) | ![Fleet City during a flood: one dark storm cloud with heavy rain over one acme building, drizzle and light rain over a few others](docs/img/fleet-city-weather-storm.png) |
 | *No usage in the last five minutes: no clouds.* | *The flood-shaped fixture at its peak (~600 events a minute on one repository): one storm, 5 rain, 10 drizzle.* |
 
 To redraw them, with Strata's Python binding fetched by
