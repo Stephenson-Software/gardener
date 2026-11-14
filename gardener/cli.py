@@ -160,6 +160,35 @@ def city_hours(value: str) -> float:
     return hours
 
 
+CITY_MAX_PIXELS = 4096
+
+
+def _city_pixels(value: str, smallest: int) -> int:
+    try:
+        pixels = int(value)
+    except ValueError:
+        pixels = 0
+    if not smallest <= pixels <= CITY_MAX_PIXELS:
+        raise argparse.ArgumentTypeError(
+            f"must be a whole number of pixels from {smallest} to {CITY_MAX_PIXELS}, got: {value!r}"
+        )
+    return pixels
+
+
+def city_width(value: str) -> int:
+    """argparse `type=` for `hub city-still --width`: 320-4096 pixels.
+    This was `choices=range(320, 4097)`, and argparse's invalid-choice
+    error lists every choice, so `--width 5000` printed some 22 KB of
+    numbers instead of the range."""
+    return _city_pixels(value, 320)
+
+
+def city_height(value: str) -> int:
+    """argparse `type=` for `hub city-still --height`: 180-4096 pixels,
+    for the same reason as `city_width`."""
+    return _city_pixels(value, 180)
+
+
 def digest_hours(value: str) -> float:
     """argparse `type=` for `hub digest --hours`. `positive_hours` plus a
     window `hub.digest`'s date arithmetic can actually compute: `inf` (fine
@@ -2767,8 +2796,10 @@ def build_parser() -> argparse.ArgumentParser:
     hub_city.add_argument("--out", type=Path, required=True, help="Where to write the PNG")
     hub_city.add_argument("--hours", type=city_hours, default=24,
                           help="Light the roofs of repos run in the last N hours (default 24)")
-    hub_city.add_argument("--width", type=int, default=1280, choices=range(320, 4097), metavar="PX")
-    hub_city.add_argument("--height", type=int, default=720, choices=range(180, 4097), metavar="PX")
+    hub_city.add_argument("--width", type=city_width, default=1280, metavar="PX",
+                          help=f"Image width, 320-{CITY_MAX_PIXELS} (default 1280)")
+    hub_city.add_argument("--height", type=city_height, default=720, metavar="PX",
+                          help=f"Image height, 180-{CITY_MAX_PIXELS} (default 720)")
     hub_city.add_argument("--strata-lib", default=None,
                           help="libstrata-0.6.0-linux-x64.so (default: $GARDENER_STRATA_LIB)")
     hub_city.add_argument("--strata-python", default=None,

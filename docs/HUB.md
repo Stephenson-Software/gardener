@@ -197,7 +197,7 @@ runs (for the container, `docker exec gardener-hub gardener hub ...`):
 |---|---|
 | `gardener hub devices [--json] [--data-dir D]` | Per device: run count, newest run, and latest session, flagged `QUIET` when no run has arrived in 36 h and `ALL-ERRORS` when every run in the latest session errored. A device that has never pushed isn't listed. |
 | `gardener hub digest [--hours N] [--data-dir D]` | A short plain-text summary of the last N hours (default 24): per device runs, successes, errors, spend, and the repos that errored, plus any quiet device. |
-| `gardener hub city-still --out F.png [--hours N] [--width W --height H] [--data-dir D]` | Fleet City drawn headless to a PNG, every roof lit that a run touched in the last N hours, and one line of counts. Exits 2 when Strata isn't available (see [Fleet City](#fleet-city)). The picture shows the whole fleet, so it goes only where the dashboard itself could. |
+| `gardener hub city-still --out F.png [--hours N] [--width W --height H] [--weather-sample S.json] [--data-dir D]` | Fleet City drawn headless to a PNG, every roof lit that a run touched in the last N hours, and one line of counts. Exits 2 when Strata isn't available (see [Fleet City](#fleet-city)). The picture shows the whole fleet, so it goes only where the dashboard itself could. |
 
 Neither sends anything itself. Alerting and posting are the deployment's
 job; the reference deployment calls both from its box-side health monitor.
