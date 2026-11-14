@@ -62,6 +62,8 @@ from gardener.cli import (
     DENIAL_MAX_CHARS,
     DENIAL_PRINT_LIMIT,
     denial_report_lines,
+    city_height,
+    city_width,
     digest_hours,
     extract_gap_summary,
     format_denial,
@@ -1057,6 +1059,41 @@ class TestPortArg(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["dashboard"]).port, dashboard.DEFAULT_PORT)
         self.assertEqual(parser.parse_args(["hub", "serve"]).port, dashboard.DEFAULT_PORT)
+
+
+class TestCityStillSize(unittest.TestCase):
+    """`city_width`/`city_height` are `hub city-still`'s `--width`/
+    `--height` types. They replaced `choices=range(...)`, whose
+    invalid-choice error listed every allowed number (some 22 KB)."""
+
+    def test_returns_sizes_in_range(self):
+        self.assertEqual(city_width("320"), 320)
+        self.assertEqual(city_width("4096"), 4096)
+        self.assertEqual(city_height("180"), 180)
+        self.assertEqual(city_height("4096"), 4096)
+
+    def test_raises_argument_type_error_out_of_range(self):
+        for bad in ["319", "4097", "0", "-1", "640.5", "wide", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                city_width(bad)
+        for bad in ["179", "4097", "tall"]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                city_height(bad)
+
+    def test_parse_error_names_the_range_and_stays_short(self):
+        parser = build_parser()
+        for flag in ("--width", "--height"):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(["hub", "city-still", "--out", "x.png", flag, "5000"])
+            self.assertEqual(ctx.exception.code, 2, flag)
+            self.assertIn("4096", err.getvalue())
+            self.assertLess(len(err.getvalue()), 1000, flag)
+
+    def test_defaults_are_kept(self):
+        args = build_parser().parse_args(["hub", "city-still", "--out", "x.png"])
+        self.assertEqual((args.width, args.height), (1280, 720))
 
 
 class TestDigestHours(unittest.TestCase):

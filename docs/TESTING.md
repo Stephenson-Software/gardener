@@ -112,7 +112,10 @@ too large for `parpt.repos_needing_score`'s cutoff arithmetic while still
 accepting `0`, and `grace_seconds`, which rejects a negative, `nan` or
 `inf` `stop -t/--time` while still accepting `0`, and `port_arg`, which
 rejects a `dashboard`/`hub serve` `--port` outside 1-65535, and
-`signal_arg`, which rejects a `kill -s/--signal` that is not a real,
+`city_width`/`city_height`, which reject a `hub city-still` `--width`
+outside 320-4096 or `--height` outside 180-4096 with a one-line usage
+error naming the range (formerly `choices=range(...)`, whose error
+listed every allowed number), and `signal_arg`, which rejects a `kill -s/--signal` that is not a real,
 deliverable signal — `0`, an out-of-range number, or a `signal` module
 attribute such as `_DFL` — through the same `_parse_signal` that
 `cmd_kill` still calls itself), the coupling between the
