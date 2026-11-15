@@ -298,11 +298,28 @@ def iter_pretty_lines(
     session, not for anything automated, so it's the one part of this
     module without a bounded timeout by design (an interactive follow is
     expected to run until the user stops it). `sleep_fn` is injectable so
-    tests can exercise the follow loop without a real sleep."""
-    with path.open("r") as f:
+    tests can exercise the follow loop without a real sleep.
+
+    Only whole lines are parsed while following: at EOF `readline()` hands
+    back whatever Claude Code has written so far, newline or not, and a
+    line caught mid-write would fail as truncated JSON here and again as a
+    headless fragment on the next poll — the event lost, silently. So an
+    unterminated tail is held and joined to the next read, the same rule
+    `live.py`'s `TranscriptCache` applies to the same files. Without
+    `follow` there is no next read, so a final unterminated line is still
+    parsed (a complete object can sit at EOF without its newline).
+
+    Decoded as UTF-8 with `errors="replace"`, like `live.py`: Claude Code
+    writes UTF-8 whatever the reading shell's locale is."""
+    pending = ""
+    with path.open("r", encoding="utf-8", errors="replace") as f:
         while True:
-            line = f.readline()
-            if line:
+            chunk = f.readline()
+            if chunk:
+                pending += chunk
+                if follow and not pending.endswith("\n"):
+                    continue
+                line, pending = pending, ""
                 formatted = format_transcript_line(line)
                 if formatted is not None:
                     yield formatted
@@ -328,4 +345,9 @@ def print_transcript(path: Path, follow: bool = False, stream: Optional[TextIO] 
         # way to stop one. BrokenPipeError: piped into something like
         # `head` that closed its end early — also normal, not a real error.
         return 0
+    except OSError as exc:
+        # The file exists but can't be read (permissions, say): one line,
+        # like the missing-file case above, not a traceback.
+        print(f"gardener: cannot read transcript file {path}: {exc.strerror or exc}", file=sys.stderr)
+        return 1
     return 0
