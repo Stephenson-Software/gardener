@@ -483,7 +483,13 @@ good ones doesn't lose the good ones, `_tool_result_text` falls back to
 `str(...)` for a shape that is neither, and `print_transcript` exits `0` on
 both `BrokenPipeError` (`tail-transcript ... | head`) and
 `KeyboardInterrupt` (Ctrl-C out of `-f`) rather than surfacing a traceback
-for a normal way of using it. `tests/test_notify.py` likewise covers a
+for a normal way of using it, and exits `1` with a one-line error for a
+file that exists but can't be read. `iter_pretty_lines` is held to the
+same whole-lines rule `live.py`'s `TranscriptCache` applies: under `-f` a
+line caught mid-write is joined to its tail on the next poll instead of
+being dropped, while a dump still parses a final line with no newline, and
+the file is decoded as UTF-8 even when the locale's codec would reject it.
+`tests/test_notify.py` likewise covers a
 Discord 4xx returned as an ordinary response — distinct from `urlopen`
 raising `HTTPError`, and reached by a different branch — and a `notify.env`
 that exists but can't be read; `tests/test_dashboard.py`
