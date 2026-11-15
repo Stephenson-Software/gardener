@@ -384,6 +384,60 @@ class TestIterPrettyLines(unittest.TestCase):
             self.assertIn("second", second)
             self.assertEqual(calls, [0.5])
 
+    def test_follow_mode_joins_a_line_caught_mid_write_instead_of_dropping_it(self):
+        # At EOF readline() returns a half-written line without its newline;
+        # parsing it then (and its tail on the next poll) loses the event.
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            full = json.dumps({"message": {"role": "assistant", "content": [{"type": "text", "text": "split"}]}})
+            cut = len(full) // 2
+            path.write_text(full[:cut])
+            calls = []
+
+            def fake_sleep(interval):
+                calls.append(interval)
+                if len(calls) == 1:
+                    with path.open("a") as f:
+                        f.write(full[cut:] + "\n")
+                elif len(calls) > 5:
+                    raise RuntimeError("test loop guard: sleep called too many times")
+
+            gen = transcript.iter_pretty_lines(path, follow=True, sleep_fn=fake_sleep)
+            self.assertIn("split", next(gen))
+            self.assertEqual(calls, [0.5])
+
+    def test_dump_mode_still_parses_a_final_line_with_no_newline(self):
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text(
+                json.dumps({"message": {"role": "assistant", "content": [{"type": "text", "text": "last"}]}})
+            )
+            lines = list(transcript.iter_pretty_lines(path, follow=False))
+            self.assertEqual(len(lines), 1)
+            self.assertIn("last", lines[0])
+
+    def test_decodes_utf8_whatever_the_locale_encoding(self):
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            line = json.dumps(
+                {"message": {"role": "assistant", "content": [{"type": "text", "text": "a — b"}]}},
+                ensure_ascii=False,
+            )
+            path.write_bytes(line.encode("utf-8") + b"\n")
+            # Stand in for a non-UTF-8 locale: an open() that names no
+            # encoding gets ASCII, whose codec rejects the em-dash's bytes.
+            real_open = Path.open
+
+            def ascii_locale_open(self, mode="r", buffering=-1, encoding=None, *args, **kwargs):
+                if "b" not in mode and encoding is None:
+                    encoding = "ascii"
+                return real_open(self, mode, buffering, encoding, *args, **kwargs)
+
+            with patch.object(Path, "open", ascii_locale_open):
+                lines = list(transcript.iter_pretty_lines(path, follow=False))
+            self.assertEqual(len(lines), 1)
+            self.assertIn("a — b", lines[0])
+
 
 class TestPrintTranscript(unittest.TestCase):
     def test_missing_file_returns_1_and_reports_error(self):
@@ -402,6 +456,19 @@ class TestPrintTranscript(unittest.TestCase):
             code = transcript.print_transcript(path, stream=buf)
             self.assertEqual(code, 0)
             self.assertIn("hi", buf.getvalue())
+
+    def test_unreadable_file_returns_1_with_one_line_error_not_traceback(self):
+        with TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            path.write_text("")
+            err = io.StringIO()
+            with patch.object(transcript, "iter_pretty_lines",
+                              side_effect=PermissionError(13, "Permission denied")), \
+                 patch("sys.stderr", err):
+                code = transcript.print_transcript(path, stream=io.StringIO())
+            self.assertEqual(code, 1)
+            self.assertIn("cannot read transcript file", err.getvalue())
+            self.assertIn("Permission denied", err.getvalue())
 
 
 class TestTranscriptEdgeCases(unittest.TestCase):
