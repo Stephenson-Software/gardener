@@ -7,6 +7,7 @@ what `/api/city` adds, and the still with weather when Strata's binding is
 available. Every repository name is synthetic (tests/city_fixture.py).
 """
 import base64
+import http.client
 import io
 import json
 import os
@@ -143,6 +144,28 @@ class TestTraceWindow(unittest.TestCase):
             self.assertEqual(str(caught.exception), reason)
             self.assertNotIn("r3ad", str(caught.exception))
 
+    def test_http_client_failures_and_deep_nesting_are_reasons_not_crashes(self):
+        # urlopen lets http.client.HTTPException through unwrapped, and
+        # json.loads raises RecursionError rather than ValueError on a deeply
+        # nested body; neither may escape fetch_window.
+        def raising(exc):
+            def opener(request, timeout):
+                raise exc
+            return opener
+
+        def nested(request, timeout):
+            return io.BytesIO(b"[" * 100000 + b"]" * 100000)
+
+        for opener, reason in (
+                (raising(http.client.BadStatusLine("garbage")), "trace unreachable (BadStatusLine)"),
+                (raising(http.client.IncompleteRead(b"{")), "trace unreachable (IncompleteRead)"),
+                (raising(http.client.InvalidURL("nonnumeric port: 'r3ad'")), "trace unreachable (InvalidURL)"),
+                (nested, "trace's answer is not JSON")):
+            with self.assertRaises(fw.WeatherUnavailable, msg=reason) as caught:
+                fw.fetch_window(CONFIG, opener=opener)
+            self.assertEqual(str(caught.exception), reason)
+            self.assertNotIn("r3ad", str(caught.exception))
+
     def test_configuration_problems(self):
         self.assertEqual(fw.Config.from_env({}).problem(), "off")
         self.assertIn("GARDENER_HUB_TRACE_URL", fw.Config.from_env({"GARDENER_HUB_WEATHER": "1"}).problem())
@@ -250,6 +273,15 @@ class TestStillWeather(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, _quiet():
             bad = Path(tmp) / "w.json"
             bad.write_text("{}")
+            from gardener import cli
+            args = cli.build_parser().parse_args(["hub", "city-still", "--data-dir", tmp, "--out",
+                                                  str(Path(tmp) / "x.png"), "--weather-sample", str(bad)])
+            self.assertEqual(args.func(args), 2)
+
+    def test_a_deeply_nested_sample_file_is_exit_2_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp, _quiet():
+            bad = Path(tmp) / "w.json"
+            bad.write_text("[" * 100000 + "]" * 100000)
             from gardener import cli
             args = cli.build_parser().parse_args(["hub", "city-still", "--data-dir", tmp, "--out",
                                                   str(Path(tmp) / "x.png"), "--weather-sample", str(bad)])

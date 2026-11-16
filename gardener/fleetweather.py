@@ -34,6 +34,7 @@ clear with a status saying why; it never fails `/api/city` or the still.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import math
 import random
@@ -187,22 +188,28 @@ def fetch_window(config: Config, seconds: int = WINDOW_SECONDS, timeout: float =
     problem = config.problem()
     if problem:
         raise WeatherUnavailable(problem)
-    request = urllib.request.Request(
-        f"{config.url}/api/metrics/window?seconds={int(seconds)}",
-        headers={"Accept": "application/json",
-                 "Authorization": "Basic " + base64.b64encode(config.reader.encode("utf-8")).decode("ascii")})
     try:
+        request = urllib.request.Request(
+            f"{config.url}/api/metrics/window?seconds={int(seconds)}",
+            headers={"Accept": "application/json",
+                     "Authorization": "Basic " + base64.b64encode(config.reader.encode("utf-8")).decode("ascii")})
         with opener(request, timeout=timeout) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise WeatherUnavailable(f"trace answered {exc.code}") from None
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    # http.client.HTTPException is neither an OSError nor a URLError: urlopen
+    # lets a garbled status line (BadStatusLine), a truncated body
+    # (IncompleteRead) or a non-numeric port (InvalidURL) through unwrapped,
+    # the same escapes hub.py's _request and UserAuthClient._call catch.
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
         raise WeatherUnavailable(f"trace unreachable ({type(exc).__name__})") from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise WeatherUnavailable("trace's answer is too large")
     try:
         doc = json.loads(body.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError: a deeply nested body, which json.loads does not
+        # turn into a ValueError.
         raise WeatherUnavailable("trace's answer is not JSON") from None
     return parse_window(doc)
 

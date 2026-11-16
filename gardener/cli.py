@@ -2195,7 +2195,7 @@ def cmd_hub_city_still(args: argparse.Namespace) -> int:
     if args.weather_sample is not None:
         try:
             weather = fleetweather.parse_sample(json.loads(args.weather_sample.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             print(f"gardener hub city-still: --weather-sample: {exc}", file=sys.stderr)
             return 2
     else:
