@@ -7,6 +7,7 @@ what `/api/city` adds, and the still with weather when Strata's binding is
 available. Every repository name is synthetic (tests/city_fixture.py).
 """
 import base64
+import http.client
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from gardener import fleetcity, fleetweather as fw, hub
 
@@ -143,6 +145,34 @@ class TestTraceWindow(unittest.TestCase):
             self.assertEqual(str(caught.exception), reason)
             self.assertNotIn("r3ad", str(caught.exception))
 
+    def test_http_client_failures_and_deep_nesting_are_reasons_not_crashes(self):
+        # urlopen lets http.client.HTTPException through unwrapped, and
+        # json.loads can raise RecursionError rather than ValueError on a
+        # deeply nested body; neither may escape fetch_window. How deep a
+        # body has to be for that depends on the interpreter (3.10 raises at
+        # 100,000 levels, 3.15 parses them), so json.loads is made to raise
+        # it directly rather than relying on a depth.
+        def raising(exc):
+            def opener(request, timeout):
+                raise exc
+            return opener
+
+        def answered(request, timeout):
+            return io.BytesIO(json.dumps(_window(("A", 1, 1, 0))).encode())
+
+        for opener, reason in (
+                (raising(http.client.BadStatusLine("garbage")), "trace unreachable (BadStatusLine)"),
+                (raising(http.client.IncompleteRead(b"{")), "trace unreachable (IncompleteRead)"),
+                (raising(http.client.InvalidURL("nonnumeric port: 'r3ad'")), "trace unreachable (InvalidURL)")):
+            with self.assertRaises(fw.WeatherUnavailable, msg=reason) as caught:
+                fw.fetch_window(CONFIG, opener=opener)
+            self.assertEqual(str(caught.exception), reason)
+            self.assertNotIn("r3ad", str(caught.exception))
+        with mock.patch.object(fw.json, "loads", side_effect=RecursionError("too deep")), \
+                self.assertRaises(fw.WeatherUnavailable) as caught:
+            fw.fetch_window(CONFIG, opener=answered)
+        self.assertEqual(str(caught.exception), "trace's answer is not JSON")
+
     def test_configuration_problems(self):
         self.assertEqual(fw.Config.from_env({}).problem(), "off")
         self.assertIn("GARDENER_HUB_TRACE_URL", fw.Config.from_env({"GARDENER_HUB_WEATHER": "1"}).problem())
@@ -250,6 +280,15 @@ class TestStillWeather(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, _quiet():
             bad = Path(tmp) / "w.json"
             bad.write_text("{}")
+            from gardener import cli
+            args = cli.build_parser().parse_args(["hub", "city-still", "--data-dir", tmp, "--out",
+                                                  str(Path(tmp) / "x.png"), "--weather-sample", str(bad)])
+            self.assertEqual(args.func(args), 2)
+
+    def test_a_deeply_nested_sample_file_is_exit_2_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp, _quiet():
+            bad = Path(tmp) / "w.json"
+            bad.write_text("[" * 100000 + "]" * 100000)
             from gardener import cli
             args = cli.build_parser().parse_args(["hub", "city-still", "--data-dir", tmp, "--out",
                                                   str(Path(tmp) / "x.png"), "--weather-sample", str(bad)])

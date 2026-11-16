@@ -321,13 +321,15 @@ missing or broken file read as no map; trace's window answer parsed down
 to its counts, an answer that isn't a window refused, the read sending the
 reader credential to `/api/metrics/window` through a stub opener (never the
 network), and every failure a short reason that never contains the
-credential; the configuration problems `Config.problem` reports; programs
+credential, including the `http.client` errors `urlopen` passes through
+unwrapped (a garbled status line, a truncated body, a non-numeric port)
+and a deeply nested body; the configuration problems `Config.problem` reports; programs
 summed onto repositories; the hub's `Forecaster` reading trace at most once
 a minute, remembering a failure for that long, and never reading when off;
 the `--weather-sample` parser; the real hub's `/api/city` adding no
 `weather` when off, one row per building with weather when on, and a clear
 sky with the reason when trace is down or there is no map; and `hub
-city-still` exiting 2 on a bad sample file and, when Strata's binding is
+city-still` exiting 2 on a bad or deeply nested sample file and, when Strata's binding is
 set up (skipped otherwise, like Fleet City's still test), drawing the flood
 as one storm.
 `tests/test_garden3d.py` covers the 3D garden's serving side: the `/3d`
