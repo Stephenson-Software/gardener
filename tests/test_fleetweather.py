@@ -18,6 +18,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from gardener import fleetcity, fleetweather as fw, hub
 
@@ -146,25 +147,31 @@ class TestTraceWindow(unittest.TestCase):
 
     def test_http_client_failures_and_deep_nesting_are_reasons_not_crashes(self):
         # urlopen lets http.client.HTTPException through unwrapped, and
-        # json.loads raises RecursionError rather than ValueError on a deeply
-        # nested body; neither may escape fetch_window.
+        # json.loads can raise RecursionError rather than ValueError on a
+        # deeply nested body; neither may escape fetch_window. How deep a
+        # body has to be for that depends on the interpreter (3.10 raises at
+        # 100,000 levels, 3.15 parses them), so json.loads is made to raise
+        # it directly rather than relying on a depth.
         def raising(exc):
             def opener(request, timeout):
                 raise exc
             return opener
 
-        def nested(request, timeout):
-            return io.BytesIO(b"[" * 100000 + b"]" * 100000)
+        def answered(request, timeout):
+            return io.BytesIO(json.dumps(_window(("A", 1, 1, 0))).encode())
 
         for opener, reason in (
                 (raising(http.client.BadStatusLine("garbage")), "trace unreachable (BadStatusLine)"),
                 (raising(http.client.IncompleteRead(b"{")), "trace unreachable (IncompleteRead)"),
-                (raising(http.client.InvalidURL("nonnumeric port: 'r3ad'")), "trace unreachable (InvalidURL)"),
-                (nested, "trace's answer is not JSON")):
+                (raising(http.client.InvalidURL("nonnumeric port: 'r3ad'")), "trace unreachable (InvalidURL)")):
             with self.assertRaises(fw.WeatherUnavailable, msg=reason) as caught:
                 fw.fetch_window(CONFIG, opener=opener)
             self.assertEqual(str(caught.exception), reason)
             self.assertNotIn("r3ad", str(caught.exception))
+        with mock.patch.object(fw.json, "loads", side_effect=RecursionError("too deep")), \
+                self.assertRaises(fw.WeatherUnavailable) as caught:
+            fw.fetch_window(CONFIG, opener=answered)
+        self.assertEqual(str(caught.exception), "trace's answer is not JSON")
 
     def test_configuration_problems(self):
         self.assertEqual(fw.Config.from_env({}).problem(), "off")
