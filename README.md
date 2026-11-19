@@ -277,7 +277,11 @@ Every switch fails closed, so an opt-out is never read as "on":
 `1` (any case); anything else — empty, a typo — turns it off, and so does a
 `notify.env` that exists but cannot be read. `TRACE_USAGE_REPORTING` set to
 anything but blank or one of those values turns it off, as does `DO_NOT_TRACK`
-set to anything but blank, `0`, `false`, `off` or `no`.
+set to anything but blank, `0`, `false`, `off` or `no`. An opt-out written
+under another spelling counts as off too and wins over the real setting:
+`GARDENER_USAGE_REPORTING=off`, `GARDENER_USAGE_REPORTING_ENABLE=false`,
+`gardener_usage_reporting_enabled=no` or `GARDENER_USAGE_REPORTING_DISABLED=true`,
+in `notify.env` or the environment.
 
 ```bash
 export GARDENER_USAGE_REPORTING_ENABLED=false

@@ -41,7 +41,12 @@ Every switch fails closed, so an opt-out is never read as on: gardener's own
 setting is read through the client's ``allows_reporting``, so once it is set
 (in the environment or in ``notify.env``, even to a blank value) only
 true/on/yes/1 keeps reporting on; and a ``notify.env`` that exists but cannot
-be read turns reporting off, since it may hold the opt-out. Details:
+be read turns reporting off, since it may hold the opt-out. So does an
+opt-out written under another spelling (``GARDENER_USAGE_REPORTING=off``,
+``GARDENER_USAGE_REPORTING_ENABLE=false``,
+``gardener_usage_reporting_enabled=no``,
+``GARDENER_USAGE_REPORTING_DISABLED=true``), in ``notify.env`` or the
+environment -- see :func:`has_near_miss_opt_out`. Details:
 https://danielstephenson.dev/usage-reporting
 
 The key is a program identifier, not a secret that grants anything, which
@@ -58,6 +63,7 @@ there, and the client itself logs only at DEBUG on the ``trace`` logger.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Mapping, Optional
@@ -92,6 +98,42 @@ def _read_config_file(config_path: Optional[Path]) -> Optional[Dict[str, str]]:
         return None
 
 
+def _normalise_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def has_near_miss_opt_out(values: Mapping[str, str], gardener_only: bool = False) -> bool:
+    """Whether ``values`` hold an attempt to turn usage reporting off that is
+    not spelled exactly ``GARDENER_USAGE_REPORTING_ENABLED``. Such a line
+    would be ignored and the default, on, would stand. Whoever wrote one did
+    not ask for reporting, so each counts as off -- a name that spells "usage
+    reporting" (any case, any separators) and:
+
+    - spells "enabled" another way too (``..._ENABLE``, ``gardener_usage_reporting_enabled``)
+      with a value that is not clearly on;
+    - spells "disabled" (``..._DISABLED``) with a value that is on;
+    - is the bare name (``GARDENER_USAGE_REPORTING``, ``USAGE_REPORTING``)
+      with a value that is not clearly on.
+
+    ``GARDENER_USAGE_REPORTING_ENDPOINT`` / ``_KEY`` are never read as a
+    switch. With ``gardener_only`` (the process environment, which also
+    holds other programs' switches) only names that mention gardener count.
+    """
+    for name, value in values.items():
+        if name in (ENV_ENABLED, ENV_ENDPOINT, ENV_KEY):
+            continue  # read exactly, by enabled() / endpoint() / key()
+        key = _normalise_key(name)
+        if "usagereport" not in key or (gardener_only and "gardener" not in key):
+            continue
+        if "disabl" in key:
+            if allows_reporting(value):
+                return True
+        elif "enabl" in key or key.endswith(("usagereport", "usagereporting")):
+            if not allows_reporting(value):
+                return True
+    return False
+
+
 def _setting(name: str, env: Optional[Mapping[str, str]], config_path: Optional[Path]) -> str:
     """Env var first, then the same name in ``notify.env``; blank at either
     level falls through to the next, so a blank value means "unset", not
@@ -110,15 +152,22 @@ def enabled(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path]
     a non-blank env var wins, otherwise ``notify.env``; whichever value is
     found is read through ``allows_reporting``, so only true/on/yes/1 keeps
     reporting on. A ``notify.env`` that cannot be read is off, and so is the
-    setting present but blank everywhere. Only when it is set nowhere does the
-    default, on, apply."""
+    setting present but blank everywhere. An opt-out written under another
+    spelling (:func:`has_near_miss_opt_out`) in either place is off and wins
+    over the real setting. Only when it is set nowhere does the default, on,
+    apply."""
     source = os.environ if env is None else env
     if environment_opts_out(source):
+        return False
+    # An opt-out written under another spelling wins over the real switch.
+    if has_near_miss_opt_out(source, gardener_only=True):
+        return False
+    config = _read_config_file(config_path)
+    if config is not None and has_near_miss_opt_out(config):
         return False
     from_env = (source.get(ENV_ENABLED) or "").strip()
     if from_env:
         return allows_reporting(from_env)
-    config = _read_config_file(config_path)
     if config is None:
         return False
     if ENV_ENABLED in config:

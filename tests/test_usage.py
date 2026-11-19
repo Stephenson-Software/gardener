@@ -97,6 +97,48 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
         self.config_path.write_text(f"{usage.ENV_ENABLED}=yes\n")
         self.assertTrue(usage.enabled({}, self.config_path))
 
+    def test_an_opt_out_written_under_a_near_miss_name_is_an_opt_out(self):
+        # these used to be ignored, so the default (on) stood
+        near_misses = (
+            "GARDENER_USAGE_REPORTING=off",
+            "GARDENER_USAGE_REPORTING=false",
+            "USAGE_REPORTING=no",
+            "GARDENER_USAGE_REPORTING_ENABLE=false",
+            "gardener_usage_reporting_enabled=0",
+            "Gardener-Usage-Reporting-Enabled=off",
+            "GARDENER_USAGE_REPORTING_DISABLED=true",
+            "GARDENER_USAGE_REPORTING_DISABLE=yes",
+        )
+        for line in near_misses:
+            with self.subTest(line=line):
+                self.config_path.write_text(line + "\n")
+                self.assertFalse(usage.enabled({}, self.config_path))
+                # it wins over the real switch saying on, in the file or the environment
+                self.config_path.write_text(f"{usage.ENV_ENABLED}=true\n{line}\n")
+                self.assertFalse(usage.enabled({}, self.config_path))
+                self.assertFalse(usage.enabled({usage.ENV_ENABLED: "true"}, self.config_path))
+                name, _, value = line.partition("=")
+                if "gardener" in name.lower():
+                    self.config_path.unlink()
+                    self.assertFalse(usage.enabled({name: value}, self.config_path))
+
+    def test_near_miss_names_that_say_on_are_not_an_opt_out(self):
+        for line in (
+            "GARDENER_USAGE_REPORTING=on",
+            "GARDENER_USAGE_REPORTING_ENABLE=true",
+            "GARDENER_USAGE_REPORTING_DISABLED=false",
+            "GARDENER_USAGE_REPORTING_DISABLED=no",
+            f"{usage.ENV_ENDPOINT}=http://127.0.0.1:1",
+            f"{usage.ENV_KEY}=k",
+        ):
+            with self.subTest(line=line):
+                self.config_path.write_text(line + "\n")
+                self.assertTrue(usage.enabled({}, self.config_path))
+
+    def test_other_programs_switches_in_the_environment_are_not_gardeners(self):
+        self.assertTrue(usage.enabled({"FISHE_USAGE_REPORTING_ENABLED": "false",
+                                       "ROAM_USAGE_REPORTING": "0"}, self.config_path))
+
     def test_the_client_wide_variables_turn_it_off_even_when_gardener_says_on(self):
         for variable, value in (("TRACE_USAGE_REPORTING", "off"), ("TRACE_USAGE_REPORTING", "FALSE"),
                                 ("TRACE_USAGE_REPORTING", "0"), ("TRACE_USAGE_REPORTING", "no"),
@@ -114,8 +156,12 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
     def test_the_client_wide_variables_are_environment_only_not_notify_env(self):
         # notify.env carries gardener's own setting; the client-wide switch
         # is the process environment, the same as for every other client.
-        self.config_path.write_text("DO_NOT_TRACK=1\nTRACE_USAGE_REPORTING=off\n")
+        self.config_path.write_text("DO_NOT_TRACK=1\n")
         self.assertTrue(usage.enabled({}, self.config_path))
+        # ... except that TRACE_USAGE_REPORTING=off written there is a
+        # near-miss of gardener's own switch, so it counts as an opt-out.
+        self.config_path.write_text("TRACE_USAGE_REPORTING=off\n")
+        self.assertFalse(usage.enabled({}, self.config_path))
         self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
         self.assertFalse(usage.enabled({}, self.config_path))
 
