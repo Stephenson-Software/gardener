@@ -1,4 +1,4 @@
-"""trace-client 0.4.1 -- https://github.com/Stephenson-Software/trace-client-python
+"""trace-client 0.5.0 -- https://github.com/Stephenson-Software/trace-client-python
 
 One call to report that a program was used. Copy this file into a project as
 is, or vendor the package; either way there is nothing else to add. Standard
@@ -10,8 +10,10 @@ Vendored into gardener unmodified apart from this note.
 """
 from __future__ import annotations
 
+import decimal
 import json
 import logging
+import numbers
 import os
 import queue
 import re
@@ -21,27 +23,31 @@ import urllib.request
 import uuid
 from typing import Dict, Mapping, Optional, Union
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 _LOG = logging.getLogger("trace")
 
 #: Environment variables that turn reporting off for every program using a
-#: trace client, checked before the program's own setting. Set
-#: ``TRACE_USAGE_REPORTING=off`` (also ``false``, ``0``, ``no``; case does not
-#: matter) or ``DO_NOT_TRACK=1`` (also ``true``, ``yes``; see
-#: https://consoledonottrack.com).
+#: trace client, checked before the program's own setting. Both fail closed:
+#: ``TRACE_USAGE_REPORTING`` set to anything but blank, ``true``, ``on``,
+#: ``yes`` or ``1`` turns reporting off (so ``off``, ``false``, ``0``, ``no``,
+#: ``disabled``, a typo, ...), and so does ``DO_NOT_TRACK`` set to anything
+#: but blank, ``0``, ``false``, ``off`` or ``no`` (so ``1``, ``true``,
+#: ``yes``, ...; see https://consoledonottrack.com). Case and surrounding
+#: space do not matter.
 ENV_TRACE_USAGE_REPORTING = "TRACE_USAGE_REPORTING"
 ENV_DO_NOT_TRACK = "DO_NOT_TRACK"
-_OFF_VALUES = frozenset(("off", "false", "0", "no"))
-_DO_NOT_TRACK_VALUES = frozenset(("1", "true", "yes"))
+_ON_VALUES = frozenset(("true", "on", "yes", "1"))
+_NEGATIVE_VALUES = frozenset(("false", "off", "no", "0"))
 
 #: The values :attr:`TraceClient.disabled_reason` can take. First match wins.
 REASON_ENVIRONMENT = "environment"
 REASON_CONFIG = "config"
 REASON_NO_KEY = "no key"
 
-#: The longest a program version may be, after trimming: the trace server's
-#: limit on a tag value.
+#: The longest a tag value the client sets itself -- the program version, the
+#: installation ID -- may be, after trimming: the trace server's limit on a
+#: tag value.
 MAX_TAG_LENGTH = 255
 
 #: The most tags one event carries: the trace server's limit. The ``install``
@@ -54,18 +60,58 @@ INSTALL_TAG = "install"
 # What install_id_from_file accepts as an ID on a line of its file.
 _INSTALL_ID_LINE = re.compile(r"^[A-Za-z0-9_.-]{1,%d}$" % MAX_TAG_LENGTH)
 
+# What the User-Agent header cannot carry: everything but printable Latin-1.
+_NOT_IN_A_HEADER = re.compile(r"[^\x20-\x7e\xa0-\xff]")
+
+
+class _RedirectsNotFollowed(urllib.request.HTTPRedirectHandler):
+    """Declines every redirect, so the redirect itself is the answer. Following
+    one would re-send the key to whatever host ``Location`` names, and a 301,
+    302 or 303 would turn the POST into an empty GET that loses the event
+    anyway. trace-client-java does not follow redirects either."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Every report goes through this opener rather than urlopen: urlopen follows
+# redirects, and install_opener would change the host program's urlopen too.
+_OPENER = urllib.request.build_opener(_RedirectsNotFollowed)
+
 
 def environment_opts_out(environ: Optional[Mapping[str, str]] = None) -> bool:
-    """Whether the environment asks for usage reporting to be off, via
-    ``TRACE_USAGE_REPORTING=off`` or ``DO_NOT_TRACK=1``. Only the listed
-    values count; anything else (including an empty value) leaves the
-    program's own setting in charge."""
-    env = os.environ if environ is None else environ
-    if env.get(ENV_TRACE_USAGE_REPORTING, "").strip().lower() in _OFF_VALUES:
+    """Whether the environment asks for usage reporting to be off. Fails
+    closed: ``TRACE_USAGE_REPORTING`` set to anything but blank or a clear
+    "on" (``true``, ``on``, ``yes``, ``1``), or ``DO_NOT_TRACK`` set to
+    anything but blank or a clear "no" (``0``, ``false``, ``off``, ``no``),
+    opts out; case and surrounding space do not matter. An environment that
+    cannot be read -- or a value that is not a string -- opts out too: it may
+    hold ``DO_NOT_TRACK=1``. Never raises."""
+    try:
+        env = os.environ if environ is None else environ
+        usage_reporting = (env.get(ENV_TRACE_USAGE_REPORTING) or "").strip().lower()
+        if usage_reporting and usage_reporting not in _ON_VALUES:
+            return True
+        do_not_track = (env.get(ENV_DO_NOT_TRACK) or "").strip().lower()
+        return bool(do_not_track) and do_not_track not in _NEGATIVE_VALUES
+    except Exception:  # noqa: BLE001 - an environment that cannot be read counts as opting out
         return True
-    if env.get(ENV_DO_NOT_TRACK, "").strip().lower() in _DO_NOT_TRACK_VALUES:
-        return True
-    return False
+
+
+def allows_reporting(setting: object) -> bool:
+    """Whether a program's own reporting setting, as read from its
+    configuration, allows reporting -- for ``enabled=``. Fails closed: only
+    ``True``, or a string reading ``true``, ``on``, ``yes`` or ``1`` (any
+    case, surrounding space ignored), allows it. Anything else turns
+    reporting off: ``False``, ``"false"``, ``"off"``, ``"no"``, a typo, a
+    number, ``None`` (a missing setting), a quoted ``'"false"'``.
+
+    Pass the raw value, e.g. ``settings.get("usage_reporting")``, rather than
+    ``bool(...)`` of it: ``bool("false")`` is ``True``. The constructor reads
+    ``enabled=`` through this function too, so ``enabled="false"`` is off."""
+    if isinstance(setting, bool):
+        return setting
+    return isinstance(setting, str) and setting.strip().lower() in _ON_VALUES
 
 
 class TraceClient:
@@ -89,7 +135,10 @@ class TraceClient:
     does nothing and costs nothing. So does the environment: the constructor
     checks ``TRACE_USAGE_REPORTING=off`` and ``DO_NOT_TRACK=1`` before it
     looks at ``enabled``, so a user can switch off every trace-reporting
-    program at once. :attr:`disabled_reason` says which of those applied
+    program at once. Every switch fails closed: a value that does not clearly
+    mean "on" turns reporting off (see :func:`environment_opts_out` and
+    :func:`allows_reporting`), and nothing in this client turns a switch
+    back on. :attr:`disabled_reason` says which of those applied
     (``"environment"``, ``"config"`` or ``"no key"``; ``None`` when on) so
     the program can say so in its notice. Programs that run on other
     people's machines should expose that switch in their settings and say
@@ -113,7 +162,8 @@ class TraceClient:
     ::
 
         trace = TraceClient("https://trace.example.org", "roam", __version__,
-                            key=settings.usage_key, enabled=settings.usage_reporting)
+                            key=settings.usage_key,
+                            enabled=allows_reporting(settings.usage_reporting))
         trace.report("startup")
         ...
         trace.close()  # on shutdown
@@ -123,7 +173,7 @@ class TraceClient:
     TIMEOUT_SECONDS = 5.0
 
     def __init__(self, base_url: str, application: str, version: str, *, key: Optional[str] = None,
-                 enabled: bool = True, install_id: Optional[str] = None,
+                 enabled: Union[bool, str, None] = True, install_id: Optional[str] = None,
                  install_id_file: Optional[Union[str, "os.PathLike[str]"]] = None) -> None:
         """A client for the program named ``application``, at ``version``,
         reporting to the trace server at ``base_url``. The version is sent as
@@ -137,7 +187,18 @@ class TraceClient:
         longer than :data:`MAX_TAG_LENGTH` characters is a
         :class:`ValueError`. ``install_id_file`` is a path to load it from
         (or create it in) with :meth:`install_id_from_file`, only when the
-        client is enabled; an explicit ``install_id`` wins over it."""
+        client is enabled; an explicit ``install_id`` wins over it.
+
+        A value that is not a string for ``base_url``, ``application``,
+        ``version``, ``key`` or ``install_id`` is a :class:`ValueError` naming
+        the argument, even on a client that would be disabled: a settings
+        file that reads ``version: 1.4`` as a number should say so. An empty
+        one (``0``, ``False``, ``[]``) still means no value, as it did before
+        that check: no key, no ID, or "<argument> is required"."""
+        for argument, given in (("base_url", base_url), ("application", application), ("version", version),
+                                ("key", key), ("install_id", install_id)):
+            if given and not isinstance(given, str):
+                raise ValueError("%s must be a string, not %s" % (argument, type(given).__name__))
         if not base_url or not base_url.strip():
             raise ValueError("base_url is required")
         if not application or not application.strip():
@@ -157,12 +218,13 @@ class TraceClient:
         self._thread: Optional[threading.Thread] = None
         #: Why this client reports nothing: ``"environment"`` (the
         #: ``TRACE_USAGE_REPORTING`` / ``DO_NOT_TRACK`` variables),
-        #: ``"config"`` (``enabled=False``) or ``"no key"``; ``None`` when it
+        #: ``"config"`` (``enabled`` not ``True`` or an "on" string -- see
+        #: :func:`allows_reporting`) or ``"no key"``; ``None`` when it
         #: reports. Decided once, here, in that order of precedence.
         self.disabled_reason: Optional[str] = None
         if environment_opts_out():
             self.disabled_reason = REASON_ENVIRONMENT
-        elif not enabled:
+        elif not allows_reporting(enabled):
             self.disabled_reason = REASON_CONFIG
         elif not self._key:
             self.disabled_reason = REASON_NO_KEY
@@ -245,7 +307,10 @@ class TraceClient:
     def report(self, name: str, value: Optional[float] = None,
                tags: Optional[Mapping[str, str]] = None) -> None:
         """Report that ``name`` happened, with an optional numeric value and
-        optional string tags. Returns immediately; see the class docstring."""
+        optional string tags. Returns immediately; see the class docstring.
+        A blank ``name`` sends nothing. A ``value`` that is NaN, infinite or
+        not a real number (a string, a bool), and any tag whose key or value
+        is ``None``, is left out of the event; the event is still sent."""
         if self._queue is None:
             return
         try:
@@ -265,8 +330,13 @@ class TraceClient:
         and then exits within milliseconds -- a CLI, a short script -- would
         otherwise lose its one event to the race between queueing it and the
         sender thread picking it up. The bound still holds: an unreachable
-        server costs at most ``timeout``, never a hang. Safe to call more than
-        once, and on a disabled client."""
+        server costs at most ``timeout``, never a hang. Reports still queued
+        when ``timeout`` runs out are not discarded: the daemon thread keeps
+        sending them after ``close()`` returns, then stops, and whatever it
+        has not sent when the program exits is lost. On a full queue the
+        oldest queued report is dropped (logged at DEBUG) to make room for
+        the signal that stops the thread. Safe to call more than once, and
+        on a disabled client."""
         if self._queue is None or self._thread is None:
             return
         q, thread = self._queue, self._thread
@@ -278,7 +348,8 @@ class TraceClient:
             # the 257th. Drop the oldest to make room -- one lost report beats a
             # thread that never stops.
             try:
-                q.get_nowait()
+                dropped = q.get_nowait()
+                _LOG.debug("[trace] queue full at close, dropped %s", dropped)
                 q.put_nowait(None)
             except (queue.Empty, queue.Full):
                 pass
@@ -307,9 +378,9 @@ class TraceClient:
                 headers={
                     "Content-Type": "application/json; charset=utf-8",
                     "Authorization": "Bearer " + self._key,
-                    "User-Agent": "trace-client-python/%s (%s)" % (__version__, self._application),
+                    "User-Agent": _user_agent(self._application),
                 })
-            with urllib.request.urlopen(request, timeout=self.TIMEOUT_SECONDS) as response:
+            with _OPENER.open(request, timeout=self.TIMEOUT_SECONDS) as response:
                 status = response.status
                 response.read()
         except urllib.error.HTTPError as answered:
@@ -323,6 +394,14 @@ class TraceClient:
             return
         if status != 201:
             _LOG.debug("[trace] trace server answered %s for %s", status, body)
+
+
+def _user_agent(application: str) -> str:
+    """The ``User-Agent`` for ``application``. A header carries printable
+    Latin-1 and nothing else, and one it cannot carry stops the request, so
+    any other character becomes ``?`` here. The event itself keeps the exact
+    name: what a program is called must not cost it every report."""
+    return "trace-client-python/%s (%s)" % (__version__, _NOT_IN_A_HEADER.sub("?", application))
 
 
 def _with_version(tags: Optional[Mapping[str, str]], version: str) -> Dict[str, str]:
@@ -348,10 +427,28 @@ def _with_install(tags: Dict[str, str], install_id: Optional[str]) -> Dict[str, 
     return merged
 
 
+def _number(value: object) -> Optional[float]:
+    """``value`` as a number JSON can carry, or ``None`` for one it cannot:
+    anything that is not a real number (a string, a bool), NaN and infinity.
+    A ``Decimal`` or ``Fraction`` becomes a float rather than costing the
+    event its place: ``json.dumps`` would refuse it, and the event with it."""
+    if isinstance(value, bool) or not isinstance(value, (numbers.Real, decimal.Decimal)):
+        return None
+    if type(value) not in (int, float):
+        try:
+            value = float(value)
+        except (OverflowError, ValueError):
+            return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value  # type: ignore[return-value]
+
+
 def _json(application: str, name: str, value: Optional[float], tags: Optional[Mapping[str, str]]) -> bytes:
     payload: Dict[str, object] = {"application": application, "name": name}
-    if value is not None and value == value and value not in (float("inf"), float("-inf")):
-        payload["value"] = value
+    number = _number(value)
+    if number is not None:
+        payload["value"] = number
     if tags:
         clean = {str(k): str(v) for k, v in tags.items() if k is not None and v is not None}
         if clean:

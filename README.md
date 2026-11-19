@@ -271,6 +271,14 @@ Turn it off any of these ways:
 - `DO_NOT_TRACK=1` (also `true`, `yes`) in the environment — the
   [console DNT convention](https://consoledonottrack.com), honoured the same way
 
+Every switch fails closed, so an opt-out is never read as "on":
+`GARDENER_USAGE_REPORTING_ENABLED`, once set (in the environment or
+`notify.env`, even blank), keeps reporting on only for `true`, `on`, `yes` or
+`1` (any case); anything else — empty, a typo — turns it off, and so does a
+`notify.env` that exists but cannot be read. `TRACE_USAGE_REPORTING` set to
+anything but blank or one of those values turns it off, as does `DO_NOT_TRACK`
+set to anything but blank, `0`, `false`, `off` or `no`.
+
 ```bash
 export GARDENER_USAGE_REPORTING_ENABLED=false
 # or, in the same notify.env file as above:
@@ -282,7 +290,7 @@ echo 'GARDENER_USAGE_REPORTING_ENABLED=false' >> ~/.local/state/gardener/notify.
 ```
 
 The client is [trace-client-python](https://github.com/Stephenson-Software/trace-client-python)
-0.4.1, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
+0.5.0, vendored unmodified as `gardener/trace_client.py` (stdlib only, so
 gardener's no-dependency rule holds); `gardener/usage.py` is the wiring.
 
 Details: https://danielstephenson.dev/usage-reporting
