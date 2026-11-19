@@ -13,7 +13,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from gardener.trace_client import MAX_TAG_LENGTH, MAX_TAGS, TraceClient, environment_opts_out
+from gardener.trace_client import MAX_TAG_LENGTH, MAX_TAGS, TraceClient, allows_reporting, environment_opts_out
 
 _ENV_VARS = ("TRACE_USAGE_REPORTING", "DO_NOT_TRACK")
 
@@ -175,10 +175,13 @@ class TraceClientTest(unittest.TestCase):
             self._assert_environment_disables("DO_NOT_TRACK", value)
 
     def test_other_environment_values_leave_the_program_setting_in_charge(self):
+        # 0.5.0 fails closed: only blank, or a value that clearly means "keep
+        # reporting", leaves the program's own setting in charge.
         for variable, value in (("TRACE_USAGE_REPORTING", "on"), ("TRACE_USAGE_REPORTING", ""),
-                                ("TRACE_USAGE_REPORTING", "disabled"), ("TRACE_USAGE_REPORTING", "1"),
+                                ("TRACE_USAGE_REPORTING", "1"), ("TRACE_USAGE_REPORTING", "TRUE"),
+                                ("TRACE_USAGE_REPORTING", "yes"),
                                 ("DO_NOT_TRACK", "0"), ("DO_NOT_TRACK", ""), ("DO_NOT_TRACK", "false"),
-                                ("DO_NOT_TRACK", "off")):
+                                ("DO_NOT_TRACK", "off"), ("DO_NOT_TRACK", "no")):
             with mock.patch.dict(os.environ, {variable: value}):
                 self.assertFalse(environment_opts_out(), "%s=%r is not an opt-out" % (variable, value))
                 client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
@@ -186,6 +189,34 @@ class TraceClientTest(unittest.TestCase):
                 self.assertIsNone(client.disabled_reason)
                 client.close()
         self.assertFalse(environment_opts_out(), "an unset variable is not an opt-out")
+
+    def test_unclear_environment_values_fail_closed(self):
+        for variable, value in (("TRACE_USAGE_REPORTING", "disabled"), ("TRACE_USAGE_REPORTING", "nope"),
+                                ("TRACE_USAGE_REPORTING", "of"), ("DO_NOT_TRACK", "anything"),
+                                ("DO_NOT_TRACK", "2")):
+            self._assert_environment_disables(variable, value)
+
+    def test_an_environment_that_cannot_be_read_opts_out(self):
+        class Unreadable(dict):
+            def get(self, *args, **kwargs):
+                raise RuntimeError("no environment")
+        self.assertTrue(environment_opts_out(Unreadable()))
+
+    def test_allows_reporting_fails_closed(self):
+        for setting in (True, "true", "TRUE", " on ", "yes", "1"):
+            self.assertTrue(allows_reporting(setting), "%r allows reporting" % (setting,))
+        for setting in (False, None, "", " ", "false", "off", "no", "0", "disabled", '"false"', 0, 1, [], {}):
+            self.assertFalse(allows_reporting(setting), "%r must not allow reporting" % (setting,))
+
+    def test_enabled_is_read_through_allows_reporting(self):
+        for enabled in ("false", "off", "", None, 1, "disabled"):
+            client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled=enabled)
+            self.assertFalse(client.enabled, "enabled=%r must not enable the client" % (enabled,))
+            self.assertEqual("config", client.disabled_reason)
+            client.close()
+        client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k", enabled="yes")
+        self.assertTrue(client.enabled)
+        client.close()
 
     def test_environment_wins_over_the_config_flag_and_over_the_key(self):
         # enabled=True with a key, and the environment still says no.
@@ -214,12 +245,12 @@ class TraceClientTest(unittest.TestCase):
 
     def test_user_agent_names_the_client_version(self):
         from gardener.trace_client import __version__
-        self.assertEqual("0.4.1", __version__)
+        self.assertEqual("0.5.0", __version__)
         client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")
         client.report("startup")
         self.assertTrue(self.capture.arrived.wait(5))
         client.close()
-        self.assertEqual("trace-client-python/0.4.1 (MyGame)", self.capture.requests[0]["user_agent"])
+        self.assertEqual("trace-client-python/0.5.0 (MyGame)", self.capture.requests[0]["user_agent"])
 
     def test_report_ignores_a_blank_name(self):
         client = TraceClient(self.base_url, "MyGame", "1.2.3", key="k")

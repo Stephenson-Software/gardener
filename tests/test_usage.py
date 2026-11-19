@@ -82,11 +82,20 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
         self.assertEqual(usage.DEFAULT_KEY, usage.key({}))
         self.assertTrue(usage.DEFAULT_KEY.strip(), "the bundled key must not be blank")
 
-    def test_only_an_explicit_no_turns_it_off(self):
-        for value in ("0", "false", "FALSE", "no", "off", " Off "):
-            self.assertFalse(usage.enabled({usage.ENV_ENABLED: value}), value)
-        for value in ("", "1", "true", "yes", "anything"):
-            self.assertTrue(usage.enabled({usage.ENV_ENABLED: value}), repr(value))
+    def test_the_setting_fails_closed(self):
+        for value in ("0", "false", "FALSE", "no", "off", " Off ", "", "  ", "anything", "disabled", '"false"'):
+            self.assertFalse(usage.enabled({usage.ENV_ENABLED: value}, self.config_path), repr(value))
+        for value in ("1", "true", " TRUE ", "yes", "on"):
+            self.assertTrue(usage.enabled({usage.ENV_ENABLED: value}, self.config_path), repr(value))
+
+    def test_the_notify_env_setting_fails_closed_too(self):
+        for value in ("", "anything", "off", "0"):
+            self.config_path.write_text(f"{usage.ENV_ENABLED}={value}\n")
+            self.assertFalse(usage.enabled({}, self.config_path), repr(value))
+            # A blank env var falls through to the file, never past it to the default.
+            self.assertFalse(usage.enabled({usage.ENV_ENABLED: " "}, self.config_path), repr(value))
+        self.config_path.write_text(f"{usage.ENV_ENABLED}=yes\n")
+        self.assertTrue(usage.enabled({}, self.config_path))
 
     def test_the_client_wide_variables_turn_it_off_even_when_gardener_says_on(self):
         for variable, value in (("TRACE_USAGE_REPORTING", "off"), ("TRACE_USAGE_REPORTING", "FALSE"),
@@ -94,7 +103,10 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
                                 ("DO_NOT_TRACK", "1"), ("DO_NOT_TRACK", "true"), ("DO_NOT_TRACK", "yes")):
             env = {usage.ENV_ENABLED: "true", variable: value}
             self.assertFalse(usage.enabled(env), f"{variable}={value}")
-        # Only the listed values count; anything else leaves gardener's setting in charge.
+        # Fails closed: anything but blank or a clear "keep reporting" opts out.
+        for variable, value in (("TRACE_USAGE_REPORTING", "disabled"), ("DO_NOT_TRACK", "anything")):
+            self.assertFalse(usage.enabled({usage.ENV_ENABLED: "true", variable: value}), f"{variable}={value}")
+        # Blank or a clear "on" leaves gardener's setting in charge.
         for variable, value in (("TRACE_USAGE_REPORTING", ""), ("TRACE_USAGE_REPORTING", "on"),
                                 ("DO_NOT_TRACK", "0"), ("DO_NOT_TRACK", "")):
             self.assertTrue(usage.enabled({variable: value}), f"{variable}={value!r}")
@@ -135,19 +147,27 @@ class TestSettings(_NoConfigFile, unittest.TestCase):
         # And a blank env var falls through to the file rather than clearing it.
         self.assertEqual("file-key", usage.key({usage.ENV_KEY: " "}))
 
-    def test_a_missing_or_unreadable_config_file_means_defaults(self):
+    def test_a_missing_config_file_means_defaults_and_an_unreadable_one_means_off(self):
         self.assertFalse(self.config_path.exists())
         self.assertTrue(usage.enabled({}))
         self.assertEqual(usage.DEFAULT_KEY, usage.key({}))
         self.config_path.mkdir()  # a directory: is_file() is False, so "not configured"
         self.assertTrue(usage.enabled({}))
+        self.config_path.rmdir()
+        self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
+        for error in (OSError("nope"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")):
+            with patch("gardener.usage.notify._parse_env_style_file", side_effect=error):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    # It may hold the opt-out (it does here), so it is read as off ...
+                    self.assertFalse(usage.enabled({}))
+                    # ... while endpoint and key just fall back to their defaults.
+                    self.assertEqual(usage.DEFAULT_KEY, usage.key({}))
+                self.assertIn("could not read", stderr.getvalue())
+        # An explicit "on" in the environment is the operator's own action and wins.
         with patch("gardener.usage.notify._parse_env_style_file", side_effect=OSError("nope")):
-            self.config_path.rmdir()
-            self.config_path.write_text(f"{usage.ENV_ENABLED}=false\n")
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                self.assertTrue(usage.enabled({}))
-            self.assertIn("could not read", stderr.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertTrue(usage.enabled({usage.ENV_ENABLED: "true"}))
 
     def test_disabled_builds_a_client_that_sends_nothing(self):
         client = usage.build_client({usage.ENV_ENABLED: "false"})

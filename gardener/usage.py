@@ -25,7 +25,8 @@ environment variable wins, otherwise the same name in the
 contexts where exporting an env var per invocation isn't practical), and a
 built-in default when neither is set. No new config mechanism is invented.
 
-    GARDENER_USAGE_REPORTING_ENABLED    default true; 0/false/no/off turns it off
+    GARDENER_USAGE_REPORTING_ENABLED    default (unset) true; anything but
+                                        true/on/yes/1 turns it off
     GARDENER_USAGE_REPORTING_ENDPOINT   default https://trace.danielstephenson.dev
     GARDENER_USAGE_REPORTING_KEY        default: the key issued for gardener
 
@@ -34,7 +35,13 @@ Two more variables, honoured by every trace client, turn it off as well:
 variables only (not ``notify.env`` keys) and are checked ahead of gardener's
 own setting -- here in :func:`enabled` for whichever mapping is passed, and
 again by the client's constructor against the process environment -- so
-they win even when the setting says on. Details:
+they win even when the setting says on.
+
+Every switch fails closed, so an opt-out is never read as on: gardener's own
+setting is read through the client's ``allows_reporting``, so once it is set
+(in the environment or in ``notify.env``, even to a blank value) only
+true/on/yes/1 keeps reporting on; and a ``notify.env`` that exists but cannot
+be read turns reporting off, since it may hold the opt-out. Details:
 https://danielstephenson.dev/usage-reporting
 
 The key is a program identifier, not a secret that grants anything, which
@@ -56,7 +63,7 @@ from pathlib import Path
 from typing import Dict, Mapping, Optional
 
 from gardener import __version__, notify, state
-from gardener.trace_client import TraceClient, environment_opts_out
+from gardener.trace_client import TraceClient, allows_reporting, environment_opts_out
 
 APPLICATION = "gardener"
 DEFAULT_ENDPOINT = "https://trace.danielstephenson.dev"
@@ -70,21 +77,19 @@ ENV_KEY = "GARDENER_USAGE_REPORTING_KEY"
 ENV_INSTALL_ID = "TRACE_INSTALL_ID"
 INSTALL_ID_FILENAME = "trace-install-id"
 
-_FALSE = {"0", "false", "no", "off"}
-
-
-def _read_config_file(config_path: Optional[Path]) -> Dict[str, str]:
-    """The ``notify.env`` values, or nothing: a missing or unreadable file is
-    the normal "not configured" state, never an error (same posture as
-    `notify.load_webhook_url`)."""
+def _read_config_file(config_path: Optional[Path]) -> Optional[Dict[str, str]]:
+    """The ``notify.env`` values; nothing for a missing file, the normal
+    "not configured" state; ``None`` for a file that is there but cannot be
+    read -- it may hold the opt-out, so :func:`enabled` reads that as off
+    (endpoint and key just fall back to their defaults)."""
     path = config_path or notify.default_webhook_config_path()
     try:
         if not path.is_file():
             return {}
         return notify._parse_env_style_file(path)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"usage: could not read {path}: {e}", file=sys.stderr)
-        return {}
+        return None
 
 
 def _setting(name: str, env: Optional[Mapping[str, str]], config_path: Optional[Path]) -> str:
@@ -95,17 +100,30 @@ def _setting(name: str, env: Optional[Mapping[str, str]], config_path: Optional[
     value = (source.get(name) or "").strip()
     if value:
         return value
-    return (_read_config_file(config_path).get(name) or "").strip()
+    return ((_read_config_file(config_path) or {}).get(name) or "").strip()
 
 
 def enabled(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = None) -> bool:
-    """Whether reporting is on. Unset means on; only an explicit no turns it
-    off -- gardener's own ``GARDENER_USAGE_REPORTING_ENABLED`` (env var or
-    ``notify.env``), or the client-wide ``TRACE_USAGE_REPORTING`` /
-    ``DO_NOT_TRACK`` in the environment, which are consulted first."""
-    if environment_opts_out(os.environ if env is None else env):
+    """Whether reporting is on. Fails closed. The client-wide
+    ``TRACE_USAGE_REPORTING`` / ``DO_NOT_TRACK`` in the environment are
+    consulted first. Then gardener's own ``GARDENER_USAGE_REPORTING_ENABLED``:
+    a non-blank env var wins, otherwise ``notify.env``; whichever value is
+    found is read through ``allows_reporting``, so only true/on/yes/1 keeps
+    reporting on. A ``notify.env`` that cannot be read is off, and so is the
+    setting present but blank everywhere. Only when it is set nowhere does the
+    default, on, apply."""
+    source = os.environ if env is None else env
+    if environment_opts_out(source):
         return False
-    return _setting(ENV_ENABLED, env, config_path).lower() not in _FALSE
+    from_env = (source.get(ENV_ENABLED) or "").strip()
+    if from_env:
+        return allows_reporting(from_env)
+    config = _read_config_file(config_path)
+    if config is None:
+        return False
+    if ENV_ENABLED in config:
+        return allows_reporting(config[ENV_ENABLED])
+    return ENV_ENABLED not in source
 
 
 def endpoint(env: Optional[Mapping[str, str]] = None, config_path: Optional[Path] = None) -> str:
@@ -170,7 +188,7 @@ def stop(client: TraceClient, timeout: float = TraceClient.TIMEOUT_SECONDS) -> N
     Closing matters more here than in a long-running service: the sender
     is a daemon thread, so process exit would cut it off mid-request, and
     `gardener status`/`gardener ps` finish in milliseconds. The client's
-    ``close`` (0.1.1+; 0.4.1 is vendored) gives whatever is still queued up to ``timeout``
+    ``close`` (0.1.1+; 0.5.0 is vendored) gives whatever is still queued up to ``timeout``
     seconds in total to be sent, then stops the thread — so exit is delayed
     by at most the client's own timeout: an unreachable trace server is a
     request that times out, not a hang. Never raises, even on something
