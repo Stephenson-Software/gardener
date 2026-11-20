@@ -275,7 +275,8 @@ Every switch fails closed, so an opt-out is never read as "on":
 `GARDENER_USAGE_REPORTING_ENABLED`, once set (in the environment or
 `notify.env`, even blank), keeps reporting on only for `true`, `on`, `yes` or
 `1` (any case); anything else — empty, a typo — turns it off, and so does a
-`notify.env` that exists but cannot be read. `TRACE_USAGE_REPORTING` set to
+`notify.env` that exists but cannot be read, unless the environment variable
+itself says on. `TRACE_USAGE_REPORTING` set to
 anything but blank or one of those values turns it off, as does `DO_NOT_TRACK`
 set to anything but blank, `0`, `false`, `off` or `no`. An opt-out written
 under another spelling counts as off too and wins over the real setting:
