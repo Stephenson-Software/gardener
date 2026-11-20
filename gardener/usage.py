@@ -41,7 +41,8 @@ Every switch fails closed, so an opt-out is never read as on: gardener's own
 setting is read through the client's ``allows_reporting``, so once it is set
 (in the environment or in ``notify.env``, even to a blank value) only
 true/on/yes/1 keeps reporting on; and a ``notify.env`` that exists but cannot
-be read turns reporting off, since it may hold the opt-out. So does an
+be read turns reporting off unless the environment variable says on, since it
+may hold the opt-out. So does an
 opt-out written under another spelling (``GARDENER_USAGE_REPORTING=off``,
 ``GARDENER_USAGE_REPORTING_ENABLE=false``,
 ``gardener_usage_reporting_enabled=no``,

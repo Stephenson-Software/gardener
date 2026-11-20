@@ -252,8 +252,16 @@ loopback `http.server` started in the test (never the real trace
 service): the three
 `GARDENER_USAGE_REPORTING_*` settings' precedence (env var, then the same
 name in `notify.env` under a tmp `GARDENER_STATE_DIR`, then the built-in
-default; a blank value falls through, only an explicit `0/false/no/off`
-opts out, an unreadable file degrades to a stderr warning), that the
+default; a blank value falls through), that the enabled switch fails
+closed (in the environment or `notify.env`, only `true/on/yes/1` keeps
+reporting on: blank everywhere, a typo or `disabled` is off; a `notify.env`
+that exists but cannot be read is off with a stderr warning unless the
+environment says on, while endpoint and key fall back to their defaults),
+that an opt-out under a near-miss name (`GARDENER_USAGE_REPORTING=off`,
+`..._ENABLE=false`, lower-case or hyphenated spellings, `..._DISABLED=true`)
+is off and wins over the real switch saying on, while near-miss names that
+say on, the endpoint/key settings and other programs' switches in the
+environment are not read as an opt-out, that the
 `startup` body is exactly `application`/`name`/three tags (`version`,
 `service`, `install`) with nothing about the machine or the run in it, that
 the installation ID file lives in the state dir and is reused, that
