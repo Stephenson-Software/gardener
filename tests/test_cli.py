@@ -150,6 +150,10 @@ def setUpModule():
         dispatch.CLAUDE_BIN_ENV, dispatch.MODEL_ENV, dispatch.ALIGN_TIMEOUT_ENV,
         dispatch.TEND_TIMEOUT_ENV, dispatch.CREATE_DEV_LOOP_TIMEOUT_ENV,
         "GARDENER_CONVENTIONS_SUBDIR",
+        # A routing file outside the fenced state dir would route every
+        # run_agent call a test makes with a repo through the operator's
+        # real providers (docs/HARNESSES.md's "Provider routing").
+        "GARDENER_ROUTING",
     ):
         os.environ.pop(name, None)
     global _harness_preflight_patch

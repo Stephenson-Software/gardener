@@ -135,6 +135,104 @@ producing a Claude Code skill (a `tend` on the `command` harness still
 needs that skill to exist, or an agent that can read
 `~/local-skills/<slug>-dev-loop/` itself).
 
+## Provider routing
+
+Optional, and off unless a routing file exists. Design and evidence:
+[rfcs/provider-routing.md](rfcs/provider-routing.md). With one, each run
+goes to the cheapest **provider** trusted with that mode at that repo's
+size, and **escalates** to the next one when it fails. A provider is a
+harness plus what it points at: Claude Code on the subscription, Claude
+Code through a wrapper such as `claude-local` that points it at a
+self-hosted model, a `command` harness, a metered API.
+
+The routing file is `routing.json` in the state directory
+(`~/.local/state/gardener/`, or under `$GARDENER_STATE_DIR`), or wherever
+`GARDENER_ROUTING` points. It is hand-edited JSON like `garden.json`:
+
+```json
+{
+  "providers": {
+    "claude-sub": {"harness": "claude-code", "cost": "subscription", "concurrency": 2,
+                   "context_tokens": 200000, "modes": ["*"]},
+    "local-gpu":   {"harness": "claude-code", "claude_bin": "/path/to/claude-local",
+                   "cost": "free", "local": true, "concurrency": 1, "context_tokens": 65536,
+                   "modes": ["report"], "max_tier": "M",
+                   "health_url": "http://gpu-host:8799/health"}
+  },
+  "rules": [
+    {"modes": ["report"], "tiers": ["S", "M"], "providers": ["local-gpu", "claude-sub"]},
+    {"modes": ["*"], "tiers": ["*"], "providers": ["claude-sub"]}
+  ],
+  "repos": {
+    "owner/huge-repo": {"tier": "L"},
+    "owner/private-repo": {"local_only": true}
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `providers.<name>.harness` | `claude-code` (default) or `command`; `claude_bin`, `command` and `model` are the same as `GARDENER_CLAUDE_BIN`, `GARDENER_HARNESS_COMMAND` and `GARDENER_HARNESS_MODEL` for this provider. A provider with no `model` passes none (an explicit `--model` still wins). A key the provider's harness doesn't take (`claude_bin` on a `command` provider, a typo) is rejected |
+| `cost` | `free`, `subscription` (default) or `metered`; anything else is rejected. A `free` provider's runs are recorded with no cost (below) |
+| `local` | Runs on hardware you control. A `local_only` repo only ever goes to these |
+| `concurrency` | Most simultaneous runs this provider gets from one gardener process (default 1) |
+| `context_tokens` | Its context window. It's skipped for a repo whose estimated size is over `context_multiple` (default 8) times this |
+| `modes` | Modes it's trusted with (`*` for all). Set from evidence, such as a capability eval run against the provider |
+| `max_tier` | Largest repo tier it's trusted with: `S`, `M` or `L` (default) |
+| `health_url` | Optional. Probed before each run (3 s). Unreachable, `{"ok": false}` or `{"paused": true}` skips it |
+| `rules` | First rule matching (mode, tier) gives the ordered provider list |
+| `repos.<owner/name>` | `tier` (override the profile), `providers` (pin a list), `local_only` |
+| `tier_tokens` | Tier bounds in estimated tokens (default `{"S": 60000, "M": 400000}`) |
+| `escalate_on` | Which of `blocked`, `timeout`, `tempfail` (exit 75), `error` move a run to the next provider (default all four) |
+
+**How a run is routed.** `run_agent` profiles the clone (text files outside
+build/vendor directories, about 4 bytes per token) into tier S, M or L,
+takes the matching rule's providers, and drops any that aren't trusted
+with the mode, are below the tier, aren't local for a `local_only` repo,
+are too small for the repo, can't run here (the readiness check below), or
+fail their health check. It runs the first one left. A blocked, timed-out,
+exit-75 or failed run moves to the next. A report that ran and found gaps
+is an answer, not a failure. Each step is logged to stderr
+(`gardener: routing: ...`).
+
+**Refusal.** If no provider is left, the run is refused: recorded as an
+`error` whose summary starts `routing refused this run` and lists why each
+provider was skipped. It never falls back to a provider the policy didn't
+name, so a `local_only` repo is never sent to a cloud provider.
+
+**What's recorded.** Each run row gains `provider` and `escalated_from`
+(`name:trigger` for each earlier attempt, e.g. `local-gpu:tempfail`); both
+are empty with routing off. `gardener status` shows a provider column when
+any listed run has one, Discord alerts add a `provider:` line, and the hub
+carries both fields. The cost of a `free` provider's run is recorded as
+unknown, not Claude Code's figure: Claude Code prices every run as if a
+Claude model served it, so a run through a local model reports a price
+nobody paid. Only the final attempt's cost and duration are recorded.
+
+**Concurrency.** Each attempt holds a slot of its provider's
+`concurrency`, so `overnight --concurrency 2` never sends two runs at once
+to a one-at-a-time provider; the second waits for the slot. `overnight`
+also plans its batches from each repo's cached clone so that two repos
+expected on such a provider land in different batches. The slots count
+runs in one gardener process only: a manual `align` started during
+`overnight` is not counted against them.
+
+**Safety.** Routing only chooses between harness configurations. Every
+attempt goes through the same `run_agent` path, `MODE_SPECS` and
+`bypassPermissions` check as an unrouted run. A routing file can't set
+`unscoped_modes`: a `command` provider may run modes beyond report only
+when `GARDENER_HARNESS_ALLOW_UNSCOPED` lists them, and otherwise is skipped
+for those modes (the readiness check), whichever harness
+`GARDENER_HARNESS` names. A routing file that carries anything that looks
+like a credential (`api_key`, `token`, `secret`, ...) is rejected; keys stay
+in the wrapper's own environment. An invalid routing file fails the run
+(and stops `overnight` before its batch), never silently turns routing off.
+With routing on, `overnight`'s pre-flight checks that at least one provider
+trusted with `tend` can run here, instead of checking `GARDENER_HARNESS`.
+
+`gardener route --repo owner/name [--mode report]` explains a decision
+without dispatching anything (see [USAGE.md](USAGE.md#provider-routing)).
+
 ## Recipes
 
 ### Ollama, report mode (included)

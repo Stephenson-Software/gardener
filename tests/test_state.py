@@ -780,7 +780,9 @@ class TestDeviceIdentityMigration(unittest.TestCase):
         ])
         self._record(timestamp="2026-09-26T01:00:00+00:00")
 
-        self.assertEqual(self._columns()[-3:], ["run_uuid", "device", "pushed_at"])
+        # Every added column, in the order `_migrate` adds them.
+        self.assertEqual(self._columns()[-len(state.ADDED_COLUMNS):],
+                         [name for name, _ in state.ADDED_COLUMNS])
         runs = state.list_runs(db_path=self.db_path)
         self.assertEqual([r.gap_summary for r in runs], [None, "second", "first"])
         self.assertEqual({r.device for r in runs}, {"test-box"})
