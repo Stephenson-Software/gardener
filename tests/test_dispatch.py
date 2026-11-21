@@ -547,6 +547,36 @@ class TestAuthFailureRetry(unittest.TestCase):
 
     @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
     @patch("gardener.dispatch._run_in_process_group")
+    def test_a_wrapper_exiting_tempfail_is_blocked(self, mock_run, _which):
+        """A GARDENER_CLAUDE_BIN wrapper for another model provider exits 75
+        (EX_TEMPFAIL) with no JSON when that provider is paused or down:
+        every remaining repo would fail the same way, so it must stop the batch."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=75, stdout="",
+            stderr="provider is paused; try again later\n",
+        )
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(1,), sleep_fn=self.slept.append,
+        )
+        self.assertTrue(result.blocked)
+        self.assertFalse(result.auth_failed)
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch._run_in_process_group")
+    def test_a_plain_crash_without_json_is_not_blocked(self, mock_run, _which):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=1, stdout="", stderr="Segmentation fault\n",
+        )
+        result = run_claude(
+            Mode.REPORT, "prompt", Path("/tmp"),
+            auth_backoff_seconds=(), sleep_fn=self.slept.append,
+        )
+        self.assertFalse(result.blocked)
+
+    @patch("gardener.dispatch.shutil.which", return_value="/usr/bin/claude")
+    @patch("gardener.dispatch._run_in_process_group")
     def test_auth_failure_is_flagged_on_the_result(self, mock_run, _which):
         mock_run.return_value = self._auth_failure()
         result = run_claude(

@@ -25,7 +25,7 @@ the same way.
 | `GARDENER_HARNESS_COMMAND` | The command to run, split like a shell would split it (`shlex`) but never run through a shell. Required for `command` |
 | `GARDENER_HARNESS_ALLOW_UNSCOPED` | Modes the `command` harness may run beyond report: a comma-separated list (`implement,file-issue`), or `1`/`true`/`all` for every mode. Blank or `0` means none. An unknown mode name is an error. See [Safety](#safety) |
 | `GARDENER_HARNESS_MODEL` | Default model for every dispatch on either harness, when `--model` isn't passed. Passed to `claude --model`, or to the command under the same name |
-| `GARDENER_CLAUDE_BIN` | Path or name of the Claude Code executable (default `claude` on `PATH`) |
+| `GARDENER_CLAUDE_BIN` | Path or name of the Claude Code executable (default `claude` on `PATH`). It may be a wrapper that points Claude Code at another model provider: if that wrapper exits `75` (`EX_TEMPFAIL`) without printing a JSON result, gardener treats the run as `blocked`, so an `overnight` batch stops and retries the remaining repos next run |
 | `GARDENER_ALIGN_TIMEOUT` | Seconds an `align` run may take, any mode (default 1800). `--timeout` wins |
 | `GARDENER_TEND_TIMEOUT` | Seconds a `tend` run may take (default 2700). `--timeout` on `tend` or `overnight` wins. `overnight` also uses it as its per-repo budget headroom |
 | `GARDENER_CREATE_DEV_LOOP_TIMEOUT` | Seconds the create-dev-loop step before a first `tend` may take (default 900) |

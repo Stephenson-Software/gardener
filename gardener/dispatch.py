@@ -433,6 +433,14 @@ NETWORK_FAILURE_MARKERS = (
     "http2: client conn",
 )
 
+# sysexits.h EX_TEMPFAIL. `claude` itself never exits with it, but a wrapper
+# set as GARDENER_CLAUDE_BIN that points Claude Code at another model provider
+# can: "the provider is paused or unreachable, try later". That says nothing
+# about the repo and fails every remaining repo alike, so a run that exits 75
+# without a JSON envelope is `blocked` and stops an overnight batch with its
+# resume cursor withheld, instead of burning through the garden in seconds.
+EX_TEMPFAIL = 75
+
 
 def looks_like_auth_failure(result_text: str, stderr: str) -> bool:
     """Whether a *failed* dispatch failed for auth reasons. Callers must
@@ -1013,7 +1021,10 @@ def _run_claude_once(
             permission_denials=[],
             is_error=True,
             auth_failed=looks_like_auth_failure(stdout, proc.stderr or ""),
-            blocked=is_device_global_failure(stdout, proc.stderr or ""),
+            blocked=(
+                proc.returncode == EX_TEMPFAIL
+                or is_device_global_failure(stdout, proc.stderr or "")
+            ),
         )
 
     is_error = bool(parsed.get("is_error"))
