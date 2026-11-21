@@ -202,6 +202,7 @@ def load_config(state_dir: Optional[Path] = None) -> Optional[HubConfig]:
 WIRE_FIELDS = (
     "run_uuid", "device", "repo", "timestamp", "mode", "outcome",
     "gap_summary", "exit_code", "duration_ms", "cost_usd", "claude_session_id",
+    "provider", "escalated_from",
 )
 
 
@@ -218,6 +219,8 @@ def run_to_wire(run: state.Run) -> dict:
         "duration_ms": run.duration_ms,
         "cost_usd": run.cost_usd,
         "claude_session_id": run.claude_session_id,
+        "provider": run.provider,
+        "escalated_from": run.escalated_from,
     }
 
 
@@ -1136,6 +1139,10 @@ def run_from_wire(row: object, device: str) -> state.Run:
         duration_ms=number("duration_ms", int),
         cost_usd=number("cost_usd", float),
         claude_session_id=text("claude_session_id", required=False),
+        # Optional: a device on a gardener from before provider routing
+        # never sends them, and a hub from before ignores them.
+        provider=text("provider", required=False, limit=64),
+        escalated_from=text("escalated_from", required=False, limit=500),
     )
 
 

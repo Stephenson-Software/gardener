@@ -61,6 +61,19 @@ gardener/
                        gardener invocations never clone/checkout/dispatch
                        against the same shared clone directory at once (see
                        Usage's "Concurrent dispatch safety")
+    routing/         — optional per-repo/per-mode provider routing
+                       (docs/rfcs/provider-routing.md), as ports and
+                       adapters: model.py (domain values), core.py (pure
+                       policy: routing.json validation, route, escalation),
+                       ports/ (one protocol per file: ProviderKind,
+                       HealthProbe, Readiness, RepoProfiler, RoutingSource,
+                       ConcurrencyLimiter, AgentRunner, RoutingObserver),
+                       adapters/ (one implementation per file), service.py
+                       (RoutingService, the composition root). Called by
+                       dispatch.run_agent when a routing file exists, by
+                       `gardener route` to explain a decision, and by
+                       `overnight` to plan batches. The core never imports
+                       adapters (tests/test_routing.py enforces it)
     doctor.py        — read-only pre-flight checks over gardener's own local
                        state (required CLIs, gh auth, state dir, every cache
                        clone's refresh-readiness, and whether each garden/
