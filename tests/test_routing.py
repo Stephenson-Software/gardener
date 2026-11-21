@@ -285,6 +285,13 @@ class EscalationTests(unittest.TestCase):
         _, attempts, _ = self.run_it([result(ok=False, blocked=True, is_error=True), result()])
         self.assertEqual(attempts[0], ("orket", "blocked"))
 
+    def test_tempfail_wins_over_blocked(self):
+        # The dispatcher marks exit 75 blocked too; its trigger is still tempfail, so a provider
+        # configured to escalate on tempfail but not blocked still escalates.
+        _, attempts, _ = self.run_it([result(ok=False, blocked=True, exit_code=75, is_error=True), result()],
+                                     escalate_on=frozenset({"tempfail"}))
+        self.assertEqual(attempts, [("orket", "tempfail"), ("local-gpu", None)])
+
     def test_no_candidates_refuses_loudly(self):
         empty = routing.Decision("o/r", Mode.TEND, "S", None, [], [("local-gpu", "not trusted with tend")])
         with self.assertRaises(RoutingError) as cm:
