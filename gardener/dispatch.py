@@ -32,6 +32,24 @@ harness it can only *hand over* the same spec, so the posture changes:
   `Bash(gh pr merge *)` is in that spec (`merge_allowed` in the JSON), but
   only the command can make it binding.
 
+## Provider routing (optional)
+
+When a routing file exists (`gardener/routing/`, docs/rfcs/provider-routing.md,
+docs/HARNESSES.md's "Provider routing") and the caller names the repo,
+`run_agent` profiles the clone, routes the run to an ordered list of
+providers and escalates down it (`_run_routed`). The routing package is
+ports and adapters; this module backs its two safety-relevant ports
+(`Readiness` and `AgentRunner`): `routing/adapters/dispatch_*.py` only call
+`check_harness_ready` and `run_agent`. Each provider's kind only turns it
+into a `HarnessConfig`, so every attempt goes back through `run_agent`
+unrouted:
+the same `run_claude`/`run_command_harness` paths, the same
+`_check_permission_mode`, and the `command` harness's unscoped opt-in comes
+from the operator's GARDENER_HARNESS_ALLOW_UNSCOPED only, never from the
+routing file. No routing file, or no repo, is exactly the single-harness
+path above. A run no provider may take is refused: a failed
+`DispatchResult` whose `failure_reason` explains why, never a fallback.
+
 ## Sync vs. background dispatch
 
 Another local dashboard's server dispatches with
@@ -312,7 +330,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -718,6 +736,11 @@ class DispatchResult:
     # prints this instead of the agent's summary, which would otherwise
     # describe a success.
     failure_reason: str = ""
+    # Which routing provider produced this result (`gardener/routing/`), None when
+    # routing is off. `escalated_from` lists the providers tried before it
+    # as `name:trigger`, in order. Both empty on an unrouted run.
+    provider: Optional[str] = None
+    escalated_from: tuple = ()
 
 
 def _check_permission_mode(spec: ModeSpec) -> None:
@@ -1248,13 +1271,28 @@ def run_agent(
     timeout: Optional[int] = None,
     mode_spec: Optional[ModeSpec] = None,
     harness_config: Optional[HarnessConfig] = None,
+    repo: Optional[str] = None,
+    routing_path: Optional[Path] = None,
 ) -> DispatchResult:
     """Dispatch one agent run on the configured harness. Every caller in
     `cli.py` goes through here; `run_claude` stays the Claude Code
     implementation, unchanged. An unset `model`/`timeout` falls back to the
     harness configuration (GARDENER_HARNESS_MODEL, the per-mode timeout
-    settings), then to the built-in defaults."""
+    settings), then to the built-in defaults.
+
+    `repo` (owner/name; `cwd` is then its clone) opts the run into provider
+    routing: when a routing file exists (`routing_path`, else
+    `routing.default_routing_path()`), the run is routed and escalated by
+    `_run_routed` instead. Without `repo`, or without a routing file, this
+    is the single-harness dispatch it always was."""
     config = harness_config if harness_config is not None else load_harness_config()
+    if repo is not None:
+        routing = load_routing(routing_path)
+        if routing is not None:
+            return _run_routed(
+                routing, mode, prompt, cwd, repo, config,
+                add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec,
+            )
     model = model or config.model
     timeout = timeout if timeout is not None else config.timeout_for(mode)
     if config.harness is Harness.CLAUDE_CODE:
@@ -1272,6 +1310,101 @@ def run_agent(
         timeout=timeout,
         mode_spec=mode_spec,
     )
+
+
+def load_routing(path: Optional[Path] = None):
+    """The routing config (`routing.RoutingConfig`), or None when there is no
+    routing file. An unreadable or invalid file raises DispatchError — the
+    same "fail loudly at dispatch, never fall back silently" posture as a
+    misconfigured harness. Imported here, not at module top: the routing
+    package imports this module."""
+    from gardener import routing
+
+    try:
+        return routing.JsonFileSource(path).load()
+    except (routing.RoutingError, OSError) as e:
+        raise DispatchError(f"routing file: {e}") from None
+
+
+def load_unscoped_modes(env=None, config_path: Optional[Path] = None) -> frozenset:
+    """The operator's GARDENER_HARNESS_ALLOW_UNSCOPED opt-in, read the same
+    way `load_harness_config` reads it, but whatever the global harness is.
+    A routed `command` provider gets exactly this and nothing a routing file
+    says (every `ProviderKind` keeps `base.unscoped_modes`)."""
+    source = os.environ if env is None else env
+    raw = (source.get(ALLOW_UNSCOPED_ENV) or "").strip()
+    if not raw:
+        raw = (_read_settings_file(config_path or _settings_file()).get(ALLOW_UNSCOPED_ENV) or "").strip()
+    return _parse_unscoped_modes(raw)
+
+
+def routing_base(base: HarnessConfig) -> HarnessConfig:
+    """The operator's settings every provider's `HarnessConfig` is built on."""
+    if base.harness is Harness.COMMAND:
+        return base  # load_harness_config already read the opt-in
+    return replace(base, unscoped_modes=load_unscoped_modes())
+
+
+def check_routing_ready(mode: Mode, routing, base: HarnessConfig) -> None:
+    """`check_harness_ready`'s counterpart with routing on, for
+    `cmd_overnight`'s up-front check: raise DispatchError unless at least
+    one provider trusted with `mode` could dispatch it. Which provider a
+    given repo gets is decided per run; this only catches the setup where
+    every repo would fail identically."""
+    from gardener.routing import DispatchReadiness
+
+    readiness = DispatchReadiness(routing_base(base))
+    reasons = []
+    for provider in routing.providers.values():
+        if mode not in provider.modes:
+            continue
+        state = readiness.check(provider, mode)
+        if state.ok:
+            return
+        reasons.append(f"{provider.name}: {state.reason}")
+    raise DispatchError(
+        f"no routing provider can run {mode.value}"
+        + (": " + "; ".join(reasons) if reasons else " (none is trusted with it)")
+    )
+
+
+def _refused_result(reason: str) -> DispatchResult:
+    return DispatchResult(
+        ok=False, result_text="", raw_stdout="", stderr=reason, exit_code=None, duration_ms=0,
+        cost_usd=None, session_id=None, permission_denials=[], is_error=True,
+        failure_reason=reason,
+    )
+
+
+def _run_routed(
+    routing,
+    mode: Mode,
+    prompt: str,
+    cwd: Path,
+    repo: str,
+    base: HarnessConfig,
+    add_dirs: Optional[list[Path]] = None,
+    model: Optional[str] = None,
+    timeout: Optional[int] = None,
+    mode_spec: Optional[ModeSpec] = None,
+) -> DispatchResult:
+    """Route (`repo`, `mode`) through a `routing.RoutingService` and run the
+    candidates in order, each through `run_agent` unrouted (the service's
+    `DispatchRunner` and `DispatchReadiness` adapters). Every attempt holds a slot
+    of its provider's `concurrency` (`routing.PROVIDER_SLOTS`), so concurrent
+    `overnight` threads never exceed it. A run with no eligible provider
+    comes back refused (see `_refused_result`)."""
+    from gardener.routing import DispatchReadiness, DispatchRunner, RoutingService
+
+    base = routing_base(base)
+    service = RoutingService(routing)
+    decision, result = service.dispatch(
+        mode, repo, cwd, DispatchRunner(), base, readiness=DispatchReadiness(base, service.kinds),
+        prompt=prompt, cwd=cwd, add_dirs=add_dirs, model=model, timeout=timeout, mode_spec=mode_spec,
+    )
+    if result is None:
+        return _refused_result("routing refused this run: no eligible provider\n" + decision.explain())
+    return result
 
 
 def _spec_payload(mode: Mode, spec: ModeSpec, add_dirs: list[Path]) -> dict:

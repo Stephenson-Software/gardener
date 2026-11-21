@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS runs (
     claude_session_id TEXT,
     run_uuid TEXT,
     device TEXT,
-    pushed_at TEXT
+    pushed_at TEXT,
+    provider TEXT,
+    escalated_from TEXT
 );
 """
 
@@ -55,10 +57,17 @@ CREATE TABLE IF NOT EXISTS runs (
 #:   the same name an alert's footer carries).
 #: - `pushed_at` is when a hub acknowledged the row, NULL until then. It is
 #:   only meaningful in a device's local store.
+#: - `provider` is the routing provider that produced the run (`gardener/routing/`,
+#:   docs/rfcs/provider-routing.md), NULL when routing was off.
+#:   `escalated_from` is the providers tried before it, as comma-separated
+#:   `name:trigger` (e.g. `local-gpu:tempfail`), NULL when the first choice
+#:   answered. Neither is backfilled: an older row's provider is unknown.
 ADDED_COLUMNS = (
     ("run_uuid", "TEXT"),
     ("device", "TEXT"),
     ("pushed_at", "TEXT"),
+    ("provider", "TEXT"),
+    ("escalated_from", "TEXT"),
 )
 
 #: The index statements `_migrate` ensures. The unique index is what makes
@@ -247,6 +256,8 @@ class Run:
     id: Optional[int] = None
     run_uuid: Optional[str] = None
     device: Optional[str] = None
+    provider: Optional[str] = None
+    escalated_from: Optional[str] = None
 
 
 def _row_to_run(r: sqlite3.Row) -> Run:
@@ -268,6 +279,8 @@ def _row_to_run(r: sqlite3.Row) -> Run:
         claude_session_id=r["claude_session_id"],
         run_uuid=r["run_uuid"] if "run_uuid" in keys else None,
         device=r["device"] if "device" in keys else None,
+        provider=r["provider"] if "provider" in keys else None,
+        escalated_from=r["escalated_from"] if "escalated_from" in keys else None,
     )
 
 
@@ -399,8 +412,8 @@ def record_run(run: Run, db_path: Optional[Path] = None) -> int:
             INSERT INTO runs
                 (repo, timestamp, mode, gap_summary, outcome,
                  exit_code, duration_ms, cost_usd, claude_session_id,
-                 run_uuid, device)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 run_uuid, device, provider, escalated_from)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.repo,
@@ -414,6 +427,8 @@ def record_run(run: Run, db_path: Optional[Path] = None) -> int:
                 run.claude_session_id,
                 run.run_uuid,
                 run.device,
+                run.provider,
+                run.escalated_from,
             ),
         )
         conn.commit()
@@ -821,14 +836,14 @@ def insert_runs(runs: list[Run], db_path: Optional[Path] = None) -> list[str]:
                 INSERT INTO runs
                     (repo, timestamp, mode, gap_summary, outcome,
                      exit_code, duration_ms, cost_usd, claude_session_id,
-                     run_uuid, device)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     run_uuid, device, provider, escalated_from)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_uuid) DO NOTHING
                 """,
                 [
                     (r.repo, r.timestamp, r.mode, r.gap_summary, r.outcome,
                      r.exit_code, r.duration_ms, r.cost_usd, r.claude_session_id,
-                     r.run_uuid, r.device)
+                     r.run_uuid, r.device, r.provider, r.escalated_from)
                     for r in runs
                 ],
             )

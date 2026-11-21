@@ -441,6 +441,33 @@ one exists:
 See [HARNESSES.md](HARNESSES.md) for the command contract, the safety
 differences, and the Ollama and Orket recipes.
 
+## Provider routing
+
+With a `routing.json` in the state directory (or `GARDENER_ROUTING`
+pointing at one), `align`, `tend`, `overnight` and `score` route each run
+by repo size and mode to an ordered list of providers, and escalate when
+one fails. Without it nothing changes. The file format, escalation,
+refusal and safety rules are in
+[HARNESSES.md's "Provider routing"](HARNESSES.md#provider-routing).
+
+```bash
+gardener route --repo owner/name                 # where would a report run go?
+gardener route --repo owner/name --mode tend
+gardener route --repo owner/name --path ~/src/name --no-health
+```
+
+`gardener route` profiles gardener's cached clone of the repo (the one
+`align`/`tend` keep under `~/.cache/gardener/repos/`), or `--path`, and
+prints the tier, the candidate providers in order, and why each other
+provider was skipped. It runs the same readiness checks (`--no-ready` to
+skip) and health probes (`--no-health` to skip) a dispatch would, and never
+clones, refreshes or dispatches anything. With no routing file it says
+routing is off. `python -m gardener.routing --repo ... --path ... --mode ...`
+is the same explanation without the readiness checks, for any directory.
+
+Routed runs show their provider in `gardener status` (a `*` marks one
+that escalated) and in alerts.
+
 ## Other flags
 
 - `--model <name>` — override the model the agent harness uses (`align`,

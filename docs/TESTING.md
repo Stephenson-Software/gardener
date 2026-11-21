@@ -26,6 +26,52 @@ equivalent for this repo — `python3 -m` already puts the current directory
 on `sys.path`, and `gardener/` is a flat package at the repo root — so it
 discovers and runs the same tests. CI keeps the prefixed form.
 
+`tests/test_routing.py` covers the provider routing package
+(`gardener/routing/`, docs/rfcs/provider-routing.md) layer by layer. The
+core and `RoutingService` run against a fake for each port, with no
+patching: routing-file validation (including that a routing file can never
+widen a `command` harness's unscoped modes, and that a new provider kind
+plugs in without core changes), rule matching, per-repo
+tier/provider/`local_only` overrides, context and tier filters, readiness
+before health, a paused provider being skipped, escalation through
+tempfail/timeout/blocked with slots held and the observer told, and refusal
+with no candidates. Each production adapter is checked against its port
+(the HTTP health contract, the filesystem profiler and tiers on temp
+directories, `routing.json` including a missing file meaning routing is
+off, stderr lines). Architecture tests fail if `model`, `core` or `ports`
+import `adapters`/`service`, or if a port or adapter file holds more than
+one class. It never touches the network or invokes `claude`.
+
+`tests/test_routing_wiring.py` covers routing wired into gardener, with
+`_run_in_process_group` (or `run_agent`/`run_claude`) mocked and the health
+check patched. `run_agent`: with a repo but no routing file the dispatched
+argv and result are identical to an unrouted call, and without a repo a
+routing file is ignored; a small report goes to the free provider and is
+recorded with no cost; exit 75 escalates to the next provider and records
+`escalated_from`; a paused provider, or one whose binary is missing, is
+skipped; a run no provider may take comes back as a refused failed result
+without dispatching; write modes keep their `ModeSpec`; a `command`
+provider gets `tend` only through the operator's
+`GARDENER_HARNESS_ALLOW_UNSCOPED`; an invalid routing file is a
+`DispatchError`; credential-looking keys are rejected.
+`check_routing_ready` passes when one trusted provider can run and names
+each one otherwise. Concurrency: a `concurrency: 1` provider holds the
+second of two threads at its slot until the first finishes, two slots let
+two run at once, and a slot is released when a run raises.
+`overnight.batch_repos_by_provider` equals `batch_repos` with no caps,
+never puts two repos planned for a cap-1 provider in one batch, and never
+reorders; `cmd_overnight` uses it only with a routing file and
+`--concurrency` > 1, and stops before its batch on an invalid routing
+file. Provenance: `provider`/`escalated_from` round-trip through sqlite
+and the hub wire format, an older db gains the columns with its rows
+intact, a push without them is still accepted, `cmd_align` passes the repo
+to `run_agent` and records and alerts the provider, a refused run is
+recorded as an `error` naming the refusal, and `gardener status` shows a
+provider column only when a listed run was routed. `gardener route`
+parses with `report` as its default mode, says routing is off without a
+file, explains from `--path` or the cached clone, and fails cleanly when
+there's no clone. It has the same environment fence as `test_cli.py`.
+
 A passing run ends with `OK`. `tests/test_dispatch.py` mocks
 `_run_in_process_group` (the one call `claude` goes through) and never
 actually invokes `claude`. It covers both halves

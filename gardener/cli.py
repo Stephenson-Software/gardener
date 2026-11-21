@@ -36,6 +36,7 @@ from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
     broken, overnight, parpt, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
+from gardener.routing import AssumeHealthy, DispatchReadiness, RoutingService, default_routing_path
 from gardener.dispatch import (
     AUTH_RETRY_BACKOFF_SECONDS,
     ALIGN_TIMEOUT_ENV,
@@ -50,8 +51,11 @@ from gardener.dispatch import (
     looks_like_network_failure,
     looks_like_usage_limit,
     check_harness_ready,
+    check_routing_ready,
     agent_signal_guard,
     load_harness_config,
+    load_routing,
+    routing_base as dispatch_routing_base,
     run_agent,
     tend_mode_spec,
 )
@@ -419,7 +423,7 @@ def clone_or_refresh_target_repo(repo: str, cache_dir: Path, refresh: bool = Tru
     if shutil.which("gh") is None:
         raise RuntimeError("`gh` not found on PATH — install the GitHub CLI first")
 
-    dest = cache_dir / repo.replace("/", "__")
+    dest = cached_clone_path(repo, cache_dir)
     if not (dest / ".git").is_dir():
         cache_dir.mkdir(parents=True, exist_ok=True)
         res = _run(["gh", "repo", "clone", repo, str(dest), "--", "--depth", "1"], timeout=180)
@@ -666,6 +670,7 @@ def score_repo(
                 model=model,
                 timeout=timeout,
                 harness_config=harness_config,
+                repo=repo,
             )
     except repo_lock.RepoLockedError as e:
         return parpt.ScoreOutcome(repo, False, f"skipped: {e}")
@@ -925,6 +930,28 @@ def _print_denials(denials: list, subject: str) -> None:
     )
 
 
+def _provenance(result) -> dict:
+    """The run-record fields for which routing provider produced `result`
+    (`DispatchResult.provider`/`escalated_from`); both None when routing
+    was off, so an unrouted row is exactly what it always was."""
+    provider = getattr(result, "provider", None)
+    escalated = getattr(result, "escalated_from", ())
+    return {
+        "provider": provider if isinstance(provider, str) else None,
+        "escalated_from": ",".join(escalated) or None if isinstance(escalated, (tuple, list)) else None,
+    }
+
+
+def _provenance_line(run: state.Run) -> str:
+    """`provider: x (escalated from y:tempfail)`, or "" for an unrouted run."""
+    if not run.provider:
+        return ""
+    line = f"provider: {run.provider}"
+    if run.escalated_from:
+        line += f" (escalated from {run.escalated_from})"
+    return line
+
+
 def _notify_run(run: state.Run) -> None:
     """Fire an outcome notification for a recorded run. Thin by design —
     this only turns an already-recorded `state.Run` into a (title,
@@ -954,6 +981,9 @@ def _notify_run(run: state.Run) -> None:
         title = f"gardener {run.mode}: MUTATION — {run.repo}"
 
     message = run.gap_summary or "(no summary)"
+    provenance = _provenance_line(run)
+    if provenance:
+        message += "\n\n" + provenance
     try:
         notify.default_notifier().notify(title, message, level)
     except Exception as e:  # noqa: BLE001 - alerting must never break the run it reports on
@@ -1038,6 +1068,7 @@ def cmd_align(args: argparse.Namespace) -> int:
                 model=args.model,
                 timeout=args.timeout,
                 harness_config=harness_config,
+                repo=args.repo,
             )
     except repo_lock.RepoLockedError as e:
         # Neither recorded nor alerted — see `_run_tend_dispatch`'s handler
@@ -1074,6 +1105,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         duration_ms=result.duration_ms,
         cost_usd=result.cost_usd,
         claude_session_id=result.session_id,
+        **_provenance(result),
     )
     _record_and_notify(completed_run, args.state_db)
 
@@ -1221,6 +1253,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                     model=args.model,
                     timeout=harness_config.create_dev_loop_timeout,
                     harness_config=harness_config,
+                    repo=args.repo,
                 )
                 # gh repo create is never in this mode's allowed_tools (a
                 # deliberate, higher-risk-class exclusion — see
@@ -1246,6 +1279,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                     duration_ms=create_result.duration_ms,
                     cost_usd=create_result.cost_usd,
                     claude_session_id=create_result.session_id,
+                    **_provenance(create_result),
                 )
                 _safe_record_run(create_run, args.state_db)
                 if not create_result.ok or not dev_loop.has_dev_loop_skill(slug):
@@ -1297,6 +1331,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
                 timeout=args.timeout,
                 mode_spec=tend_mode_spec(eligible),
                 harness_config=harness_config,
+                repo=args.repo,
             )
     except repo_lock.RepoLockedError as e:
         # A held lock is the exclusion mechanism working as designed (see
@@ -1337,6 +1372,7 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
         duration_ms=result.duration_ms,
         cost_usd=result.cost_usd,
         claude_session_id=result.session_id,
+        **_provenance(result),
     )
     _record_and_notify(completed_run, args.state_db)
 
@@ -1541,6 +1577,22 @@ def _first_blocked_index(outcomes: list) -> int:
     return len(outcomes)
 
 
+def cached_clone_path(repo: str, cache_dir: Optional[Path] = None) -> Path:
+    """Where `clone_or_refresh_target_repo` keeps `repo`'s clone."""
+    return (cache_dir or default_repos_cache_dir()) / repo.replace("/", "__")
+
+
+def _plan_providers(routing, order: list[str]) -> dict[str, Optional[str]]:
+    """Each repo's likely first provider for a `tend`, from its cached clone
+    (`RoutingService.first_choice`), for `overnight.batch_repos_by_provider`."""
+    service = RoutingService(routing)
+    return {repo: service.first_choice(Mode.TEND, repo, cached_clone_path(repo)) for repo in order}
+
+
+def _provider_caps(routing) -> dict[str, int]:
+    return {name: p.concurrency for name, p in routing.providers.items()}
+
+
 def cmd_overnight(args: argparse.Namespace) -> int:
     """Tend every repo in the garden, one after another, within an overall
     time budget — the "tend to my garden while I sleep" entry point. See
@@ -1617,9 +1669,16 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     # `command` harness without its unscoped opt-in) would otherwise fail
     # every garden repo one by one, each recorded and alerted as that repo's
     # failure. Same setup-failure shape as the unreadable garden below.
+    # With a routing file the global harness is only the base the providers
+    # are built on, so the check is "can any provider trusted with tend run
+    # it" instead — and an invalid routing file stops the batch here too.
     try:
         harness_config = load_harness_config()
-        check_harness_ready(Mode.TEND, harness_config)
+        routing = load_routing()
+        if routing is None:
+            check_harness_ready(Mode.TEND, harness_config)
+        else:
+            check_routing_ready(Mode.TEND, routing, harness_config)
     except DispatchError as e:
         print(f"gardener: overnight: error: {e}", file=sys.stderr)
         try:
@@ -1817,7 +1876,13 @@ def cmd_overnight(args: argparse.Namespace) -> int:
             )
 
     announced_next_cycle = False
-    for repo_batch in overnight.batch_repos(order, concurrency):
+    if routing is not None and concurrency > 1:
+        batches = overnight.batch_repos_by_provider(
+            order, concurrency, _plan_providers(routing, order), _provider_caps(routing),
+        )
+    else:
+        batches = overnight.batch_repos(order, concurrency)
+    for repo_batch in batches:
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
         # wall-clock time is bounded by one repo's tend timeout
@@ -2076,7 +2141,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             print("no runs recorded yet")
         return 0
     device_col = f"{'device':<14} " if all_devices else ""
-    header = f"{'timestamp':<20} {device_col}{'repo':<32} {'mode':<11} {'outcome':<10} summary"
+    # Only when some listed run was routed: with routing off the table is
+    # exactly what it always was.
+    routed = any(r.provider for r in runs)
+    provider_col = f"{'provider':<14} " if routed else ""
+    header = (f"{'timestamp':<20} {device_col}{'repo':<32} {'mode':<11} {'outcome':<10} "
+              f"{provider_col}summary")
     print(header)
     print("-" * len(header))
     for r in runs:
@@ -2084,7 +2154,48 @@ def cmd_status(args: argparse.Namespace) -> int:
         if len(summary) > 60:
             summary = summary[:57] + "..."
         device = f"{(r.device or '—'):<14} " if all_devices else ""
-        print(f"{r.timestamp:<20} {device}{r.repo:<32} {r.mode:<11} {r.outcome:<10} {summary}")
+        provider = ""
+        if routed:
+            name = (r.provider or "—") + ("*" if r.escalated_from else "")
+            provider = f"{name:<14} "
+        print(f"{r.timestamp:<20} {device}{r.repo:<32} {r.mode:<11} {r.outcome:<10} {provider}{summary}")
+    if routed and any(r.escalated_from for r in runs):
+        print("* escalated to this provider after an earlier one failed")
+    return 0
+
+
+def cmd_route(args: argparse.Namespace) -> int:
+    """`gardener route` — explain where a run for one repo would go, from
+    its cached clone (`RoutingService.explain`, with the same readiness and health
+    checks a real dispatch makes). Read-only: never clones, refreshes or
+    dispatches anything, so a repo gardener has never cloned is an error
+    pointing at `--path` rather than a surprise clone."""
+    try:
+        routing = load_routing(args.routing_file)
+    except DispatchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if routing is None:
+        where = args.routing_file or default_routing_path()
+        print(f"no routing file at {where}: routing is off, every run uses the single configured "
+              "harness (see docs/HARNESSES.md's \"Provider routing\")")
+        return 0
+    path = args.path or cached_clone_path(args.repo)
+    if not path.is_dir():
+        print(f"error: no clone of {args.repo} at {path}; run `gardener align --repo {args.repo}` "
+              "once, or pass --path to any checkout of it", file=sys.stderr)
+        return 2
+    mode = Mode(args.mode)
+    try:
+        base = load_harness_config()
+        readiness = None if args.no_ready else DispatchReadiness(dispatch_routing_base(base))
+    except DispatchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    service = RoutingService(routing)
+    if args.no_health:
+        service.health = AssumeHealthy()
+    print(service.explain(mode, args.repo, path, readiness=readiness))
     return 0
 
 
@@ -2744,6 +2855,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status.add_argument("--state-db", type=Path, default=None, help=argparse.SUPPRESS)
     status.set_defaults(func=cmd_status)
+
+    route_parser = sub.add_parser(
+        "route",
+        help="Explain which provider a run would be routed to (needs a routing file; "
+             "see docs/HARNESSES.md)",
+    )
+    route_parser.add_argument("--repo", required=True, type=repo_arg, help="owner/name of the target repo")
+    route_parser.add_argument(
+        "--mode", default=Mode.REPORT.value, choices=[m.value for m in Mode],
+        help="The dispatch mode to route (default: report)",
+    )
+    route_parser.add_argument(
+        "--path", type=Path, default=None,
+        help="Profile this checkout instead of gardener's cached clone of --repo",
+    )
+    route_parser.add_argument(
+        "--no-health", action="store_true", help="Don't probe providers' health URLs",
+    )
+    route_parser.add_argument(
+        "--no-ready", action="store_true",
+        help="Don't check that each provider's binary/command exists on this machine",
+    )
+    route_parser.add_argument("--routing-file", type=Path, default=None, help=argparse.SUPPRESS)
+    route_parser.set_defaults(func=cmd_route)
 
     hub_parser = sub.add_parser(
         "hub",

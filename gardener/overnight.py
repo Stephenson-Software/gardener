@@ -293,6 +293,48 @@ def batch_repos(order: list[str], concurrency: int) -> list[list[str]]:
     return [order[i : i + size] for i in range(0, len(order), size)]
 
 
+def batch_repos_by_provider(
+    order: list[str],
+    concurrency: int,
+    provider_of: dict[str, Optional[str]],
+    caps: dict[str, int],
+) -> list[list[str]]:
+    """`batch_repos`, but a batch also never holds more repos expected on
+    one routing provider than that provider's `concurrency` (`caps`) — so
+    `--concurrency 2` doesn't put two repos bound for a one-at-a-time local
+    model in the same batch, where the second would sit waiting for a slot
+    (`routing.PROVIDER_SLOTS`) and stretch the batch past the one-timeout
+    wall clock `has_time_for_another_repo`'s headroom assumes.
+
+    A batch is still a contiguous run of `order`: it is cut short at the
+    first repo that doesn't fit, never reordered past. The round-robin
+    resume cursor is a bare count of how far into `order` this run got,
+    which only means something if every batch is a prefix of what's left.
+
+    `provider_of` is a plan, not a promise (`RoutingService.first_choice`: no
+    health probe, and a repo with no clone yet maps to None, i.e. no
+    constraint). Escalation can still move a run onto a busy provider; the
+    slots are what guarantee the limit, this only keeps waiting rare. With
+    no caps this is exactly `batch_repos`."""
+    size = max(1, concurrency)
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    used: dict[str, int] = {}
+    for repo in order:
+        provider = provider_of.get(repo)
+        cap = caps.get(provider) if provider is not None else None
+        fits = len(batch) < size and (cap is None or used.get(provider, 0) < max(1, cap))
+        if batch and not fits:
+            batches.append(batch)
+            batch, used = [], {}
+        batch.append(repo)
+        if provider is not None:
+            used[provider] = used.get(provider, 0) + 1
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def repos_to_attempt(garden: list[str], start_index: int) -> list[str]:
     """The full garden, rotated to start at `start_index` (mod length) —
     round-robins across nights instead of always starting from the top of
