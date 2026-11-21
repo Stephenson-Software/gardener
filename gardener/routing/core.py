@@ -170,13 +170,14 @@ def route(config: RoutingConfig, mode: Mode, repo: str, profile: RepoProfile,
 
 
 def escalation_trigger(result: DispatchResult) -> Optional[str]:
-    """Which escalate_on trigger a result hits, or None if it's a final answer."""
+    """Which escalate_on trigger a result hits, or None if it's a final answer. Exit 75 is checked
+    first: the dispatcher also marks it `blocked`, but its trigger is `tempfail`."""
+    if result.exit_code == EX_TEMPFAIL:
+        return "tempfail"
     if result.blocked:
         return "blocked"
     if result.timed_out:
         return "timeout"
-    if result.exit_code == EX_TEMPFAIL:
-        return "tempfail"
     if not result.ok and result.is_error:
         return "error"
     return None
