@@ -391,33 +391,37 @@ above) rather than relying on `PATH` at all, and don't assume anything
 
 ## Device-wide failures abort the run instead of consuming the garden
 
-Three dispatch outcomes say nothing about the repo being tended: broken
-credentials, an exhausted usage/session window, and an unreachable GitHub.
-All three are global to the device, all three fail in seconds rather than
-minutes, and after any of them every remaining repo in the garden is about
-to fail in exactly the same way. `overnight` therefore treats them
-differently from an ordinary per-repo error — `dispatch.is_device_global_failure`
-is the single predicate that recognizes all three:
+Four dispatch outcomes say nothing about the repo being tended: broken
+credentials, an exhausted usage/session window, a Claude subscription that
+can't be used (billing), and an unreachable GitHub. All four are global to
+the device, all four fail in seconds rather than minutes, and after any of
+them every remaining repo in the garden is about to fail in exactly the
+same way. `overnight` therefore treats them differently from an ordinary
+per-repo error — `dispatch.is_device_global_failure` is the single
+predicate that recognizes all four:
 
 1. An **auth** failure is **retried** a small number of times with backoff
    (`dispatch.py`'s `AUTH_RETRY_BACKOFF_SECONDS`, currently 30s/120s/300s),
    which is enough to ride out a token-refresh blip. Only auth failures are
    retried — a tend cycle that genuinely failed has already mutated its
    branch and needs triage, not a blind second run. A **usage limit** is
-   deliberately *not* retried: it resets at a wall-clock hour routinely
-   hours away, so the backoff cannot outlast it and would only burn the
-   night's budget asleep. A **GitHub outage** strikes before dispatch (while
+   deliberately *not* retried by that backoff: it resets at a wall-clock
+   hour routinely hours away. Instead, when its message names a reset time
+   that still leaves room for a tend, `overnight` waits for it once (see
+   "Usage limits" below). A **GitHub outage** strikes before dispatch (while
    resolving the default branch or cloning), so there is no dispatch to
    retry at all — it is classified from the raised error's text instead.
 2. Whichever it was, the run then **stops**, and the resume cursor is **not
    advanced past the affected repo(s)** — so the next invocation re-attempts
    them rather than skipping them. Repos that tended successfully earlier in
    the run still count as done.
-3. A dedicated ERROR notification fires alongside the usual batch summary,
-   since the summary alone reads as a pile of ordinary per-repo errors and
-   buries the one thing that actually needs a human. It **names the specific
-   class**, because the recoveries are not interchangeable: log `claude`
-   back in, wait out a quota reset, or check connectivity.
+3. **One** ERROR notification fires, titled `ABORTED`, with the batch
+   summary in its body. The repos that hit the failure send no `tend:
+   FAILED` alert of their own (`cli._quiet_device_global`), since those
+   would bury the one thing that actually needs a human. It **names the
+   specific class**, because the recoveries are not interchangeable: log
+   `claude` back in, pay or renew the subscription, wait out a quota reset,
+   or check connectivity.
 
 Note what this deliberately does *not* do: an ordinary repo failure (a
 broken build, a failing test suite) never aborts the garden or holds the
@@ -435,6 +439,7 @@ repos they hit:
 | 2026-07-20, 2026-07-25 | usage limit (`You've hit your session limit · resets 12am (UTC)`) | 35 repos, 20 of them in a four-minute window |
 | 2026-07-21, 2026-07-25 | GitHub unreachable (`error connecting to api.github.com`, GraphQL `unexpected EOF`) | 17 repos |
 | 2026-08-04 | GitHub unreachable in a third wording (`http2: client conn could not be established`) | 2 repos |
+| 2026-11-18 | subscription unusable (`Claude Code can't use your Claude subscription, usually because a payment is past due`) | all 231 repos, and one FAILED alert each: 162 reached Discord, 70 were refused with HTTP 429 |
 
 In every case the cursor advanced past the affected repos, so they stayed
 untended for the night through no fault of their own.
@@ -466,6 +471,36 @@ marker. `cli.py`'s `_default_branch_name` raises it for a deleted, renamed,
 or permission-denied repo just as readily as for an outage — matching it
 would abort the whole batch, and park the resume cursor, on a repo that is
 permanently gone. Only the transport error `gh` appends to it may classify.
+
+## Usage limits
+
+Before parpt scoring or any tend, `overnight` makes one tiny read-only
+report-mode call (`quota.probe`) to learn whether Claude can be used at
+all tonight:
+
+- **It answers:** the night goes ahead as usual.
+- **Usage limit with a readable reset time that still leaves room for one
+  tend:** one `PAUSED` WARNING alert, a sleep until the reset plus two
+  minutes (`quota.RESET_MARGIN_SECONDS`), then one more probe. The wait is
+  taken out of the night's budget.
+- **Any other device-wide failure, or a reset too late for tonight:** one
+  `SKIPPED` ERROR alert naming the reason. Nothing is dispatched and the
+  resume cursor is untouched.
+- **The probe fails for some other reason** (a timeout, say): the night
+  goes ahead. A flaky probe must not cost the garden a night, and the batch
+  loop still aborts on a real device-wide failure.
+
+The same wait applies once per night mid-run: a batch that hits a usage
+limit whose reset fits the remaining budget sends one `PAUSED` alert,
+sleeps, and re-dispatches the repos that hit it. A second limit in the same
+night aborts as above.
+
+The probe is skipped with `--no-preflight`, when a routing file is in use
+(routing has its own provider health checks and escalation), and on a
+non-Claude harness. `quota.parse_reset_time` reads the reset forms seen so
+far (`resets 12am (UTC)`, `resets 3:30pm`, `resets Nov 25, 5am
+(America/Denver)`, and the older `usage limit reached|<epoch>`); anything it
+can't read means "no known reset", so the night is skipped, not guessed at.
 
 ## Dependency caches survive the target-repo refresh
 

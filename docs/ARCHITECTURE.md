@@ -34,6 +34,10 @@ gardener/
                        cli.py's cmd_overnight composes it with real time and
                        a real (in-process, optionally concurrent via
                        ThreadPoolExecutor) tend dispatch
+    quota.py         — the overnight usage pre-flight: one read-only probe
+                       through run_agent, reset-time parsing for usage-limit
+                       messages, and whether waiting for a reset fits the
+                       night's budget (pure apart from the injected runner)
     parpt.py         — autonomous Parpt scoring for `gardener score` and
                        `overnight --strategy parpt`: the questionnaire,
                        reply parsing, score storage + Parpt-format export,

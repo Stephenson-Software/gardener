@@ -21,12 +21,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gardener import cli, dispatch, garden, hub, overnight, routing, state
+from gardener import cli, dispatch, garden, hub, overnight, quota, routing, state
 from gardener.routing import Health
 from gardener.dispatch import DispatchError, DispatchResult, Harness, HarnessConfig, Mode, run_agent
 
 _fence = None
 _fence_dir = None
+_quota_fences = []
 
 
 def setUpModule():
@@ -43,9 +44,22 @@ def setUpModule():
                  dispatch.COMMAND_ENV, dispatch.ALLOW_UNSCOPED_ENV, dispatch.CLAUDE_BIN_ENV,
                  dispatch.MODEL_ENV):
         os.environ.pop(name, None)
+    # cmd_overnight's usage pre-flight makes one real Claude call when no
+    # routing file is in use, and a usage limit can sleep until its reset.
+    # Neither may happen in a test (same fence as test_cli.py's).
+    global _quota_fences
+    _quota_fences = [
+        patch("gardener.cli.quota.probe",
+              return_value=quota.ProbeResult(ok=True, blocked=False, text="OK")),
+        patch("gardener.cli.quota.seconds_to_wait", return_value=None),
+    ]
+    for fence in _quota_fences:
+        fence.start()
 
 
 def tearDownModule():
+    for fence in _quota_fences:
+        fence.stop()
     _fence.stop()
     _fence_dir.cleanup()
 

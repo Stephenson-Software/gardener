@@ -34,7 +34,7 @@ from typing import Optional
 
 from gardener import (
     conventions, dashboard, dev_loop, doctor, garden, heartbeat, hub, merge_allowlist, notify,
-    broken, overnight, parpt, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
+    broken, overnight, parpt, quota, reach, repo_lock, run_log, selfupdate, sessions, state, transcript, usage,
 )
 from gardener.routing import AssumeHealthy, DispatchReadiness, RoutingService, default_routing_path
 from gardener.dispatch import (
@@ -44,11 +44,13 @@ from gardener.dispatch import (
     TEND_DEFAULT_TIMEOUT_SECONDS,
     TEND_TIMEOUT_ENV,
     DispatchError,
+    Harness,
     HarnessConfig,
     Mode,
     is_device_global_failure,
     looks_like_auth_failure,
     looks_like_network_failure,
+    looks_like_subscription_unavailable,
     looks_like_usage_limit,
     check_harness_ready,
     check_routing_ready,
@@ -1007,10 +1009,30 @@ def _safe_record_run(run: state.Run, db_path: Optional[Path]) -> None:
     hub.push_after_record(db_path)
 
 
-def _record_and_notify(run: state.Run, db_path: Optional[Path]) -> None:
-    """Record a completed run and notify its outcome, without ever raising."""
+def _record_and_notify(run: state.Run, db_path: Optional[Path], notify_run: bool = True) -> None:
+    """Record a completed run and notify its outcome, without ever raising.
+    `notify_run=False` records it without the per-run alert (see
+    `_quiet_device_global`)."""
     _safe_record_run(run, db_path)
-    _notify_run(run)
+    if notify_run:
+        _notify_run(run)
+
+
+def _quiet_device_global(args: argparse.Namespace, failed_text: str, blocked: bool = False) -> bool:
+    """Whether to hold back a failed tend's own FAILED alert because the
+    failure is device-wide and the caller will send one alert for the whole
+    batch instead.
+
+    Only `cmd_overnight` opts in (it sets `quiet_device_global` on the
+    synthetic Namespace it builds); a `gardener tend` run by hand still
+    alerts, since there the per-run alert is the only one. Without this, a
+    usage window or subscription that ran out mid-night still sent one
+    FAILED alert per repo in the batch before the abort — and when the
+    failure went unclassified, one per repo in the garden (231 on
+    2026-11-18)."""
+    if not getattr(args, "quiet_device_global", False):
+        return False
+    return blocked or is_device_global_failure(failed_text)
 
 
 def cmd_align(args: argparse.Namespace) -> int:
@@ -1356,7 +1378,9 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
             timestamp=state.now_iso(),
             gap_summary=str(e),
         )
-        _record_and_notify(failed_run, args.state_db)
+        _record_and_notify(
+            failed_run, args.state_db, notify_run=not _quiet_device_global(args, str(e))
+        )
         return TendResult(exit_code=1, dispatched=False, run=failed_run)
 
     outcome = "error" if not result.ok else Mode.TEND.value
@@ -1374,7 +1398,11 @@ def _run_tend_dispatch(args: argparse.Namespace) -> TendResult:
         claude_session_id=result.session_id,
         **_provenance(result),
     )
-    _record_and_notify(completed_run, args.state_db)
+    _record_and_notify(
+        completed_run,
+        args.state_db,
+        notify_run=result.ok or not _quiet_device_global(args, gap_summary, bool(result.blocked)),
+    )
 
     # Printed here (stderr), not left to cmd_tend's wrapper, so this summary
     # line still shows up in `gardener overnight`'s log too — cmd_overnight
@@ -1487,6 +1515,9 @@ def _dispatch_one_for_overnight(repo: str, args: argparse.Namespace) -> overnigh
         timeout=getattr(args, "timeout", None),
         no_refresh_target=False,
         state_db=args.state_db,
+        # One alert for a device-wide failure, from cmd_overnight, rather
+        # than one FAILED alert per repo it hits.
+        quiet_device_global=True,
     )
     try:
         result = _dispatch_tend(tend_args)
@@ -1538,6 +1569,18 @@ def _blocking_reason(outcomes: list) -> tuple:
     wording if a repo is flagged by a marker set that grows past these
     three, rather than asserting a reason it can't actually support."""
     text = next((o.gap_summary or "" for o in outcomes if o.blocked), "")
+    return _reason_for_text(text)
+
+
+def _reason_for_text(text: str) -> tuple:
+    """`_blocking_reason` for one failure's text (also used for the
+    pre-flight probe's, which has no `RepoOutcome`)."""
+    if looks_like_subscription_unavailable(text, ""):
+        return (
+            "the Claude subscription can't be used (billing)",
+            "Pay or renew at https://claude.ai/settings/billing, then re-run "
+            "`gardener overnight` — no wait will fix this one.",
+        )
     if looks_like_usage_limit(text, ""):
         return (
             "the usage/session limit is exhausted",
@@ -1591,6 +1634,109 @@ def _plan_providers(routing, order: list[str]) -> dict[str, Optional[str]]:
 
 def _provider_caps(routing) -> dict[str, int]:
     return {name: p.concurrency for name, p in routing.providers.items()}
+
+
+def _notify_quietly(title: str, message: str, level) -> None:
+    """Send one alert; never raises."""
+    try:
+        notify.default_notifier().notify(title, message, level)
+    except Exception as e:  # noqa: BLE001 - alerting must never break the run it reports on
+        print(f"gardener: overnight: notification failed (non-fatal): {e}", file=sys.stderr)
+
+
+def _wait_for_usage_reset(
+    text: str,
+    remaining_budget_seconds: float,
+    tend_timeout: float,
+    sleep_fn=time.sleep,
+    now_fn=None,
+) -> Optional[float]:
+    """Sleep until the usage window named in `text` resets, when that still
+    leaves room for at least one tend. Returns the seconds slept, or None
+    without sleeping when waiting isn't possible (not a usage limit, no
+    readable reset time, or the reset is too late for tonight's budget).
+
+    Sends one PAUSED alert before it sleeps, so a quiet Discord channel
+    during the wait reads as "waiting", not as "stuck"."""
+    now = (now_fn or (lambda: datetime.now().astimezone()))()
+    wait = quota.seconds_to_wait(text, now, remaining_budget_seconds, tend_timeout)
+    if wait is None:
+        return None
+    resume_at = (now + timedelta(seconds=wait)).strftime("%H:%M %Z").strip()
+    print(
+        f"gardener: overnight: usage limit reached — waiting {wait / 60:.0f} min for the "
+        f"reset (resuming about {resume_at})",
+        file=sys.stderr,
+    )
+    _notify_quietly(
+        "gardener overnight: PAUSED — usage limit reached",
+        f"Waiting for the reset; resuming about {resume_at}. No repos are being tended "
+        "until then.",
+        notify.Level.WARNING,
+    )
+    sleep_fn(wait)
+    return wait
+
+
+def _overnight_preflight(
+    args: argparse.Namespace,
+    harness_config,
+    routing,
+    budget_seconds: float,
+    tend_timeout: float,
+    probe_fn=None,
+    sleep_fn=time.sleep,
+    now_fn=None,
+) -> tuple:
+    """`(go ahead?, seconds spent waiting)` before the night's first
+    dispatch.
+
+    One tiny read-only call finds out whether Claude can be used at all, so
+    an exhausted usage window, an unusable subscription or a broken login
+    costs one probe and one alert instead of a failed tend and a FAILED
+    alert per repo (231 of them on 2026-11-18). A usage limit with a
+    readable reset time that fits the budget is waited out and probed once
+    more. A probe that fails for any other reason (a timeout, say) lets the
+    night go ahead: a flaky probe must not cost the garden a night, and the
+    batch loop still aborts on a real device-wide failure.
+
+    Skipped with `--no-preflight`, with a routing file (routing has its own
+    provider health checks and escalation), and on a non-Claude harness."""
+    if not getattr(args, "preflight", True):
+        return True, 0.0
+    if routing is not None or harness_config.harness is not Harness.CLAUDE_CODE:
+        return True, 0.0
+    probe_fn = probe_fn or (lambda: quota.probe(harness_config, model=args.model))
+    result = probe_fn()
+    if result.ok or not result.blocked:
+        if not result.ok:
+            print(
+                f"gardener: overnight: pre-flight probe failed, going ahead anyway: "
+                f"{result.text[:300]}",
+                file=sys.stderr,
+            )
+        return True, 0.0
+    print(f"gardener: overnight: pre-flight: {result.text[:500]}", file=sys.stderr)
+    waited = _wait_for_usage_reset(
+        result.text, budget_seconds, tend_timeout, sleep_fn=sleep_fn, now_fn=now_fn
+    )
+    if waited is not None:
+        again = probe_fn()
+        if again.ok or not again.blocked:
+            return True, waited
+        result = again
+    reason, recovery = _reason_for_text(result.text)
+    print(
+        f"gardener: overnight: not starting — {reason}. {recovery}",
+        file=sys.stderr,
+    )
+    _notify_quietly(
+        f"gardener overnight: SKIPPED — {reason}",
+        f"Nothing was dispatched tonight and the resume cursor is unchanged. {recovery}\n\n"
+        f"{result.text[:500]}",
+        notify.Level.ERROR,
+    )
+    return False, waited or 0.0
 
 
 def cmd_overnight(args: argparse.Namespace) -> int:
@@ -1722,6 +1868,15 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         return 0
 
     budget_seconds = args.hours * 3600
+
+    # Before parpt scoring and every tend: is Claude usable at all tonight?
+    go_ahead, waited = _overnight_preflight(
+        args, harness_config, routing, budget_seconds, tend_timeout
+    )
+    if not go_ahead:
+        return 0
+    budget_seconds = max(0.0, budget_seconds - waited)
+
     cursor_path = args.cursor_file or overnight.default_cursor_path()
     strategy = overnight.Strategy(
         getattr(args, "strategy", None) or overnight.DEFAULT_OVERNIGHT_STRATEGY.value
@@ -1882,7 +2037,10 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         )
     else:
         batches = overnight.batch_repos(order, concurrency)
-    for repo_batch in batches:
+    pending_batches = list(batches)
+    waited_for_reset = False
+    while pending_batches:
+        repo_batch = pending_batches.pop(0)
         elapsed = time.monotonic() - start_time
         # Checked once per batch, not once per repo: a batch's own
         # wall-clock time is bounded by one repo's tend timeout
@@ -1954,6 +2112,23 @@ def cmd_overnight(args: argparse.Namespace) -> int:
         # api.github.com burned 17 across 2026-07-21 and 2026-07-25 — every
         # one with the cursor advanced past it, leaving the garden untended
         # until the next night.
+        if aborted_on_block and not waited_for_reset:
+            # An exhausted usage window names its reset time. When that
+            # still leaves room for a tend, wait it out (once per night)
+            # and re-attempt the repos that hit it, instead of losing the
+            # rest of the night. Anything else — or a second limit — aborts
+            # exactly as before.
+            text = next((o.gap_summary or "" for o in batch_outcomes if o.blocked), "")
+            remaining = budget_seconds - (time.monotonic() - start_time)
+            if _wait_for_usage_reset(text, remaining, tend_timeout) is not None:
+                waited_for_reset = True
+                blocked_repos = [o.repo for o in batch_outcomes if o.blocked]
+                outcomes[:] = [o for o in outcomes if not o.blocked]
+                attempted -= len(blocked_repos)
+                aborted_on_block = False
+                pending_batches.insert(0, blocked_repos)
+                continue
+
         if aborted_on_block:
             reason, recovery = _blocking_reason(batch_outcomes)
             print(
@@ -1975,24 +2150,26 @@ def cmd_overnight(args: argparse.Namespace) -> int:
     summary = overnight.build_batch_summary(outcomes, elapsed_total, skipped)
     print(f"gardener: overnight done — {summary.message}", file=sys.stderr)
     if aborted_on_block:
-        # Sent in addition to (not instead of) the batch summary below: the
-        # summary reports what this run did, which on a blocked abort reads
-        # as a pile of ordinary per-repo errors and buries the one thing an
-        # operator actually has to act on.
+        # One alert, not two: the ABORTED title names the one thing an
+        # operator has to act on, and the batch summary rides along in its
+        # body (on its own it reads as a pile of ordinary per-repo errors).
+        # The blocked repos' own FAILED alerts were held back in
+        # `_dispatch_tend` (see `_quiet_device_global`).
         reason, recovery = _blocking_reason(outcomes)
         try:
             notify.default_notifier().notify(
                 f"gardener overnight: ABORTED — {reason}",
                 f"{skipped} repo(s) left untended and the resume cursor was held back so they "
-                f"aren't skipped. {recovery}",
+                f"aren't skipped. {recovery}\n\n{summary.message}",
                 notify.Level.ERROR,
             )
         except Exception as e:  # noqa: BLE001 - the alert must never fail the run it reports on
             print(f"gardener: overnight abort notification failed (non-fatal): {e}", file=sys.stderr)
-    try:
-        notify.default_notifier().notify(summary.title, summary.message, summary.level)
-    except Exception as e:  # noqa: BLE001 - the batch summary alert must never fail the run it reports on
-        print(f"gardener: overnight summary notification failed (non-fatal): {e}", file=sys.stderr)
+    else:
+        try:
+            notify.default_notifier().notify(summary.title, summary.message, summary.level)
+        except Exception as e:  # noqa: BLE001 - the batch summary alert must never fail the run it reports on
+            print(f"gardener: overnight summary notification failed (non-fatal): {e}", file=sys.stderr)
 
     return 0
 
@@ -2716,6 +2893,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-self-update", dest="self_update", action="store_false", default=True,
         help="Skip fast-forwarding gardener's own checkout to origin before this run "
              "(on by default — see docs/OVERNIGHT.md's 'Self-update' section)",
+    )
+    overnight_parser.add_argument(
+        "--no-preflight", dest="preflight", action="store_false", default=True,
+        help="Skip the one tiny Claude call made before the run to learn whether the "
+             "subscription can be used right now (on by default — see docs/OVERNIGHT.md's "
+             "'Usage limits' section)",
     )
     overnight_parser.add_argument("--garden-file", dest="garden_file", type=Path, default=None, help=argparse.SUPPRESS)
     overnight_parser.add_argument("--cursor-file", dest="cursor_file", type=Path, default=None, help=argparse.SUPPRESS)
