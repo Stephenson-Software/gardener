@@ -293,6 +293,18 @@ scopes `GARDENER_STATE_DIR` to a tmp dir for every test in the class,
 since constructing a notifier resolves a device name and would otherwise
 read the operator's real `notify.env`; one test guards that redirection by
 asserting a device name that exists only in the tmp dir.
+`tests/test_quota.py` covers the overnight usage pre-flight's pure parts:
+`parse_reset_time` against the real reset wordings (bare hour, minutes,
+named zone, dated, across New Year, the older epoch form, and unreadable
+text giving None), `seconds_to_wait`'s budget rule, and `probe`'s
+classification with the runner injected, so it never invokes `claude`.
+`test_cli.py`'s `TestOvernightUsagePreflight` drives `cmd_overnight` and
+`_overnight_preflight` with the probe, the sleep and the clock injected:
+one SKIPPED alert and no dispatch for an unusable subscription, a flaky
+probe going ahead, a reset waited out with one PAUSED alert, one ABORTED
+alert (and no per-repo FAILED alerts) for a mid-run device-wide failure,
+and a mid-run usage limit re-dispatching the repo that hit it. The module
+fence patches `quota.probe` to answer "usable" for every other test.
 `tests/test_usage.py` covers usage reporting end to end against a
 loopback `http.server` started in the test (never the real trace
 service): the three

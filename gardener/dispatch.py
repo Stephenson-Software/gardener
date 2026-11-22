@@ -417,6 +417,31 @@ USAGE_LIMIT_MARKERS = (
     "session limit",
     "usage limit",
     "rate limit reached",
+    # Sibling wordings of the same window running out ("You've hit your
+    # weekly limit · resets …", "5-hour limit reached ∙ resets 3pm"). Only
+    # ever matched against a run that already failed.
+    "weekly limit",
+    "hour limit",
+    "limit reached",
+)
+
+# The subscription itself can't be used: billing past due, or the
+# organisation no longer allowed on it. Fails exactly like the two classes
+# above (in under two seconds, for every repo alike) but no wait fixes it —
+# only the operator can.
+#
+# Grounded in a real night: on 2026-11-18 every one of the garden's 231
+# tends failed with "Claude Code can't use your Claude subscription,
+# usually because a payment is past due · Pay or renew at
+# https://claude.ai/settings/billing …" (the transcript's error code was
+# `oauth_org_not_allowed`). Nothing classified it, so the batch never
+# aborted and each repo sent its own FAILED alert: 162 reached Discord and
+# 70 more were refused with HTTP 429.
+SUBSCRIPTION_UNAVAILABLE_MARKERS = (
+    "can't use your claude subscription",
+    "can\u2019t use your claude subscription",
+    "payment is past due",
+    "oauth_org_not_allowed",
 )
 
 # GitHub/network unreachability. This class is different in kind from the
@@ -477,6 +502,12 @@ def looks_like_usage_limit(result_text: str, stderr: str) -> bool:
     return _matches(USAGE_LIMIT_MARKERS, result_text, stderr)
 
 
+def looks_like_subscription_unavailable(result_text: str, stderr: str) -> bool:
+    """Whether a *failed* dispatch failed because the Claude subscription
+    can't be used at all (billing). Same already-failed precondition."""
+    return _matches(SUBSCRIPTION_UNAVAILABLE_MARKERS, result_text, stderr)
+
+
 def looks_like_network_failure(result_text: str, stderr: str) -> bool:
     """Whether a failure was GitHub/network unreachability. Same
     already-failed precondition as the two above."""
@@ -489,10 +520,11 @@ def is_device_global_failure(result_text: str, stderr: str = "") -> bool:
     about to fail the same way, in seconds, for free.
 
     This is the single predicate `cmd_overnight` aborts a batch on. It
-    deliberately unifies three classes that present differently but demand
+    deliberately unifies four classes that present differently but demand
     the identical response (stop, and do not advance the resume cursor past
     the repos that never got a real attempt): broken credentials, an
-    exhausted usage window, and an unreachable GitHub.
+    exhausted usage window, a subscription that can't be used, and an
+    unreachable GitHub.
 
     Keep the underlying marker tuples broad (substring, not anchored): none
     of these wordings is a stable contract, and a missed match costs a whole
@@ -501,6 +533,7 @@ def is_device_global_failure(result_text: str, stderr: str = "") -> bool:
     return (
         looks_like_auth_failure(result_text, stderr)
         or looks_like_usage_limit(result_text, stderr)
+        or looks_like_subscription_unavailable(result_text, stderr)
         or looks_like_network_failure(result_text, stderr)
     )
 

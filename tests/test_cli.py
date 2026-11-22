@@ -17,12 +17,13 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from gardener import (
-    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, parpt, repo_lock,
+    dashboard, dev_loop, dispatch, doctor, garden, hub, live, merge_allowlist, notify, overnight, parpt, quota, repo_lock,
     cli, selfupdate, sessions, state, usage,
 )
 from gardener.cli import (
@@ -98,6 +99,9 @@ CONVENTIONS_URL = "https://example.invalid/conventions.git"
 #: cannot reach a real Discord webhook. See that function's docstring.
 _notifier_fence = None
 _harness_preflight_patch = None
+_usage_probe_patch = None
+_usage_wait_patch = None
+_REAL_SECONDS_TO_WAIT = quota.seconds_to_wait
 
 
 def setUpModule():
@@ -159,6 +163,21 @@ def setUpModule():
     global _harness_preflight_patch
     _harness_preflight_patch = patch("gardener.cli.check_harness_ready")
     _harness_preflight_patch.start()
+    # `cmd_overnight`'s usage pre-flight makes one real report-mode call
+    # (`quota.probe`). No test may reach `claude`, so it answers "usable"
+    # module-wide; TestOvernightUsagePreflight exercises it directly.
+    global _usage_probe_patch
+    _usage_probe_patch = patch(
+        "gardener.cli.quota.probe",
+        return_value=quota.ProbeResult(ok=True, blocked=False, text="OK"),
+    )
+    _usage_probe_patch.start()
+    # Nor may a test sleep until a real usage-limit reset: several feed
+    # cmd_overnight a genuine "resets 12am (UTC)" message. Waiting is off
+    # module-wide; the tests of the wait put `_REAL_SECONDS_TO_WAIT` back.
+    global _usage_wait_patch
+    _usage_wait_patch = patch("gardener.cli.quota.seconds_to_wait", return_value=None)
+    _usage_wait_patch.start()
 
 
 def tearDownModule():
@@ -169,6 +188,11 @@ def tearDownModule():
     if _harness_preflight_patch is not None:
         _harness_preflight_patch.stop()
         _harness_preflight_patch = None
+    global _usage_probe_patch, _usage_wait_patch
+    for fence in (_usage_probe_patch, _usage_wait_patch):
+        if fence is not None:
+            fence.stop()
+    _usage_probe_patch = _usage_wait_patch = None
     os.environ.pop(usage.ENV_ENABLED, None)
 
 
@@ -3703,14 +3727,15 @@ class TestCmdOvernightAuthAbort(unittest.TestCase):
         mock_notifier = mock_default_notifier.return_value
         with redirect_stderr(io.StringIO()):
             cmd_overnight(self._args())
-        # Two notifications: the dedicated auth alert plus the usual batch
-        # summary — the summary alone reads as ordinary per-repo errors and
-        # buries the one thing an operator has to act on.
-        self.assertEqual(mock_notifier.notify.call_count, 2)
+        # One notification: the dedicated auth alert, with the batch
+        # summary in its body — the summary alone reads as ordinary per-repo
+        # errors and buries the one thing an operator has to act on.
+        self.assertEqual(mock_notifier.notify.call_count, 1)
         title, message, level = mock_notifier.notify.call_args_list[0].args
         self.assertIn("authenticate", title.lower())
         self.assertEqual(level, Level.ERROR)
         self.assertIn("cursor", message.lower())
+        self.assertIn("attempted", message.lower())
 
     @patch("gardener.cli.notify.default_notifier")
     @patch("gardener.cli._dispatch_tend")
@@ -4743,3 +4768,149 @@ class TestScoreRepo(unittest.TestCase):
         outcome = self._score(mock_run_agent, "", ok=False)
         self.assertFalse(outcome.ok)
         self.assertEqual(parpt.load_scores(self.scores_path), {})
+
+
+class TestOvernightUsagePreflight(unittest.TestCase):
+    """The usage pre-flight: one probe before the night, one alert when
+    Claude can't be used, a wait when a usage limit resets in time, and no
+    per-repo FAILED alerts for a device-wide failure mid-run."""
+
+    BILLING = "Claude Code can't use your Claude subscription, usually because a payment is past due"
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmpdir.name)
+        self.garden_file = tmp / "garden.json"
+        self.garden_file.write_text(json.dumps(["o/a", "o/b", "o/c"]))
+        self.args = argparse.Namespace(
+            hours=8.0, model=None, garden_file=self.garden_file,
+            cursor_file=tmp / "cursor.json", state_db=tmp / "state.sqlite3",
+            concurrency=1, strategy="round-robin", random_seed=None, self_update=False,
+        )
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _titles(self, mock_notifier):
+        return [c.args[0] for c in mock_notifier.return_value.notify.call_args_list]
+
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.notify.default_notifier")
+    def test_unusable_subscription_skips_night_with_one_alert(self, mock_notifier, mock_dispatch):
+        blocked = quota.ProbeResult(ok=False, blocked=True, text=self.BILLING)
+        with patch("gardener.cli.quota.probe", return_value=blocked), redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_overnight(self.args), 0)
+        mock_dispatch.assert_not_called()
+        titles = self._titles(mock_notifier)
+        self.assertEqual(len(titles), 1)
+        self.assertIn("SKIPPED", titles[0])
+        self.assertIn("billing", titles[0])
+        self.assertFalse(self.args.cursor_file.exists())
+
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.notify.default_notifier")
+    def test_flaky_probe_goes_ahead(self, mock_notifier, mock_dispatch):
+        mock_dispatch.side_effect = lambda a: TendResult(exit_code=0, ok=True, result_text="")
+        flaky = quota.ProbeResult(ok=False, blocked=False, text="timed out")
+        with patch("gardener.cli.quota.probe", return_value=flaky), redirect_stderr(io.StringIO()):
+            cmd_overnight(self.args)
+        self.assertEqual(mock_dispatch.call_count, 3)
+
+    @patch("gardener.cli._dispatch_tend")
+    @patch("gardener.cli.notify.default_notifier")
+    def test_no_preflight_flag_skips_probe(self, mock_notifier, mock_dispatch):
+        mock_dispatch.side_effect = lambda a: TendResult(exit_code=0, ok=True, result_text="")
+        self.args.preflight = False
+        with patch("gardener.cli.quota.probe") as probe, redirect_stderr(io.StringIO()):
+            cmd_overnight(self.args)
+        probe.assert_not_called()
+
+    def test_preflight_waits_for_reset_then_reprobes(self):
+        limited = quota.ProbeResult(ok=False, blocked=True, text="session limit · resets 11pm (UTC)")
+        ok = quota.ProbeResult(ok=True, blocked=False, text="OK")
+        probes = iter([limited, ok])
+        slept = []
+        now = lambda: datetime(2026, 11, 22, 20, 0, tzinfo=timezone.utc)
+        with patch("gardener.cli.notify.default_notifier") as mock_notifier, redirect_stderr(io.StringIO()), \
+                patch("gardener.cli.quota.seconds_to_wait", _REAL_SECONDS_TO_WAIT):
+            go, waited = cli._overnight_preflight(
+                self.args, dispatch.HarnessConfig(), None, 8 * 3600, 3600,
+                probe_fn=lambda: next(probes), sleep_fn=slept.append, now_fn=now,
+            )
+        self.assertTrue(go)
+        self.assertEqual(slept, [3 * 3600 + quota.RESET_MARGIN_SECONDS])
+        self.assertEqual(waited, slept[0])
+        titles = self._titles(mock_notifier)
+        self.assertEqual(len(titles), 1)
+        self.assertIn("PAUSED", titles[0])
+
+    def test_preflight_skips_when_reset_too_late(self):
+        limited = quota.ProbeResult(ok=False, blocked=True, text="session limit · resets 11pm (UTC)")
+        now = lambda: datetime(2026, 11, 22, 20, 0, tzinfo=timezone.utc)
+        with patch("gardener.cli.notify.default_notifier") as mock_notifier, redirect_stderr(io.StringIO()), \
+                patch("gardener.cli.quota.seconds_to_wait", _REAL_SECONDS_TO_WAIT):
+            go, _ = cli._overnight_preflight(
+                self.args, dispatch.HarnessConfig(), None, 3 * 3600, 3600,
+                probe_fn=lambda: limited, sleep_fn=self.fail, now_fn=now,
+            )
+        self.assertFalse(go)
+        self.assertIn("usage/session limit", self._titles(mock_notifier)[0])
+
+    def test_preflight_skipped_with_routing(self):
+        go, waited = cli._overnight_preflight(
+            self.args, dispatch.HarnessConfig(), object(), 8 * 3600, 3600, probe_fn=self.fail,
+        )
+        self.assertEqual((go, waited), (True, 0.0))
+
+    def test_overnight_dispatch_asks_for_quiet_device_global(self):
+        seen = []
+
+        def fake(tend_args):
+            seen.append(tend_args)
+            return TendResult(exit_code=0, ok=True, result_text="")
+
+        with patch("gardener.cli._dispatch_tend", side_effect=fake):
+            cli._dispatch_one_for_overnight("o/a", self.args)
+        self.assertTrue(seen[0].quiet_device_global)
+
+    def test_quiet_device_global_only_for_overnight_and_device_wide(self):
+        quiet = argparse.Namespace(quiet_device_global=True)
+        loud = argparse.Namespace()
+        self.assertTrue(cli._quiet_device_global(quiet, self.BILLING))
+        self.assertTrue(cli._quiet_device_global(quiet, "", blocked=True))
+        self.assertFalse(cli._quiet_device_global(quiet, "tests failed in o/a"))
+        self.assertFalse(cli._quiet_device_global(loud, self.BILLING))
+
+    def _blocked_result(self, repo, text):
+        run = state.Run(repo=repo, mode="tend", outcome="error", timestamp=state.now_iso(), gap_summary=text)
+        return TendResult(exit_code=1, ok=False, result_text="", run=run, blocked=True)
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_mid_run_block_sends_one_alert(self, mock_notifier):
+        with patch("gardener.cli._dispatch_tend", side_effect=lambda a: self._blocked_result(a.repo, self.BILLING)), \
+                redirect_stderr(io.StringIO()):
+            cmd_overnight(self.args)
+        titles = self._titles(mock_notifier)
+        self.assertEqual(len(titles), 1)
+        self.assertIn("ABORTED", titles[0])
+
+    @patch("gardener.cli.notify.default_notifier")
+    def test_mid_run_usage_limit_waits_and_retries_blocked_repo(self, mock_notifier):
+        calls = []
+
+        def fake(tend_args):
+            calls.append(tend_args.repo)
+            if len(calls) == 2:
+                return self._blocked_result(tend_args.repo, "session limit · resets 11pm (UTC)")
+            return TendResult(exit_code=0, ok=True, result_text="")
+
+        with patch("gardener.cli._dispatch_tend", side_effect=fake), \
+                patch("gardener.cli._wait_for_usage_reset", return_value=60.0) as wait, \
+                redirect_stderr(io.StringIO()):
+            cmd_overnight(self.args)
+        wait.assert_called_once()
+        self.assertEqual(calls, ["o/a", "o/b", "o/b", "o/c"])
+        titles = self._titles(mock_notifier)
+        self.assertFalse(any("ABORTED" in t for t in titles))
+        cursor = json.loads(self.args.cursor_file.read_text())
+        self.assertIn("next_index", json.dumps(cursor))

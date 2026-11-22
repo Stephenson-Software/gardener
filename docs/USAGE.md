@@ -5,7 +5,7 @@ gardener align --repo <owner/repo> [--implement] [--file-issue] [--conventions-s
 gardener tend --repo <owner/repo> [--allow-merge]
 gardener allowlist list | add --repo <owner/repo> | remove --repo <owner/repo>
 gardener garden list | add --repo <owner/repo> | remove --repo <owner/repo>
-gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--broken-first-limit N] [--no-self-update]
+gardener overnight [--hours N] [--timeout SECONDS] [--concurrency N] [--strategy round-robin|issue-count|random|parpt] [--rescore-limit N] [--broken-first-limit N] [--no-self-update] [--no-preflight]
 gardener score [--repo <owner/repo>]... [--all] [--limit N] [--stale-days N] [--list [--json]] [--model M] [--timeout SECONDS]
 gardener doctor [-v | --verbose] [--offline]
 gardener status [--repo <owner/repo>] [--limit N]
@@ -392,6 +392,13 @@ run `git pull` by hand — so, by default, it fast-forwards gardener's own
 checkout to `origin/<current-branch>` before reading the garden, logging
 one line either way (`gardener: self-update: ...`) to the same stderr/run
 log every other setup step writes to. Pass `--no-self-update` to skip it.
+
+Next, before parpt scoring or any tend, it makes one tiny read-only Claude
+call to learn whether the subscription can be used tonight. If it can't (a
+spent usage window, billing, a broken login), the night is skipped, or waits
+for a usage-limit reset that fits the budget, with one alert instead of one
+FAILED alert per repo. Pass `--no-preflight` to skip that call. See
+[OVERNIGHT.md's "Usage limits"](OVERNIGHT.md#usage-limits).
 
 This only ever touches gardener's own repo checkout — never a target repo
 or the conventions repo (those have their own separate refresh mechanics,
